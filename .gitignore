@@ -24,3 +24,5 @@ data/
 chroma/
 postgres-data/
 redis-data/
+
+.idea
