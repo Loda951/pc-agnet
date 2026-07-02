@@ -8,7 +8,6 @@
 
 ## 2. Commands
 
-- 初始化环境变量：`cp .env.example .env`
 - 启动基础设施：`./scripts/podman-infra.sh up`
 - 查看服务状态：`./scripts/podman-infra.sh ps`
 - 安装后端依赖：`cd backend && python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"`
@@ -32,6 +31,7 @@
 - 测试文件命名为 `test_*.py`，测试函数命名为 `test_*`。
 - React 组件用 PascalCase，变量、hook、状态名用 camelCase。
 - 提交信息保持简短的祈使句或摘要，例如 `Build PC ecommerce agent MVP`。
+- 项目主线进程和每个feature的开发在`/docs`文件夹下
 
 ## 5. Hard Constraints
 
