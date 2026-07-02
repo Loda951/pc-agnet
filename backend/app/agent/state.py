@@ -1,6 +1,7 @@
 from typing import Any, TypedDict
 
 from app.schemas.catalog import ProductCard
+from app.schemas.chat import EvidenceItem
 from app.schemas.order import OrderCard
 
 
@@ -13,6 +14,7 @@ class AgentState(TypedDict, total=False):
     boundary: dict[str, Any]
     parsed: dict[str, Any]
     memory: list[dict[str, Any]]
+    evidence: list[EvidenceItem]
     products: list[ProductCard]
     order: OrderCard | None
     answer: str

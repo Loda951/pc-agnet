@@ -10,6 +10,16 @@ BoundaryClassificationValue = Literal[
 ]
 
 
+class EvidenceItem(BaseModel):
+    source_type: Literal["knowledge_document"]
+    source_id: int
+    title: str
+    document_type: str
+    snippet: str
+    score: float | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation_id: int | None = None
@@ -32,6 +42,7 @@ class ChatResponse(BaseModel):
     answer: str
     intent: str
     boundary: BoundaryClassification
+    evidence: list[EvidenceItem] = Field(default_factory=list)
     products: list[ProductCard] = Field(default_factory=list)
     order: OrderCard | None = None
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)

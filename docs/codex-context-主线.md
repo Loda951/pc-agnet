@@ -28,13 +28,14 @@
 - 已完成：基于规则的意图识别，覆盖 `product_recommendation`、`order_status`、`after_sales`、`general`。
 - 已完成：商品推荐、最近订单查询、售后意图回复可通过 DeepSeek 生成中文回答。
 - 已完成：会话、消息、agent run、工具调用和简单长期记忆持久化。
+- 已完成：知识库 RAG 基础闭环，`knowledge_document` 可同步到 ChromaDB，售后政策、FAQ、店铺规则和外设知识回答可返回 evidence。
 - 部分完成：多轮上下文依赖 `conversation_id` 和有限偏好记忆，没有完整指代消解。
-- 未完成：`design.md` 要求的 `in_scope_auto` / `human_handoff_required` / `out_of_scope` 三态边界分类尚未实现。
+- 已完成：`design.md` 要求的 `in_scope_auto` / `human_handoff_required` / `out_of_scope` 三态边界分类基础版本。
 
 ### 数据与种子
 
 - 已完成：Alembic 初始 PostgreSQL schema，覆盖用户、商品 EAV、SKU/SPU、订单、物流、会话、工具调用、记忆、知识文档、售后表。
-- 已完成：`scripts.seed_demo` 导入 demo 用户、5 个 SKU、1 个订单、2 条知识文档。
+- 已完成：`scripts.seed_demo` 导入 demo 用户、5 个 SKU、1 个订单、覆盖 policy/FAQ/store_rule/peripheral_knowledge 的知识文档。
 - 已完成：`import_pc_part_dataset.py` 和 `dataset_mapper.py` 可将 `docyx/pc-part-dataset` JSON 映射到本地商品模型。
 - 未完成：真实 mouse、keyboard、headphones 等数据集尚未导入。
 
@@ -82,21 +83,22 @@
 
 ### 数据流
 
-- 前端调用 `frontend/src/api.ts`，默认请求 `http://localhost:8000`。
+- 前端调用 `frontend/src/api.ts`，默认同源请求 `/api`，开发环境由 Vite proxy 转发到 `http://127.0.0.1:8000`。
 - `/api/chat` 接收用户问题后进入 `AgentRuntime`。
-- LangGraph 流程为 `load_context -> route_intent -> retrieve -> generate -> persist`。
-- `route_intent` 使用规则识别意图；`retrieve` 根据意图调用商品或订单 repository。
-- `generate` 在有 LLM key 时调用 DeepSeek，否则使用后端 fallback 文案。
+- LangGraph 流程为 `load_context -> classify_boundary -> route_intent -> retrieve -> retrieve_knowledge -> generate -> persist`。
+- `classify_boundary` 先判断 read-only 边界；`route_intent` 使用规则识别业务意图；`retrieve` 根据意图调用商品或订单 repository。
+- `retrieve_knowledge` 将 PostgreSQL `knowledge_document` 同步到 ChromaDB 并返回 evidence。
+- `generate` 在有 LLM key 时调用 DeepSeek，否则使用后端 fallback 文案；知识类回答会携带依据。
 - `persist` 写入用户消息、助手消息、agent run、工具调用和简单记忆。
-- 售后创建当前不经过 Agent 自动执行，而由前端表单调用 `/api/after-sales` 写入工单。
+- 售后办理当前不由 Agent 自动执行；前端会通过聊天入口触发人工接管提示，`/api/after-sales` 保留但降级为 `409 human_handoff_required`。
 
 ## 已知问题与遗留债务
 
-- 产品边界债务：`design.md` 明确当前阶段 read-only，但 MVP 已提供 demo 售后工单创建，需要决定保留为 demo-only、改为人工接管入口，还是推进到正式写操作能力。
-- 边界分类缺口：尚未实现 `in_scope_auto`、`human_handoff_required`、`out_of_scope` 的统一分类和可观测输出。
+- 产品边界债务：售后写操作已降级为人工接管入口，但真实人工队列或工单流转尚未接入。
+- 边界分类生产化债务：已实现 `in_scope_auto`、`human_handoff_required`、`out_of_scope` 规则版分类，后续需要评测集和更多可观测指标。
 - 鉴权缺口：订单和售后只依赖默认用户或 query `user_id`，没有登录态、权限校验、租户隔离或敏感信息保护。
-- RAG 缺口：PostgreSQL 有 `knowledge_document`，ChromaDB 已启动，但知识写入、向量检索和 Agent 节点尚未接入。
-- Evidence 缺口：LLM 回答接收结构化上下文，但没有显式引用来源、证据 ID 或规则出处。
+- RAG 生产化债务：当前使用本地 deterministic hash embedding 支撑 demo 和测试，后续可接入生产级 embedding provider，并改造为增量同步。
+- Evidence 范围债务：当前 evidence 主要覆盖知识文档；商品、订单、物流事实尚未统一纳入 evidence schema。
 - 多轮能力有限：当前只保存会话和简单偏好记忆，缺少稳健指代消解、上一款/这个商品承接、多子任务拆分。
 - 数据质量有限：demo seed 数据量小，推荐结果可能为空；真实商品数据集尚未批量导入。
 - 测试覆盖不足：当前测试主要覆盖配置解析和 dataset mapper，缺少 API 集成测试、Agent 状态机测试、权限/边界测试。
@@ -108,24 +110,24 @@
 ### 产品范围
 
 - 设计目标：当前阶段只做 PC 外设电商 read-only 智能问答。
-- 当前实现：商品和订单查询基本符合 read-only；售后模块已能创建工单，超出 `design.md` 当前阶段范围。
-- 差距判断：售后写操作是最大范围偏差，应优先明确产品决策。
+- 当前实现：商品和订单查询基本符合 read-only；售后办理类请求已降级为人工接管提示。
+- 差距判断：当前仍缺真实人工客服队列、鉴权与更完整的权限隔离。
 
 ### Must Have 能力
 
 - 商品咨询、推荐、价格、库存问答：部分实现，基于 SKU/SPU/属性检索和 LLM 生成；对比和兼容性问答仍较弱。
 - 订单状态、订单内容、物流查询：已实现 demo 路径，能读取最新订单和指定订单。
-- 售后政策与流程说明：部分实现，demo 知识文档已入库但未接入 RAG；Agent 对售后更多是提示创建工单。
-- FAQ 与店铺知识问答：数据表和 demo 文档存在，但自动检索未实现。
+- 售后政策与流程说明：基础实现，demo 知识文档已接入 RAG；办理类售后请求仍按边界分类转人工。
+- FAQ 与店铺知识问答：基础实现，demo 文档可通过 ChromaDB 检索并返回 evidence。
 - 多轮上下文承接：部分实现，支持 conversation_id 和偏好记忆；缺少完整指代消解。
 - 信息不足时澄清：部分实现，fallback 和 LLM 可能追问，但没有显式澄清状态和规则。
-- 三态边界分类：未实现，当前只有业务意图分类。
+- 三态边界分类：基础实现，当前为规则分类。
 
 ### Should Have 能力
 
 - 一轮多子任务拆分：未实现专门规划逻辑。
 - 图片、PDF、docx 辅助信息提取：未实现。
-- 关键事实 evidence 约束：未实现显式 evidence 输出。
+- 关键事实 evidence 约束：基础实现，知识文档回答可显式输出 evidence；订单和商品事实 evidence 尚未统一化。
 - mixed-intent 分段回复：依赖 LLM 自然生成，没有结构化保障。
 
 ### Safety 和质量要求
@@ -158,6 +160,7 @@
 
 ### P0：接入知识库 RAG 与 evidence 输出
 
+- 状态：基础版本已完成，详见 `docs/feature/接入知识库 RAG 与 evidence 输出.md`。
 - 目标：把 `knowledge_document` 写入 ChromaDB，新增检索节点，让售后政策、FAQ、店铺规则和外设知识回答带可追溯依据。
 - 对核心价值的影响：显著提升事实可信度，补齐 `design.md` 中政策/FAQ/知识问答和 evidence 质量要求。
 - 技术复杂度评估：中等偏高；需要 embeddings/provider 决策、Chroma collection 管理、检索结果 schema、prompt 注入和回归测试。
@@ -186,5 +189,5 @@
 
 ### 最优先推荐
 
-- 第一优先：收敛 read-only 边界与人工接管策略。理由是它直接修正 `design.md` 与当前 MVP 最大偏差，避免继续在不清晰边界上扩展写操作。
-- 第二优先：接入知识库 RAG 与 evidence 输出。理由是它补齐问答产品的可信度基础，并能支撑售后政策、FAQ、店铺规则等高频客服场景。
+- 第一优先：补齐集成测试与可回归验收集。理由是边界分类和 RAG 已进入核心 Agent 路径，后续改 prompt、schema 或检索逻辑都需要稳定回归网。
+- 第二优先：导入真实商品数据并强化推荐/对比/兼容性。理由是当前商品数据量仍偏 demo，推荐质量和 evidence 可信度会受数据质量限制。

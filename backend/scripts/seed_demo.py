@@ -293,29 +293,65 @@ async def _seed_order(session, user_id: int, sku: Sku) -> None:
 
 
 async def _seed_knowledge(session) -> None:
-    existing = (
-        await session.execute(
-            select(KnowledgeDocument.id).where(KnowledgeDocument.title == "七天无理由退货政策")
+    documents = [
+        KnowledgeDocument(
+            title="七天无理由退货政策",
+            document_type="policy",
+            content=(
+                "自签收次日起七天内，商品未影响二次销售，可申请七天无理由退货。"
+                "人为损坏、缺少配件或包装严重损坏可能影响审核。"
+            ),
+            metadata_json={"scenario": "return"},
+        ),
+        KnowledgeDocument(
+            title="外设保修说明",
+            document_type="policy",
+            content=(
+                "鼠标、键盘、耳机等外设通常享受一年有限保修。"
+                "具体以商品页面和品牌官方政策为准。"
+            ),
+            metadata_json={"scenario": "warranty"},
+        ),
+        KnowledgeDocument(
+            title="发票与发货 FAQ",
+            document_type="faq",
+            content=(
+                "订单支付成功后通常会在二十四小时内安排发货。"
+                "电子发票可在订单完成后申请，发票抬头以用户提交信息为准。"
+            ),
+            metadata_json={"scenario": "invoice_shipping"},
+        ),
+        KnowledgeDocument(
+            title="店铺价保规则",
+            document_type="store_rule",
+            content=(
+                "同一店铺同一 SKU 在签收后七天内出现页面直降，可联系人工客服核验价保。"
+                "优惠券、限量秒杀和赠品变化不一定纳入价保范围。"
+            ),
+            metadata_json={"scenario": "price_protection"},
+        ),
+        KnowledgeDocument(
+            title="机械键盘轴体选购知识",
+            document_type="peripheral_knowledge",
+            content=(
+                "红轴触发压力较轻、声音小，适合办公和游戏；青轴段落感强、声音更清脆，"
+                "更适合喜欢明显反馈且不介意噪音的用户。"
+            ),
+            metadata_json={"category": "键盘"},
+        ),
+    ]
+    existing_titles = set(
+        (
+            await session.execute(
+                select(KnowledgeDocument.title).where(
+                    KnowledgeDocument.title.in_([document.title for document in documents])
+                )
+            )
         )
-    ).scalar_one_or_none()
-    if existing:
-        return
-    session.add_all(
-        [
-            KnowledgeDocument(
-                title="七天无理由退货政策",
-                document_type="policy",
-                content="自签收次日起七天内，商品未影响二次销售，可申请七天无理由退货。人为损坏、缺少配件或包装严重损坏可能影响审核。",
-                metadata_json={"scenario": "return"},
-            ),
-            KnowledgeDocument(
-                title="外设保修说明",
-                document_type="policy",
-                content="鼠标、键盘、耳机等外设通常享受一年有限保修。具体以商品页面和品牌官方政策为准。",
-                metadata_json={"scenario": "warranty"},
-            ),
-        ]
+        .scalars()
+        .all()
     )
+    session.add_all([document for document in documents if document.title not in existing_titles])
 
 
 if __name__ == "__main__":

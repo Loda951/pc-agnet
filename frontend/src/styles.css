@@ -350,7 +350,13 @@ button {
   gap: 10px;
 }
 
+.evidence-list {
+  display: grid;
+  gap: 10px;
+}
+
 .product-card,
+.evidence-card,
 .order-box,
 .handoff-note,
 .boundary-card,
@@ -405,6 +411,42 @@ button {
 .product-foot span {
   color: #0b6b57;
   font-size: 13px;
+}
+
+.evidence-card {
+  padding: 12px;
+}
+
+.evidence-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.evidence-card-head strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.evidence-card-head span {
+  flex: 0 0 auto;
+  color: #0b6b57;
+  background: #ecf8f3;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.evidence-card p {
+  margin: 8px 0;
+  color: #516168;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.evidence-card small {
+  color: #69777d;
 }
 
 .order-box {

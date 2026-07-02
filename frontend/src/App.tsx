@@ -1,5 +1,6 @@
 import {
   Ban,
+  BookOpenText,
   Bot,
   Boxes,
   CheckCircle2,
@@ -15,7 +16,13 @@ import {
 } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
 import { sendChat } from "./api";
-import type { BoundaryClassification, ChatMessage, OrderCard, ProductCard } from "./types";
+import type {
+  BoundaryClassification,
+  ChatMessage,
+  EvidenceItem,
+  OrderCard,
+  ProductCard
+} from "./types";
 
 const quickPrompts = [
   "推荐 300 元以内无线鼠标",
@@ -42,6 +49,7 @@ export default function App() {
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [order, setOrder] = useState<OrderCard | null>(null);
   const [boundary, setBoundary] = useState<BoundaryClassification | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
   const [ticketReason, setTicketReason] = useState("商品不符合预期");
   const [ticketType, setTicketType] = useState("return");
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +82,9 @@ export default function App() {
       if (response.boundary.classification === "out_of_scope") {
         setProducts([]);
         setOrder(null);
+        setEvidence([]);
       } else {
+        setEvidence(response.evidence);
         if (response.products.length) setProducts(response.products);
         if (response.order) setOrder(response.order);
       }
@@ -177,6 +187,19 @@ export default function App() {
 
         <section className="panel-section">
           <div className="section-title">
+            <BookOpenText size={18} />
+            <h2>依据</h2>
+          </div>
+          <div className="evidence-list">
+            {evidence.map((item) => (
+              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
+            ))}
+            {!evidence.length && <EmptyState text="暂无知识库依据" />}
+          </div>
+        </section>
+
+        <section className="panel-section">
+          <div className="section-title">
             <PackageSearch size={18} />
             <h2>商品</h2>
           </div>
@@ -273,6 +296,22 @@ function BoundaryStatusCard({ boundary }: { boundary: BoundaryClassification }) 
       </div>
       <p>{boundary.reason}</p>
     </div>
+  );
+}
+
+function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
+  return (
+    <article className="evidence-card">
+      <div className="evidence-card-head">
+        <strong>{evidence.title}</strong>
+        <span>{evidence.document_type}</span>
+      </div>
+      <p>{evidence.snippet}</p>
+      <small>
+        #{evidence.source_id}
+        {typeof evidence.score === "number" ? ` · ${Math.round(evidence.score * 100)}%` : ""}
+      </small>
+    </article>
   );
 }
 

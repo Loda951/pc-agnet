@@ -7,7 +7,8 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
 - 商品推荐与参数问答：鼠标、键盘、耳机、显示器等 PC 外设。
 - 商品对比：基于 SKU 规格、筛选属性和价格。
 - 订单查询：订单、订单明细、物流状态。
-- 退换货工单：基于订单明细创建退货、换货、维修、退款工单。
+- 售后说明：退换货、维修、保修等 read-only 政策问答，办理类请求转人工。
+- 知识库 RAG：从 PostgreSQL `knowledge_document` 同步到 ChromaDB，并在回答中输出依据。
 - 长期记忆：记录用户偏好，后续推荐时可复用。
 - 本地数据服务：PostgreSQL、Redis、ChromaDB 通过 Podman 在本地跑；LLM 默认调 DeepSeek 的 OpenAI-compatible 接口。
 
@@ -36,6 +37,7 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
    pip install -e ".[dev]"
    alembic upgrade head
    python -m scripts.seed_demo
+   python -m scripts.sync_knowledge
    uvicorn app.main:app --reload
    ```
 

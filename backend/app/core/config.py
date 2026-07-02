@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     chroma_host: str = "localhost"
     chroma_port: int = 8001
+    knowledge_collection: str = "pc_agent_knowledge"
+    knowledge_score_threshold: float = 0.16
 
     llm_provider: str = "deepseek"
     llm_api_key: str = ""

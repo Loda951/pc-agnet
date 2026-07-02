@@ -19,14 +19,27 @@ from app.models import AgentRun
 from app.repositories.catalog import CatalogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.orders import OrderRepository
-from app.schemas.chat import BoundaryClassification, ChatRequest, ChatResponse, SuggestedAction
+from app.schemas.chat import (
+    BoundaryClassification,
+    ChatRequest,
+    ChatResponse,
+    EvidenceItem,
+    SuggestedAction,
+)
+from app.services.knowledge_rag import ChromaKnowledgeService
 
 
 class AgentRuntime:
-    def __init__(self, session: AsyncSession, settings: Settings):
+    def __init__(
+        self,
+        session: AsyncSession,
+        settings: Settings,
+        knowledge_service: ChromaKnowledgeService | None = None,
+    ):
         self.session = session
         self.settings = settings
         self.llm = build_chat_model(settings)
+        self.knowledge_service = knowledge_service or ChromaKnowledgeService(session, settings)
 
     async def run(self, request: ChatRequest) -> ChatResponse:
         graph = self._build_graph()
@@ -42,6 +55,7 @@ class AgentRuntime:
             answer=result["answer"],
             intent=result["intent"],
             boundary=BoundaryClassification(**result["boundary"]),
+            evidence=_normalize_evidence(result.get("evidence", [])),
             products=result.get("products", []),
             order=result.get("order"),
             suggested_actions=[
@@ -55,6 +69,7 @@ class AgentRuntime:
         workflow.add_node("classify_boundary", self._classify_boundary)
         workflow.add_node("route_intent", self._route_intent)
         workflow.add_node("retrieve", self._retrieve)
+        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("generate", self._generate)
         workflow.add_node("persist", self._persist)
         workflow.set_entry_point("load_context")
@@ -65,7 +80,8 @@ class AgentRuntime:
             {"auto": "route_intent", "blocked": "generate"},
         )
         workflow.add_edge("route_intent", "retrieve")
-        workflow.add_edge("retrieve", "generate")
+        workflow.add_edge("retrieve", "retrieve_knowledge")
+        workflow.add_edge("retrieve_knowledge", "generate")
         workflow.add_edge("generate", "persist")
         workflow.add_edge("persist", END)
         return workflow.compile()
@@ -110,6 +126,7 @@ class AgentRuntime:
             parsed["order_id"] = extract_order_id(state["message"])
         state["intent"] = intent
         state["parsed"] = parsed
+        state["evidence"] = []
         return state
 
     async def _retrieve(self, state: AgentState) -> AgentState:
@@ -144,6 +161,30 @@ class AgentRuntime:
             )
         return state
 
+    async def _retrieve_knowledge(self, state: AgentState) -> AgentState:
+        repo = ConversationRepository(self.session)
+        try:
+            evidence = await self.knowledge_service.retrieve(state["message"])
+            state["evidence"] = evidence
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                {"query": state["message"], "limit": 3},
+                {
+                    "count": len(evidence),
+                    "evidence": [item.model_dump(mode="json") for item in evidence],
+                },
+            )
+        except Exception as exc:
+            state["evidence"] = []
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                {"query": state["message"], "limit": 3},
+                {"error": type(exc).__name__, "message": str(exc)},
+            )
+        return state
+
     async def _generate(self, state: AgentState) -> AgentState:
         if state["boundary"]["classification"] != "in_scope_auto":
             state["answer"] = self._generate_boundary_answer(state)
@@ -163,6 +204,7 @@ class AgentRuntime:
             {
                 "intent": state["intent"],
                 "boundary": state["boundary"],
+                "evidence": _dump_evidence(state.get("evidence", [])),
                 "products": [p.model_dump(mode="json") for p in state.get("products", [])],
                 "order": state["order"].model_dump(mode="json") if state.get("order") else None,
             },
@@ -180,6 +222,7 @@ class AgentRuntime:
             "intent": state["intent"],
             "boundary": state["boundary"],
             "memory": state.get("memory", []),
+            "evidence": _dump_evidence(state.get("evidence", [])),
             "products": [p.model_dump(mode="json") for p in state.get("products", [])],
             "order": state["order"].model_dump(mode="json") if state.get("order") else None,
         }
@@ -196,6 +239,7 @@ class AgentRuntime:
         return boundary.display_message
 
     def _generate_fallback(self, state: AgentState) -> str:
+        evidence = _normalize_evidence(state.get("evidence", []))
         if state["intent"] == "product_recommendation":
             products = state.get("products", [])
             if not products:
@@ -213,7 +257,7 @@ class AgentRuntime:
             lines.append(
                 "如果你告诉我主要用途，比如 FPS、办公、剪辑或通勤，我可以再给你排个优先级。"
             )
-            return "\n".join(lines)
+            return _append_evidence("\n".join(lines), evidence)
 
         if state["intent"] == "order_status":
             order = state.get("order")
@@ -223,18 +267,29 @@ class AgentRuntime:
             ship_line = "暂未发货"
             if logistics and logistics.logistic_no:
                 ship_line = f"{logistics.express_company or '快递'} {logistics.logistic_no}"
-            return (
+            return _append_evidence(
                 f"订单 {order.id} 当前是「{order.status_label}」，实付 ¥{order.pay_amount}。\n"
                 f"物流：{ship_line}。\n"
                 f"订单里共有 {len(order.items)} 个明细，"
-                "需要退换货的话，我可以帮你整理信息并转人工处理。"
+                "需要退换货的话，我可以帮你整理信息并转人工处理。",
+                evidence,
             )
 
         if state["intent"] == "after_sales":
+            if evidence:
+                lines = ["我查到这些售后政策依据："]
+                lines.extend(_evidence_lines(evidence))
+                lines.append(
+                    "如果要申请办理、确认责任或承诺退款，需要转人工客服处理。"
+                )
+                return "\n".join(lines)
             return (
                 "我可以说明退换货、退款和维修的基础流程；如果要申请办理、确认责任或承诺退款，"
                 "需要转人工客服处理。"
             )
+
+        if evidence:
+            return "\n".join(["我按知识库信息先回答：", *_evidence_lines(evidence)])
 
         return (
             "我可以帮你推荐 PC 外设、查询订单物流，也可以说明售后流程。"
@@ -269,6 +324,8 @@ def _json_safe_state(state: AgentState) -> dict[str, Any]:
     for key, value in state.items():
         if key == "products":
             result[key] = [item.model_dump(mode="json") for item in value]
+        elif key == "evidence":
+            result[key] = _dump_evidence(value)
         elif key == "order" and value is not None:
             result[key] = value.model_dump(mode="json")
         elif isinstance(value, Decimal):
@@ -276,3 +333,21 @@ def _json_safe_state(state: AgentState) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _normalize_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[EvidenceItem]:
+    return [item if isinstance(item, EvidenceItem) else EvidenceItem(**item) for item in items]
+
+
+def _dump_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item.model_dump(mode="json") for item in _normalize_evidence(items)]
+
+
+def _append_evidence(answer: str, evidence: list[EvidenceItem]) -> str:
+    if not evidence:
+        return answer
+    return "\n\n参考依据：\n" + "\n".join(_evidence_lines(evidence))
+
+
+def _evidence_lines(evidence: list[EvidenceItem]) -> list[str]:
+    return [f"- [{item.document_type}] {item.title}：{item.snippet}" for item in evidence[:3]]
