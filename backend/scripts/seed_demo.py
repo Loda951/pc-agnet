@@ -87,6 +87,10 @@ DEMO_PARTS = [
 ]
 
 
+def utc_now_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 async def main() -> None:
     async with AsyncSessionLocal() as session:
         user = await _get_or_create_user(session)
@@ -243,7 +247,7 @@ async def _seed_order(session, user_id: int, sku: Sku) -> None:
     order_id = 202607020001
     if await session.get(OrderInfo, order_id):
         return
-    created_at = datetime.now(UTC) - timedelta(days=1)
+    created_at = utc_now_naive() - timedelta(days=1)
     order = OrderInfo(
         id=order_id,
         user_id=user_id,

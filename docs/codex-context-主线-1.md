@@ -7,14 +7,16 @@
 - 直接读取 Gemini 分享页完整建表内容：放弃原因是页面只稳定暴露标题，核心 SQL 后续改用用户粘贴的文本附件。
 - 直接照搬 MySQL DDL：放弃原因是项目本地数据库选 PostgreSQL，需要将 `AUTO_INCREMENT/json/datetime/COMMENT` 等方言迁移为 PostgreSQL 写法。
 - 将 `docyx/pc-part-dataset` 当完整商城数据库：放弃原因是该数据集只有商品参数和美元价格，缺少库存、中文详情、订单、物流和售后数据。
-- 本地运行 LLM：放弃原因是用户明确选择 LLM 调接口，优先 Qwen 或 DeepSeek。
-- 立即用 Docker Compose 验证迁移和 seed：放弃原因是当前环境没有 `docker` 命令，无法启动 PostgreSQL/Redis/Chroma。
+- 本地运行 LLM：放弃原因是用户明确选择 LLM 调接口，当前默认使用 DeepSeek。
+- 立即用容器编排验证迁移和 seed：放弃原因是当时环境没有可用容器运行时，无法启动 PostgreSQL/Redis/Chroma。
+- 使用 `podman compose` 启动本地服务：放弃原因是当前机器没有 compose provider，改用原生 Podman 脚本。
 - 未授权安装前端依赖：放弃原因是普通 `npm install` 卡在网络下载阶段，后续用提升权限完成。
 - 未授权安装后端依赖：放弃原因是普通 pip 安装因 DNS/网络受限失败，后续用提升权限完成。
 
 ## 3. 关键文件和模块关系（仅限本轮修改或引用的文件）
 
-- `docker-compose.yml`：定义本地 PostgreSQL、Redis、ChromaDB，供后端配置使用。
+- `compose.yml`：保留本地 PostgreSQL、Redis、ChromaDB 编排参考。
+- `scripts/podman-infra.sh`：使用原生 Podman 启停 PostgreSQL、Redis、ChromaDB，不依赖 compose provider。
 - `.env.example`：统一配置 `DATABASE_URL`、`REDIS_URL`、`CHROMA_HOST/PORT`、`LLM_PROVIDER`、`LLM_API_KEY`、`LLM_MODEL`。
 - `backend/app/main.py`：FastAPI 入口，挂载 health、chat、catalog、orders、after-sales 路由。
 - `backend/app/core/config.py`：读取环境配置，供数据库、LLM、API 路由使用。
@@ -36,20 +38,23 @@
 - `frontend/src/App.tsx`：客服工作台主界面，包含聊天、商品结果、订单上下文、售后工单区域。
 - `frontend/src/api.ts`：封装前端调用 `/api/chat` 和 `/api/after-sales`。
 - `frontend/src/types.ts`：前端类型定义，与后端响应 schema 对应。
+- 本地 Podman 验证：PostgreSQL/Redis/ChromaDB 已启动，`/api/health` 返回 ok，demo seed 已导入。
+- 端到端验证：真实 DeepSeek `/api/chat` 商品推荐和订单查询已通过，售后创建 demo 工单 `#1` 已通过。
 - `/Users/loda/.codex/attachments/d5037dd7-31fa-43a4-9c7d-0369c6281d43/pasted-text.txt`：用户提供的 MySQL 风格核心建表语句参考。
 - `https://github.com/docyx/pc-part-dataset`：已确认可作为商品种子数据来源。
 
 ## 4. 已做改动（列出文件路径 + 改动摘要）
 
 - `.gitignore`：忽略 `.env`、Python/Node 构建缓存、虚拟环境、前端 dist、本地数据目录等。
-- `.env.example`：新增本地服务、LLM provider、CORS、默认用户配置模板。
+- `.env.example`：新增本地服务、DeepSeek 默认 LLM provider、CORS、默认用户配置模板。
 - `README.md`：新增项目说明、MVP 能力、快速启动、数据集和 LLM 配置说明。
-- `docker-compose.yml`：新增 PostgreSQL、Redis、ChromaDB 本地编排。
+- `compose.yml`：新增 PostgreSQL、Redis、ChromaDB 本地编排参考。
+- `scripts/podman-infra.sh`：新增原生 Podman 本地基础设施脚本。
 - `backend/pyproject.toml`：新增后端依赖、dev 依赖、pytest/ruff/setuptools 配置。
 - `backend/alembic.ini`：新增 Alembic 配置。
 - `backend/alembic/env.py`：新增异步 SQLAlchemy Alembic 环境。
-- `backend/alembic/versions/0001_initial_schema.py`：新增 PostgreSQL 初始 schema 迁移。
-- `backend/app/core/config.py`：新增 pydantic-settings 配置读取。
+- `backend/alembic/versions/0001_initial_schema.py`：新增 PostgreSQL 初始 schema 迁移，并拆分 DDL 以兼容 asyncpg。
+- `backend/app/core/config.py`：新增 pydantic-settings 配置读取，支持逗号分隔和 JSON 数组格式的 CORS 配置。
 - `backend/app/core/database.py`：新增 async SQLAlchemy session 工厂。
 - `backend/app/core/llm.py`：新增 Qwen/DeepSeek OpenAI-compatible ChatOpenAI 构建逻辑。
 - `backend/app/models/*.py`：新增商城、会话、记忆、售后领域模型。
@@ -59,8 +64,9 @@
 - `backend/app/api/routers/*.py`：新增 health、chat、catalog、orders、after-sales API。
 - `backend/app/main.py`：新增 FastAPI 应用入口与 CORS/router 挂载。
 - `backend/app/services/dataset_mapper.py`：新增 pc-part-dataset 导入映射逻辑。
-- `backend/scripts/seed_demo.py`：新增 demo 数据生成脚本。
+- `backend/scripts/seed_demo.py`：新增 demo 数据生成脚本，使用 naive UTC datetime 匹配当前模型列。
 - `backend/scripts/import_pc_part_dataset.py`：新增外部 JSON 数据集导入脚本。
+- `backend/tests/test_config.py`：新增环境配置解析测试。
 - `backend/tests/test_dataset_mapper.py`：新增数据集映射单元测试。
 - `frontend/package.json`：新增 React/Vite/TypeScript/lucide 依赖与构建脚本。
 - `frontend/package-lock.json`：锁定前端依赖版本。
@@ -76,18 +82,14 @@
 
 ## 5. 未完成事项（列出具体待办项，每项不超过一行）
 
-- 安装或启用 Docker 后启动 PostgreSQL/Redis/ChromaDB。
-- 执行 `cd backend && alembic upgrade head` 验证迁移。
-- 执行 `cd backend && python -m scripts.seed_demo` 导入 demo 数据。
-- 配置真实 `LLM_API_KEY`、`LLM_PROVIDER`、`LLM_MODEL`。
-- 用真实数据库跑一次 `/api/chat`、商品推荐、订单查询、售后创建端到端流程。
 - 将 ChromaDB RAG 写入和检索节点接入当前 LangGraph。
 - 增加更多订单/售后/Agent 集成测试。
 - 从 `docyx/pc-part-dataset` 下载并导入 mouse/keyboard/headphones 等真实 JSON 数据。
 
 ## 6. 不要重复尝试的方向（列出方向 + 失败原因）
 
-- 再用普通 `docker compose up` 期望启动本地服务：失败原因是当前环境没有 `docker` 命令。
+- 再用旧的 `docker compose up` 启动本地服务：失败原因是项目已迁移到 Podman。
+- 再依赖 `podman compose` 启动本地服务：失败原因是当前机器没有 compose provider，项目已改用原生 Podman 脚本。
 - 再用普通 `npm install` 长时间等待：失败原因是网络下载会卡住，需要提升权限。
 - 再用普通 pip 安装后端依赖：失败原因是 DNS/网络受限，需要提升权限。
 - 再直接用 MySQL 原始 DDL 跑 PostgreSQL：失败原因是方言不兼容，必须用 Alembic 里的 PostgreSQL 迁移。
@@ -96,11 +98,7 @@
 
 ## 7. 下一步建议（优先级排序，每条含执行动作）
 
-- P0：安装/打开 Docker，并执行 `docker compose up -d postgres redis chroma`。
-- P0：执行 `cd backend && alembic upgrade head && python -m scripts.seed_demo` 初始化数据库。
-- P0：访问 `http://localhost:8000/api/health`，确认 PostgreSQL/Redis/Chroma 从 degraded 变为 ok。
-- P1：配置 `.env` 中的 Qwen 或 DeepSeek API key，并用 `/api/chat` 跑一次真实问答。
-- P1：在前端 `http://localhost:5173/` 测试商品推荐、最近订单查询、创建售后工单。
+- P0：在前端 `http://localhost:5173/` 测试商品推荐、最近订单查询、创建售后工单。
 - P1：下载 `docyx/pc-part-dataset` 的 `mouse.json`、`keyboard.json`、`headphones.json`，用 `scripts/import_pc_part_dataset.py` 导入。
 - P2：把 `knowledge_document` 写入 ChromaDB，并在 LangGraph 中加入 RAG 检索节点。
 - P2：补充 FastAPI 集成测试，覆盖 chat、orders、after-sales 的数据库路径。
