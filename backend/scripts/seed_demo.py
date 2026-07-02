@@ -1,0 +1,318 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from sqlalchemy import select
+
+from app.core.database import AsyncSessionLocal
+from app.models import (
+    AppUser,
+    AttributeKey,
+    AttributeValue,
+    Brand,
+    Category,
+    GoodsAttributeRelation,
+    KnowledgeDocument,
+    OrderInfo,
+    OrderItem,
+    OrderLogistics,
+    Sku,
+    Spu,
+)
+from app.services.dataset_mapper import ImportedProduct, attribute_flags, normalize_part_record
+
+DEMO_PARTS = [
+    (
+        "mouse",
+        {
+            "name": "Logitech G502 Hero",
+            "price": 44.77,
+            "tracking_method": "Optical",
+            "connection_type": "Wired",
+            "max_dpi": 25600,
+            "hand_orientation": "Right",
+            "color": "Black",
+        },
+    ),
+    (
+        "mouse",
+        {
+            "name": "Razer Viper V3 Pro",
+            "price": 139.99,
+            "tracking_method": "Optical",
+            "connection_type": "Wired, Wireless",
+            "max_dpi": 35000,
+            "hand_orientation": "Right",
+            "color": "White",
+        },
+    ),
+    (
+        "keyboard",
+        {
+            "name": "RK Royal Kludge RK61",
+            "price": 49.99,
+            "style": "Mini",
+            "switches": "RK Red",
+            "backlit": "White",
+            "tenkeyless": True,
+            "connection_type": "Wired, Wireless, Bluetooth Wireless",
+            "color": "White",
+        },
+    ),
+    (
+        "keyboard",
+        {
+            "name": "Razer Huntsman Mini",
+            "price": 89,
+            "style": "Mini",
+            "switches": "Razer Red Optical Linear",
+            "backlit": "RGB",
+            "tenkeyless": True,
+            "connection_type": "Wired",
+            "color": "Black",
+        },
+    ),
+    (
+        "headphones",
+        {
+            "name": "Logitech G PRO X 2",
+            "price": 199.99,
+            "type": "Circumaural",
+            "microphone": True,
+            "wireless": True,
+            "enclosure_type": "Closed",
+            "color": "Black",
+        },
+    ),
+]
+
+
+async def main() -> None:
+    async with AsyncSessionLocal() as session:
+        user = await _get_or_create_user(session)
+        imported = [
+            product
+            for part_type, record in DEMO_PARTS
+            if (product := normalize_part_record(part_type, record)) is not None
+        ]
+        first_sku = None
+        for product in imported:
+            sku = await _upsert_product(session, product)
+            first_sku = first_sku or sku
+        if first_sku:
+            await _seed_order(session, user.id, first_sku)
+        await _seed_knowledge(session)
+        await session.commit()
+
+
+async def _get_or_create_user(session):
+    user = await session.get(AppUser, 1)
+    if user:
+        return user
+    user = AppUser(id=1, display_name="Demo 用户", phone="13800000000")
+    session.add(user)
+    await session.flush()
+    return user
+
+
+async def _upsert_product(session, product: ImportedProduct) -> Sku:
+    category = await _get_or_create_category(session, product.category)
+    brand = await _get_or_create_brand(session, product.brand)
+
+    spu = (
+        await session.execute(
+            select(Spu).where(Spu.title == product.spu_title, Spu.category_id == category.id)
+        )
+    ).scalar_one_or_none()
+    if spu is None:
+        spu = Spu(
+            category_id=category.id,
+            brand_id=brand.id,
+            title=product.spu_title,
+            sub_title=f"{product.category} 热门款，本地 demo 数据",
+            detail_html=f"<p>{product.spu_title}，适合电商客服推荐与参数问答。</p>",
+            status=1,
+        )
+        session.add(spu)
+        await session.flush()
+
+    sku = (
+        await session.execute(
+            select(Sku).where(Sku.spu_id == spu.id, Sku.title == product.sku_title)
+        )
+    ).scalar_one_or_none()
+    if sku is None:
+        sku = Sku(
+            spu_id=spu.id,
+            title=product.sku_title,
+            price=product.price_cny,
+            stock=product.stock,
+            specs_json=product.specs,
+            image_url=None,
+            status=1,
+        )
+        session.add(sku)
+        await session.flush()
+
+    for attr_name, attr_value in product.attributes.items():
+        is_spec, is_filter = attribute_flags(attr_name)
+        attr_key = await _get_or_create_attr_key(
+            session, category.id, attr_name, is_spec, is_filter
+        )
+        value = await _get_or_create_attr_value(session, attr_key.id, attr_value)
+        exists = (
+            await session.execute(
+                select(GoodsAttributeRelation.id).where(
+                    GoodsAttributeRelation.spu_id == spu.id,
+                    GoodsAttributeRelation.sku_id == sku.id,
+                    GoodsAttributeRelation.attr_key_id == attr_key.id,
+                    GoodsAttributeRelation.attr_value_id == value.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            session.add(
+                GoodsAttributeRelation(
+                    spu_id=spu.id,
+                    sku_id=sku.id,
+                    attr_key_id=attr_key.id,
+                    attr_value_id=value.id,
+                )
+            )
+    return sku
+
+
+async def _get_or_create_category(session, name: str) -> Category:
+    category = (
+        await session.execute(select(Category).where(Category.name == name))
+    ).scalar_one_or_none()
+    if category:
+        return category
+    category = Category(name=name, parent_id=0, level=1)
+    session.add(category)
+    await session.flush()
+    return category
+
+
+async def _get_or_create_brand(session, name: str) -> Brand:
+    brand = (await session.execute(select(Brand).where(Brand.name == name))).scalar_one_or_none()
+    if brand:
+        return brand
+    brand = Brand(name=name)
+    session.add(brand)
+    await session.flush()
+    return brand
+
+
+async def _get_or_create_attr_key(
+    session, category_id: int, name: str, is_spec: bool, is_filter: bool
+) -> AttributeKey:
+    key = (
+        await session.execute(
+            select(AttributeKey).where(
+                AttributeKey.category_id == category_id, AttributeKey.name == name
+            )
+        )
+    ).scalar_one_or_none()
+    if key:
+        return key
+    key = AttributeKey(category_id=category_id, name=name, is_spec=is_spec, is_filter=is_filter)
+    session.add(key)
+    await session.flush()
+    return key
+
+
+async def _get_or_create_attr_value(session, attr_key_id: int, value: str) -> AttributeValue:
+    attr_value = (
+        await session.execute(
+            select(AttributeValue).where(
+                AttributeValue.attr_key_id == attr_key_id,
+                AttributeValue.value == value,
+            )
+        )
+    ).scalar_one_or_none()
+    if attr_value:
+        return attr_value
+    attr_value = AttributeValue(attr_key_id=attr_key_id, value=value)
+    session.add(attr_value)
+    await session.flush()
+    return attr_value
+
+
+async def _seed_order(session, user_id: int, sku: Sku) -> None:
+    order_id = 202607020001
+    if await session.get(OrderInfo, order_id):
+        return
+    created_at = datetime.now(UTC) - timedelta(days=1)
+    order = OrderInfo(
+        id=order_id,
+        user_id=user_id,
+        total_amount=Decimal(sku.price),
+        pay_amount=Decimal(sku.price),
+        freight_amount=Decimal("0"),
+        pay_type=2,
+        status=3,
+        receiver_name="Demo 用户",
+        receiver_phone="13800000000",
+        receiver_address="上海市浦东新区 Demo 路 100 号",
+        created_at=created_at,
+        pay_at=created_at + timedelta(minutes=5),
+        delivery_at=created_at + timedelta(hours=6),
+    )
+    session.add(order)
+    await session.flush()
+    session.add(
+        OrderItem(
+            order_id=order.id,
+            spu_id=sku.spu_id,
+            sku_id=sku.id,
+            sku_name=sku.title,
+            sku_specs=sku.specs_json,
+            sku_image=sku.image_url,
+            price=sku.price,
+            quantity=1,
+        )
+    )
+    session.add(
+        OrderLogistics(
+            order_id=order.id,
+            express_company="顺丰速运",
+            express_code="SF",
+            logistic_no="SF100200300400",
+            status=2,
+            trace_json=[
+                {"time": "2026-07-01 15:20", "text": "快件已揽收"},
+                {"time": "2026-07-02 09:10", "text": "快件正在发往上海转运中心"},
+            ],
+        )
+    )
+
+
+async def _seed_knowledge(session) -> None:
+    existing = (
+        await session.execute(
+            select(KnowledgeDocument.id).where(KnowledgeDocument.title == "七天无理由退货政策")
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return
+    session.add_all(
+        [
+            KnowledgeDocument(
+                title="七天无理由退货政策",
+                document_type="policy",
+                content="自签收次日起七天内，商品未影响二次销售，可申请七天无理由退货。人为损坏、缺少配件或包装严重损坏可能影响审核。",
+                metadata_json={"scenario": "return"},
+            ),
+            KnowledgeDocument(
+                title="外设保修说明",
+                document_type="policy",
+                content="鼠标、键盘、耳机等外设通常享受一年有限保修。具体以商品页面和品牌官方政策为准。",
+                metadata_json={"scenario": "warranty"},
+            ),
+        ]
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
