@@ -1,20 +1,36 @@
 import {
+  Ban,
   Bot,
   Boxes,
   CheckCircle2,
+  Headset,
   Loader2,
   PackageSearch,
   RotateCcw,
   Send,
+  ShieldCheck,
   Sparkles,
   Truck,
   UserRound
 } from "lucide-react";
 import { FormEvent, useMemo, useState } from "react";
-import { createAfterSalesTicket, sendChat } from "./api";
-import type { AfterSalesTicket, ChatMessage, OrderCard, ProductCard } from "./types";
+import { sendChat } from "./api";
+import type { BoundaryClassification, ChatMessage, OrderCard, ProductCard } from "./types";
 
-const quickPrompts = ["推荐 300 元以内无线鼠标", "RGB 红轴键盘怎么选", "帮我查最近订单"];
+const quickPrompts = [
+  "推荐 300 元以内无线鼠标",
+  "RGB 红轴键盘怎么选",
+  "帮我查最近订单",
+  "我要申请退货",
+  "推荐一台手机"
+];
+
+const ticketTypeLabels: Record<string, string> = {
+  return: "退货",
+  exchange: "换货",
+  refund: "退款",
+  repair: "维修"
+};
 
 export default function App() {
   const [conversationId, setConversationId] = useState<number | undefined>();
@@ -25,7 +41,7 @@ export default function App() {
   ]);
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [order, setOrder] = useState<OrderCard | null>(null);
-  const [ticket, setTicket] = useState<AfterSalesTicket | null>(null);
+  const [boundary, setBoundary] = useState<BoundaryClassification | null>(null);
   const [ticketReason, setTicketReason] = useState("商品不符合预期");
   const [ticketType, setTicketType] = useState("return");
   const [error, setError] = useState<string | null>(null);
@@ -45,12 +61,23 @@ export default function App() {
     try {
       const response = await sendChat(trimmed, conversationId);
       setConversationId(response.conversation_id);
+      setBoundary(response.boundary);
       setMessages((current) => [
         ...current,
-        { id: crypto.randomUUID(), role: "assistant", content: response.answer }
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.answer,
+          boundary: response.boundary
+        }
       ]);
-      if (response.products.length) setProducts(response.products);
-      if (response.order) setOrder(response.order);
+      if (response.boundary.classification === "out_of_scope") {
+        setProducts([]);
+        setOrder(null);
+      } else {
+        if (response.products.length) setProducts(response.products);
+        if (response.order) setOrder(response.order);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "请求失败");
     } finally {
@@ -63,21 +90,9 @@ export default function App() {
     await submitMessage(input);
   }
 
-  async function handleCreateTicket() {
-    if (!order?.items.length) return;
-    setError(null);
-    try {
-      const created = await createAfterSalesTicket({
-        order_id: order.id,
-        order_item_id: order.items[0].id,
-        ticket_type: ticketType,
-        reason: ticketReason,
-        description: "由客服 Agent 工作台创建"
-      });
-      setTicket(created);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "售后创建失败");
-    }
+  async function handleRequestHandoff() {
+    const orderPart = order ? `，订单 ${order.id}` : "";
+    await submitMessage(`我要申请${ticketTypeLabels[ticketType]}${orderPart}，原因：${ticketReason}`);
   }
 
   const activeOrderItem = useMemo(() => order?.items[0], [order]);
@@ -115,17 +130,25 @@ export default function App() {
             <h1>客服会话</h1>
             <span>{conversationId ? `#${conversationId}` : "ready"}</span>
           </div>
-          <span className={loading ? "status-pill busy" : "status-pill"}>
-            {loading ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
-            {loading ? "thinking" : "online"}
-          </span>
+          <div className="status-stack">
+            {boundary && <BoundaryBadge boundary={boundary} />}
+            <span className={loading ? "status-pill busy" : "status-pill"}>
+              {loading ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
+              {loading ? "thinking" : "online"}
+            </span>
+          </div>
         </header>
 
         <section className="messages" aria-live="polite">
           {messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
-              <span className="avatar">{message.role === "assistant" ? <Bot size={17} /> : <UserRound size={17} />}</span>
-              <p>{message.content}</p>
+              <span className="avatar">
+                {message.role === "assistant" ? <Bot size={17} /> : <UserRound size={17} />}
+              </span>
+              <div className="bubble-stack">
+                {message.boundary && <BoundaryBadge boundary={message.boundary} compact />}
+                <p>{message.content}</p>
+              </div>
             </article>
           ))}
           {error && <div className="error-line">{error}</div>}
@@ -144,6 +167,14 @@ export default function App() {
       </main>
 
       <aside className="context-panel">
+        <section className="panel-section">
+          <div className="section-title">
+            <ShieldCheck size={18} />
+            <h2>边界</h2>
+          </div>
+          {boundary ? <BoundaryStatusCard boundary={boundary} /> : <EmptyState text="等待请求" />}
+        </section>
+
         <section className="panel-section">
           <div className="section-title">
             <PackageSearch size={18} />
@@ -182,7 +213,7 @@ export default function App() {
             <h2>售后</h2>
           </div>
           <div className="ticket-form">
-            <select value={ticketType} onChange={(event) => setTicketType(event.target.value)} disabled={!order}>
+            <select value={ticketType} onChange={(event) => setTicketType(event.target.value)}>
               <option value="return">退货</option>
               <option value="exchange">换货</option>
               <option value="refund">退款</option>
@@ -191,18 +222,15 @@ export default function App() {
             <input
               value={ticketReason}
               onChange={(event) => setTicketReason(event.target.value)}
-              disabled={!order}
             />
-            <button type="button" onClick={handleCreateTicket} disabled={!order}>
-              创建工单
+            <button type="button" onClick={handleRequestHandoff} disabled={loading || !ticketReason.trim()}>
+              转人工处理
             </button>
           </div>
-          {ticket && (
-            <div className="ticket-result">
-              <strong>#{ticket.id}</strong>
-              <span>{ticket.status}</span>
-            </div>
-          )}
+          <div className="handoff-note">
+            <strong>{order ? `#${order.id}` : "待补订单"}</strong>
+            <span>人工确认</span>
+          </div>
         </section>
       </aside>
     </div>
@@ -217,6 +245,57 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
       <strong>{value}</strong>
     </div>
   );
+}
+
+function BoundaryBadge({
+  boundary,
+  compact = false
+}: {
+  boundary: BoundaryClassification;
+  compact?: boolean;
+}) {
+  const meta = boundaryMeta(boundary);
+  return (
+    <span className={`boundary-badge ${meta.className} ${compact ? "compact" : ""}`}>
+      {meta.icon}
+      {meta.label}
+    </span>
+  );
+}
+
+function BoundaryStatusCard({ boundary }: { boundary: BoundaryClassification }) {
+  const meta = boundaryMeta(boundary);
+  return (
+    <div className={`boundary-card ${meta.className}`}>
+      <div className="boundary-card-head">
+        {meta.icon}
+        <strong>{meta.label}</strong>
+      </div>
+      <p>{boundary.reason}</p>
+    </div>
+  );
+}
+
+function boundaryMeta(boundary: BoundaryClassification) {
+  if (boundary.classification === "human_handoff_required") {
+    return {
+      className: "handoff",
+      icon: <Headset size={14} />,
+      label: "人工接管"
+    };
+  }
+  if (boundary.classification === "out_of_scope") {
+    return {
+      className: "blocked",
+      icon: <Ban size={14} />,
+      label: "拒答"
+    };
+  }
+  return {
+    className: "auto",
+    icon: <ShieldCheck size={14} />,
+    label: "自动回答"
+  };
 }
 
 function ProductCardView({ product }: { product: ProductCard }) {

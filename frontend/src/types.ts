@@ -39,10 +39,17 @@ export type SuggestedAction = {
   payload: Record<string, unknown>;
 };
 
+export type BoundaryClassification = {
+  classification: "in_scope_auto" | "human_handoff_required" | "out_of_scope";
+  reason: string;
+  display_message: string;
+};
+
 export type ChatResponse = {
   conversation_id: number;
   answer: string;
   intent: string;
+  boundary: BoundaryClassification;
   products: ProductCard[];
   order?: OrderCard | null;
   suggested_actions: SuggestedAction[];
@@ -52,6 +59,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  boundary?: BoundaryClassification;
 };
 
 export type AfterSalesTicket = {

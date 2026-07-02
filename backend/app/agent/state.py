@@ -10,6 +10,7 @@ class AgentState(TypedDict, total=False):
     run_id: int
     message: str
     intent: str
+    boundary: dict[str, Any]
     parsed: dict[str, Any]
     memory: list[dict[str, Any]]
     products: list[ProductCard]

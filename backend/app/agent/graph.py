@@ -5,7 +5,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.intent import build_product_search, classify_intent, extract_order_id
+from app.agent.intent import (
+    build_product_search,
+    classify_boundary,
+    classify_intent,
+    extract_order_id,
+)
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -14,7 +19,7 @@ from app.models import AgentRun
 from app.repositories.catalog import CatalogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.orders import OrderRepository
-from app.schemas.chat import ChatRequest, ChatResponse, SuggestedAction
+from app.schemas.chat import BoundaryClassification, ChatRequest, ChatResponse, SuggestedAction
 
 
 class AgentRuntime:
@@ -36,6 +41,7 @@ class AgentRuntime:
             conversation_id=result["conversation_id"],
             answer=result["answer"],
             intent=result["intent"],
+            boundary=BoundaryClassification(**result["boundary"]),
             products=result.get("products", []),
             order=result.get("order"),
             suggested_actions=[
@@ -46,12 +52,18 @@ class AgentRuntime:
     def _build_graph(self):
         workflow = StateGraph(AgentState)
         workflow.add_node("load_context", self._load_context)
+        workflow.add_node("classify_boundary", self._classify_boundary)
         workflow.add_node("route_intent", self._route_intent)
         workflow.add_node("retrieve", self._retrieve)
         workflow.add_node("generate", self._generate)
         workflow.add_node("persist", self._persist)
         workflow.set_entry_point("load_context")
-        workflow.add_edge("load_context", "route_intent")
+        workflow.add_edge("load_context", "classify_boundary")
+        workflow.add_conditional_edges(
+            "classify_boundary",
+            self._route_by_boundary,
+            {"auto": "route_intent", "blocked": "generate"},
+        )
         workflow.add_edge("route_intent", "retrieve")
         workflow.add_edge("retrieve", "generate")
         workflow.add_edge("generate", "persist")
@@ -70,6 +82,22 @@ class AgentRuntime:
             {"key": item.key, "value": item.value, "confidence": item.confidence} for item in memory
         ]
         return state
+
+    async def _classify_boundary(self, state: AgentState) -> AgentState:
+        boundary = classify_boundary(state["message"])
+        state["boundary"] = boundary.model_dump(mode="json")
+        if boundary.classification != "in_scope_auto":
+            state["intent"] = (
+                "out_of_scope"
+                if boundary.classification == "out_of_scope"
+                else classify_intent(state["message"])
+            )
+            state["parsed"] = {}
+        return state
+
+    def _route_by_boundary(self, state: AgentState) -> str:
+        boundary = state["boundary"]["classification"]
+        return "auto" if boundary == "in_scope_auto" else "blocked"
 
     async def _route_intent(self, state: AgentState) -> AgentState:
         intent = classify_intent(state["message"])
@@ -117,7 +145,9 @@ class AgentRuntime:
         return state
 
     async def _generate(self, state: AgentState) -> AgentState:
-        if self.llm:
+        if state["boundary"]["classification"] != "in_scope_auto":
+            state["answer"] = self._generate_boundary_answer(state)
+        elif self.llm:
             state["answer"] = await self._generate_with_llm(state)
         else:
             state["answer"] = self._generate_fallback(state)
@@ -132,11 +162,13 @@ class AgentRuntime:
             state["answer"],
             {
                 "intent": state["intent"],
+                "boundary": state["boundary"],
                 "products": [p.model_dump(mode="json") for p in state.get("products", [])],
                 "order": state["order"].model_dump(mode="json") if state.get("order") else None,
             },
         )
-        await self._maybe_update_memory(repo, state)
+        if state["boundary"]["classification"] == "in_scope_auto":
+            await self._maybe_update_memory(repo, state)
         run = await self.session.get(AgentRun, state["run_id"])
         if run:
             await repo.finish_run(run, state["intent"], _json_safe_state(state))
@@ -146,6 +178,7 @@ class AgentRuntime:
     async def _generate_with_llm(self, state: AgentState) -> str:
         context = {
             "intent": state["intent"],
+            "boundary": state["boundary"],
             "memory": state.get("memory", []),
             "products": [p.model_dump(mode="json") for p in state.get("products", [])],
             "order": state["order"].model_dump(mode="json") if state.get("order") else None,
@@ -157,6 +190,10 @@ class AgentRuntime:
             ]
         )
         return str(response.content)
+
+    def _generate_boundary_answer(self, state: AgentState) -> str:
+        boundary = BoundaryClassification(**state["boundary"])
+        return boundary.display_message
 
     def _generate_fallback(self, state: AgentState) -> str:
         if state["intent"] == "product_recommendation":
@@ -190,27 +227,33 @@ class AgentRuntime:
                 f"订单 {order.id} 当前是「{order.status_label}」，实付 ¥{order.pay_amount}。\n"
                 f"物流：{ship_line}。\n"
                 f"订单里共有 {len(order.items)} 个明细，"
-                "需要退换货的话我可以基于具体明细创建售后工单。"
+                "需要退换货的话，我可以帮你整理信息并转人工处理。"
             )
 
         if state["intent"] == "after_sales":
             return (
-                "可以创建退换货工单。请提供订单号、要处理的商品明细，以及是退货、换货、退款还是维修。"
-                "如果你已经在订单卡片里看到商品，前端可以直接点“创建售后”。"
+                "我可以说明退换货、退款和维修的基础流程；如果要申请办理、确认责任或承诺退款，"
+                "需要转人工客服处理。"
             )
 
         return (
-            "我可以帮你推荐 PC 外设、查询订单物流，也可以创建退换货工单。你可以直接说预算和用途。"
+            "我可以帮你推荐 PC 外设、查询订单物流，也可以说明售后流程。"
+            "涉及退换货、退款或维修办理时会转人工。"
         )
 
     def _suggest_actions(self, state: AgentState) -> list[dict[str, Any]]:
+        boundary = state["boundary"]["classification"]
+        if boundary == "human_handoff_required":
+            return [{"label": "转人工客服", "payload": {"handoff": True}}]
+        if boundary == "out_of_scope":
+            return [{"label": "咨询外设推荐", "payload": {"message": "推荐 300 元以内无线鼠标"}}]
         if state["intent"] == "product_recommendation" and state.get("products"):
             return [
                 {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},
                 {"label": "换成无线", "payload": {"message": "推荐无线款"}},
             ]
         if state["intent"] == "order_status" and state.get("order"):
-            return [{"label": "创建售后工单", "payload": {"orderId": state["order"].id}}]
+            return [{"label": "转人工处理售后", "payload": {"orderId": state["order"].id}}]
         return []
 
     async def _maybe_update_memory(self, repo: ConversationRepository, state: AgentState) -> None:
