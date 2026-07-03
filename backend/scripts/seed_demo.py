@@ -139,6 +139,9 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
         )
         session.add(spu)
         await session.flush()
+    else:
+        spu.brand_id = brand.id
+        spu.status = 1
 
     sku = (
         await session.execute(
@@ -157,6 +160,11 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
         )
         session.add(sku)
         await session.flush()
+    else:
+        sku.price = product.price_cny
+        sku.stock = max(sku.stock, product.stock)
+        sku.specs_json = product.specs
+        sku.status = 1
 
     for attr_name, attr_value in product.attributes.items():
         is_spec, is_filter = attribute_flags(attr_name)
@@ -219,6 +227,8 @@ async def _get_or_create_attr_key(
         )
     ).scalar_one_or_none()
     if key:
+        key.is_spec = key.is_spec or is_spec
+        key.is_filter = key.is_filter or is_filter
         return key
     key = AttributeKey(category_id=category_id, name=name, is_spec=is_spec, is_filter=is_filter)
     session.add(key)

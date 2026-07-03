@@ -253,7 +253,10 @@ class AgentRuntime:
                     "，".join(f"{key}: {value}" for key, value in item.specs.items())
                     or "规格未标注"
                 )
-                lines.append(f"- {item.title}：¥{item.price}，库存 {item.stock}，{specs}")
+                lines.append(
+                    f"- {item.title}：¥{item.price}，库存 {item.stock}，{specs}。"
+                    f"适配提示：{_compatibility_note(item)}"
+                )
             lines.append(
                 "如果你告诉我主要用途，比如 FPS、办公、剪辑或通勤，我可以再给你排个优先级。"
             )
@@ -351,3 +354,24 @@ def _append_evidence(answer: str, evidence: list[EvidenceItem]) -> str:
 
 def _evidence_lines(evidence: list[EvidenceItem]) -> list[str]:
     return [f"- [{item.document_type}] {item.title}：{item.snippet}" for item in evidence[:3]]
+
+
+def _compatibility_note(item: Any) -> str:
+    specs = {str(key): str(value) for key, value in item.specs.items()}
+    category = item.category
+    if category == "鼠标":
+        connection = specs.get("connection_type", "连接方式未标注")
+        dpi = specs.get("max_dpi", "DPI 未标注")
+        hand = specs.get("hand_orientation", "握持方向未标注")
+        return f"{connection}，{dpi} DPI，上手方向 {hand}，适合按连接方式和握持习惯筛选。"
+    if category == "键盘":
+        connection = specs.get("connection_type", "连接方式未标注")
+        switches = specs.get("switches", "轴体未标注")
+        layout = "无数字区" if specs.get("tenkeyless") == "是" else "全尺寸或未标注布局"
+        return f"{connection}，{switches}，{layout}，适合按轴体、灯光和桌面空间对比。"
+    if category == "耳机":
+        wireless = "无线" if specs.get("wireless") == "是" else "有线或未标注"
+        microphone = "带麦克风" if specs.get("microphone") == "是" else "不带麦或未标注"
+        enclosure = specs.get("enclosure_type", "封闭/开放类型未标注")
+        return f"{wireless}，{microphone}，{enclosure}，适合按平台连接和通话需求确认兼容性。"
+    return "建议继续确认连接方式、接口、尺寸和使用场景。"

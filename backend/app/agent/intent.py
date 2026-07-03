@@ -215,9 +215,24 @@ def build_product_search(message: str) -> ProductSearchRequest:
         filters["switches"] = "Red"
     if "青轴" in message:
         filters["switches"] = "Blue"
+    if any(keyword in message for keyword in ["麦克风", "带麦"]):
+        filters["microphone"] = "是"
 
     query = message
-    for word in ["推荐", "预算", "以内", "以下", "我想买", "买", "选"]:
+    for word in [
+        "推荐",
+        "预算",
+        "以内",
+        "以下",
+        "我想买",
+        "买",
+        "选",
+        "怎么",
+        "哪款",
+        "哪个",
+        "对比",
+        "比较",
+    ]:
         query = query.replace(word, " ")
     query = re.sub(r"\d+(?:\.\d+)?\s*(元|块)?", " ", query).strip()
 

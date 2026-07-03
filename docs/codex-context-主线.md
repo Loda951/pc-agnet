@@ -36,8 +36,8 @@
 
 - 已完成：Alembic 初始 PostgreSQL schema，覆盖用户、商品 EAV、SKU/SPU、订单、物流、会话、工具调用、记忆、知识文档、售后表。
 - 已完成：`scripts.seed_demo` 导入 demo 用户、5 个 SKU、1 个订单、覆盖 policy/FAQ/store_rule/peripheral_knowledge 的知识文档。
-- 已完成：`import_pc_part_dataset.py` 和 `dataset_mapper.py` 可将 `docyx/pc-part-dataset` JSON 映射到本地商品模型。
-- 未完成：真实 mouse、keyboard、headphones 等数据集尚未导入。
+- 已完成：`import_pc_part_dataset.py` 和 `dataset_mapper.py` 可将 `docyx/pc-part-dataset` JSON/JSONL 映射到本地商品模型。
+- 已完成：真实 mouse、keyboard、headphones 目录导入路径已打通，核心外设属性可用于筛选、排序、对比和兼容性解释。
 
 ### 前端工作台
 
@@ -48,9 +48,9 @@
 ### 验证
 
 - 已完成：Podman 服务启动、数据库迁移、demo seed、`/api/health`、真实 DeepSeek `/api/chat`、订单查询、售后创建均已验证通过。
-- 已完成：`pytest backend/tests` 通过，当前包含配置解析和数据集映射测试。
+- 已完成：`pytest backend/tests` 通过，当前包含配置解析、数据集映射、商品搜索、RAG、边界分类和 API 集成测试。
 - 已完成：`ruff check backend` 和 `npm run build` 通过。
-- 未完成：缺少覆盖 chat、orders、after-sales 的数据库集成测试。
+- 已完成：补充覆盖 `/api/chat`、`/api/orders/latest`、`/api/after-sales` 的数据库集成测试，LLM 与知识检索外部依赖在测试中隔离。
 
 ## 技术架构概览
 
@@ -100,8 +100,8 @@
 - RAG 生产化债务：当前使用本地 deterministic hash embedding 支撑 demo 和测试，后续可接入生产级 embedding provider，并改造为增量同步。
 - Evidence 范围债务：当前 evidence 主要覆盖知识文档；商品、订单、物流事实尚未统一纳入 evidence schema。
 - 多轮能力有限：当前只保存会话和简单偏好记忆，缺少稳健指代消解、上一款/这个商品承接、多子任务拆分。
-- 数据质量有限：demo seed 数据量小，推荐结果可能为空；真实商品数据集尚未批量导入。
-- 测试覆盖不足：当前测试主要覆盖配置解析和 dataset mapper，缺少 API 集成测试、Agent 状态机测试、权限/边界测试。
+- 数据质量有限：真实外设导入路径已打通，但本地环境仍需按需执行导入脚本；搜索排序还缺离线评测集。
+- 测试覆盖不足：已补 API 集成、边界分类和 RAG 回归测试；仍缺真实鉴权、权限隔离和多轮指代消解测试。
 - 错误处理较薄：LLM 超时、DeepSeek 错误、数据库异常、外部服务降级尚未形成统一错误码和用户可读策略。
 - Frontend 仍是 demo 工作台：单用户、无登录、无路由、缺少完整 loading/error/retry 体验和浏览器端验收记录。
 
@@ -133,8 +133,8 @@
 ### Safety 和质量要求
 
 - 设计目标：不假装执行真实操作，不承诺退款/赔付/责任结论，不暴露无权限订单信息。
-- 当前实现：系统提示词限制编造事实，但没有统一安全策略；售后工单创建为真实数据库写入；订单权限仅靠默认用户。
-- 差距判断：需要在正式扩展前补边界分类、鉴权和写操作确认/人工接管策略。
+- 当前实现：系统提示词限制编造事实，售后办理写操作已降级为人工接管；订单权限仍仅靠默认用户。
+- 差距判断：需要在正式扩展前补真实鉴权、权限隔离和人工队列/工单流转。
 
 ## 代码约定与开发规范
 
@@ -168,17 +168,19 @@
 
 ### P1：导入真实商品数据并强化推荐/对比/兼容性
 
+- 状态：基础版本已完成，详见 `docs/feature/导入真实商品数据并强化推荐与集成测试.md`。
 - 目标：从 `docyx/pc-part-dataset` 导入 mouse、keyboard、headphones 等真实数据，增强筛选、排序、对比和兼容性解释。
 - 对核心价值的影响：直接改善商品推荐质量，减少 demo 数据过少导致的空结果。
 - 技术复杂度评估：中等；mapper 已有基础，但需要数据清洗、分类属性规范、搜索排序和验收样例。
-- 与现有架构的衔接方式：扩展 `dataset_mapper.py`、`import_pc_part_dataset.py` 和 `CatalogRepository`，必要时新增属性标准化表或搜索权重逻辑。
+- 与现有架构的衔接方式：已扩展 `dataset_mapper.py`、`import_pc_part_dataset.py` 和 `CatalogRepository`，暂未新增属性标准化表。
 
 ### P1：补齐集成测试与可回归验收集
 
+- 状态：基础版本已完成，详见 `docs/feature/导入真实商品数据并强化推荐与集成测试.md`。
 - 目标：覆盖 `/api/chat`、`/api/orders`、`/api/after-sales`、边界分类、RAG 检索和关键 prompt 行为。
 - 对核心价值的影响：降低后续改 Agent 和 schema 时的回归风险。
 - 技术复杂度评估：中等；需要测试数据库策略、LLM mock、固定 seed fixture 和 API client。
-- 与现有架构的衔接方式：在 `backend/tests/` 新增 FastAPI async client 测试，mock `build_chat_model`，复用 Alembic/seed 初始化测试数据。
+- 与现有架构的衔接方式：已在 `backend/tests/` 新增 FastAPI async client 测试，LLM 通过空 key/fake service 隔离，PostgreSQL 通过事务 fixture 回滚。
 
 ### P2：前端工作台产品化
 
@@ -189,5 +191,5 @@
 
 ### 最优先推荐
 
-- 第一优先：补齐集成测试与可回归验收集。理由是边界分类和 RAG 已进入核心 Agent 路径，后续改 prompt、schema 或检索逻辑都需要稳定回归网。
-- 第二优先：导入真实商品数据并强化推荐/对比/兼容性。理由是当前商品数据量仍偏 demo，推荐质量和 evidence 可信度会受数据质量限制。
+- 第一优先：前端工作台产品化。理由是后端边界、RAG、真实商品导入和核心 API 回归网已具备基础，下一步需要把 evidence、人工接管、错误重试和多轮上下文做成可演示体验。
+- 第二优先：鉴权与权限隔离。理由是订单和售后仍依赖 demo 用户，进入更真实场景前需要避免越权查询和敏感信息泄露。
