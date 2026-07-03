@@ -1,3 +1,14 @@
+---
+title: 收敛 read-only 边界与人工接管策略
+description: "记录 read-only 智能客服边界收敛方案，包括三态边界分类、售后写操作降级、前端三态展示、本地代理修复、测试验证和遗留事项。"
+tags: [feature, read-only, 边界分类, 人工接管, 售后, 安全策略, LangGraph, 前端展示]
+category: feature
+doc_type: feature-summary
+stage: phase-1
+status: completed
+priority: P0
+---
+
 # 收敛 read-only 边界与人工接管策略
 
 ## 背景与目标

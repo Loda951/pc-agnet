@@ -1,3 +1,14 @@
+---
+title: PC Agent 项目主线文档
+description: "汇总 PC 外设客服 Agent 的项目定位、已完成 MVP、架构、遗留债务、Post-MVP 方向和第二阶段主线指引。"
+tags: [pc-agent, 主线, 架构, MVP, 第二阶段, 鉴权, RAG, evidence, 前端工作台]
+category: 主线
+doc_type: context
+stage: phase-2
+status: active
+priority: P0
+---
+
 # PC Agent 项目主线文档
 
 ## 项目定位与核心价值主张
