@@ -19,10 +19,13 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_base_url: str = ""
 
+    auth_token_secret: str = "local-dev-auth-token-secret-change-me"
+    auth_access_token_minutes: int = 30
+    auth_refresh_token_days: int = 14
+
     backend_cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
-    default_user_id: int = 1
 
     model_config = SettingsConfigDict(
         env_file="../.env",

@@ -7,6 +7,7 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
 - 商品推荐与参数问答：鼠标、键盘、耳机、显示器等 PC 外设。
 - 商品对比：基于 SKU 规格、筛选属性和价格。
 - 订单查询：订单、订单明细、物流状态。
+- 多用户鉴权：登录、会话恢复、刷新、登出，并按当前认证用户隔离订单、会话和记忆。
 - 售后说明：退换货、维修、保修等 read-only 政策问答，办理类请求转人工。
 - 知识库 RAG：从 PostgreSQL `knowledge_document` 同步到 ChromaDB，并在回答中输出依据。
 - 长期记忆：记录用户偏好，后续推荐时可复用。
@@ -43,6 +44,13 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
    cd frontend
    npm install
    npm run dev
+   ```
+
+5. 使用本地演示账号登录：
+
+   ```text
+   demo@example.com
+   demo-password
    ```
 
 ## 手动初始化
@@ -125,4 +133,14 @@ Qwen 示例：
 LLM_PROVIDER=qwen
 LLM_API_KEY=sk-...
 LLM_MODEL=qwen-plus
+```
+
+## Auth 配置
+
+本地 demo 会由 `python -m scripts.seed_demo` 写入演示账号。生产或共享环境务必覆盖：
+
+```env
+AUTH_TOKEN_SECRET=replace-with-a-random-secret
+AUTH_ACCESS_TOKEN_MINUTES=30
+AUTH_REFRESH_TOKEN_DAYS=14
 ```

@@ -12,9 +12,43 @@ class AppUser(Base):
     __tablename__ = "app_user"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    login_identifier: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     display_name: Mapped[str] = mapped_column(String(64), nullable=False)
     phone: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    last_login_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class UserAuthCredential(Base):
+    __tablename__ = "user_auth_credential"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False, unique=True)
+    login_identifier: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+    user: Mapped[AppUser] = relationship()
+
+
+class UserSession(Base):
+    __tablename__ = "user_session"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    refresh_token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    revoked_at: Mapped[datetime | None]
+    last_used_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+    user: Mapped[AppUser] = relationship()
 
 
 class Category(Base):
@@ -162,6 +196,9 @@ Index("idx_spu_category_brand", Spu.category_id, Spu.brand_id)
 Index("idx_sku_spu_id", Sku.spu_id)
 Index("idx_goods_attribute_spu_sku", GoodsAttributeRelation.spu_id, GoodsAttributeRelation.sku_id)
 Index("idx_goods_attribute_value", GoodsAttributeRelation.attr_value_id)
+Index("idx_user_auth_login_identifier", UserAuthCredential.login_identifier)
+Index("idx_user_session_user_id", UserSession.user_id)
+Index("idx_user_session_status_expires", UserSession.status, UserSession.expires_at)
 Index("idx_order_info_user_id", OrderInfo.user_id)
 Index("idx_order_info_created_at", OrderInfo.created_at)
 Index("idx_order_item_order_id", OrderItem.order_id)

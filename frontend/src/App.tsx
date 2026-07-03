@@ -1,9 +1,11 @@
-import { FormEvent, useState } from "react";
-import { ApiError, sendChat } from "./api";
+import { FormEvent, useEffect, useState } from "react";
+import { ApiError, clearAuthSession, login, logout, restoreSession, sendChat } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPanel } from "./components/ContextPanel";
+import { LoginPage } from "./components/LoginPage";
 import { Sidebar } from "./components/Sidebar";
 import type {
+  AuthSession,
   BoundaryClassification,
   ChatMessage,
   ConversationTurn,
@@ -33,14 +35,6 @@ const ticketTypeLabels: Record<string, string> = {
   repair: "维修"
 };
 
-const operatorProfile: OperatorProfile = {
-  name: "演示客服",
-  role: "PC 外设专员",
-  userId: 1,
-  authState: "placeholder",
-  statusLabel: "登录占位"
-};
-
 type SubmitOptions = {
   appendUser?: boolean;
   conversationId?: number;
@@ -48,18 +42,17 @@ type SubmitOptions = {
 };
 
 export default function App() {
+  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [authStatus, setAuthStatus] = useState<"restoring" | "ready" | "submitting">(
+    "restoring"
+  );
+  const [authError, setAuthError] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<number | undefined>();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [responseStatus, setResponseStatus] = useState<ResponseStatus>("ready");
   const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "hello",
-      role: "assistant",
-      content: "今天想看哪类外设？",
-      createdAt: new Date().toISOString(),
-      status: "received"
-    }
+    initialAssistantMessage()
   ]);
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [order, setOrder] = useState<OrderCard | null>(null);
@@ -72,6 +65,74 @@ export default function App() {
   const [ticketType, setTicketType] = useState("return");
   const [error, setError] = useState<RequestError | null>(null);
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    restoreSession()
+      .then((session) => {
+        if (cancelled) return;
+        setAuthSession(session);
+        setAuthError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setAuthSession(null);
+        setAuthError(err instanceof Error ? err.message : "会话恢复失败，请重新登录。");
+      })
+      .finally(() => {
+        if (!cancelled) setAuthStatus("ready");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleLogin(loginIdentifier: string, password: string) {
+    setAuthStatus("submitting");
+    setAuthError(null);
+    try {
+      const session = await login(loginIdentifier, password);
+      setAuthSession(session);
+      resetWorkspace();
+    } catch (err) {
+      setAuthSession(null);
+      setAuthError(err instanceof Error ? err.message : "登录失败，请稍后重试。");
+    } finally {
+      setAuthStatus("ready");
+    }
+  }
+
+  async function handleLogout() {
+    await logout();
+    setAuthSession(null);
+    setAuthError(null);
+    resetWorkspace();
+  }
+
+  function handleAuthExpired() {
+    clearAuthSession();
+    setAuthSession(null);
+    setAuthError("登录已过期，请重新登录。");
+    resetWorkspace();
+  }
+
+  function resetWorkspace() {
+    setConversationId(undefined);
+    setInput("");
+    setLoading(false);
+    setResponseStatus("ready");
+    setMessages([initialAssistantMessage()]);
+    setProducts([]);
+    setOrder(null);
+    setBoundary(null);
+    setEvidence([]);
+    setSuggestedActions([]);
+    setTurns([]);
+    setHandoffNotice(null);
+    setError(null);
+    setFailedRequest(null);
+  }
 
   async function submitMessage(message: string, options: SubmitOptions = {}) {
     const trimmed = message.trim();
@@ -165,6 +226,10 @@ export default function App() {
       setResponseStatus(statusForBoundary(response.boundary));
     } catch (err) {
       const requestError = toRequestError(err, request);
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+        return;
+      }
       setError(requestError);
       setFailedRequest(request);
       setResponseStatus("error");
@@ -233,6 +298,25 @@ export default function App() {
     setResponseStatus("handoff");
   }
 
+  if (authStatus === "restoring" || !authSession) {
+    return (
+      <LoginPage
+        loading={authStatus === "restoring" || authStatus === "submitting"}
+        error={authError}
+        onLogin={handleLogin}
+      />
+    );
+  }
+
+  const operatorProfile: OperatorProfile = {
+    name: authSession.user.display_name,
+    role: "PC 外设专员",
+    userId: authSession.user.id,
+    loginIdentifier: authSession.user.login_identifier,
+    authState: "authenticated",
+    statusLabel: "已登录"
+  };
+
   return (
     <div className="shell">
       <Sidebar
@@ -242,6 +326,7 @@ export default function App() {
         evidenceCount={evidence.length}
         quickPrompts={quickPrompts}
         disabled={loading}
+        onLogout={() => void handleLogout()}
         onPrompt={(prompt) => void submitMessage(prompt)}
       />
 
@@ -283,6 +368,16 @@ function statusForBoundary(boundary: BoundaryClassification): ResponseStatus {
   if (boundary.classification === "human_handoff_required") return "handoff";
   if (boundary.classification === "out_of_scope") return "blocked";
   return "success";
+}
+
+function initialAssistantMessage(): ChatMessage {
+  return {
+    id: "hello",
+    role: "assistant",
+    content: "今天想看哪类外设？",
+    createdAt: new Date().toISOString(),
+    status: "received"
+  };
 }
 
 function toRequestError(error: unknown, request: PendingRequest): RequestError {

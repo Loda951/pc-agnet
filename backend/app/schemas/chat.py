@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.catalog import ProductCard
 from app.schemas.order import OrderCard
@@ -21,9 +21,10 @@ class EvidenceItem(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     message: str = Field(min_length=1)
     conversation_id: int | None = None
-    user_id: int | None = None
 
 
 class SuggestedAction(BaseModel):

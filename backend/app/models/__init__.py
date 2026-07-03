@@ -11,6 +11,8 @@ from app.models.commerce import (
     OrderLogistics,
     Sku,
     Spu,
+    UserAuthCredential,
+    UserSession,
 )
 from app.models.conversation import (
     AgentRun,
@@ -43,4 +45,6 @@ __all__ = [
     "Sku",
     "Spu",
     "ToolCall",
+    "UserAuthCredential",
+    "UserSession",
 ]
