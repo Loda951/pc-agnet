@@ -30,7 +30,7 @@
 - FastAPI router 保持薄层，数据库读写放 repository，业务编排放 service。
 - 测试文件命名为 `test_*.py`，测试函数命名为 `test_*`。
 - React 组件用 PascalCase，变量、hook、状态名用 camelCase。
-- 提交信息保持简短的祈使句或摘要，例如 `Build PC ecommerce agent MVP`。
+- 提交信息保持简短的祈使句或摘要，例如 `Build PC ecommerce agent MVP`，且遵循`to:`,`fix:`,`feat:`这样的风格。
 - 项目主线进程和每个feature的开发在`/docs`文件夹下
 
 ## 5. Hard Constraints
