@@ -10,8 +10,12 @@
 
 - 启动基础设施：`./scripts/podman-infra.sh up`
 - 查看服务状态：`./scripts/podman-infra.sh ps`
+- 一键初始化本地环境：`make setup-local`
 - 安装后端依赖：`cd backend && python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"`
 - 初始化数据库：`cd backend && alembic upgrade head && python -m scripts.seed_demo`
+- 下载真实商品数据集：`make dataset`
+- 导入真实商品数据：`make data-import`
+- 同步知识库 RAG：`make knowledge-sync`
 - 启动后端：`cd backend && uvicorn app.main:app --reload`
 - 启动前端：`cd frontend && npm install && npm run dev`
 - 后端测试与 Lint：`cd backend && pytest && ruff check .`
@@ -30,7 +34,7 @@
 - FastAPI router 保持薄层，数据库读写放 repository，业务编排放 service。
 - 测试文件命名为 `test_*.py`，测试函数命名为 `test_*`。
 - React 组件用 PascalCase，变量、hook、状态名用 camelCase。
-- 提交信息保持简短的祈使句或摘要，例如 `Build PC ecommerce agent MVP`。
+- 提交信息保持简短的祈使句或摘要，例如 `Build PC ecommerce agent MVP`，且遵循`to:`,`fix:`,`feat:`这样的风格。
 - 项目主线进程和每个feature的开发在`/docs`文件夹下
 
 ## 5. Hard Constraints
@@ -48,5 +52,6 @@
 - DeepSeek 配置使用 `LLM_PROVIDER=deepseek`，默认 base URL 会解析为 `https://api.deepseek.com`。
 - 前端默认请求 `http://localhost:8000`；如需覆盖，注意 Vite 只读取前端目录下的环境文件。
 - 初始化演示数据前必须先用 Podman 启动 PostgreSQL、Redis、ChromaDB，并执行 `alembic upgrade head`。
+- `make setup-local` 会把 `docyx/pc-part-dataset` clone 到 `.cache/pc-part-dataset`，该目录不应提交。
 - Docker volume 不会自动迁移到 Podman volume；如已有 Docker 数据，需要单独导出/导入，demo 数据可直接重跑 seed。
 - `podman compose` 依赖额外 compose provider；本项目默认使用原生 Podman 脚本，避免该依赖。

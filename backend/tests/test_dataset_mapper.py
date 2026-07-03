@@ -37,4 +37,28 @@ def test_infers_known_multi_word_brand() -> None:
 
 def test_attribute_flags_identify_specs_and_filters() -> None:
     assert attribute_flags("connection_type") == (True, True)
-    assert attribute_flags("max_dpi") == (False, True)
+    assert attribute_flags("max_dpi") == (True, True)
+
+
+def test_normalizes_headphones_boolean_wireless_as_filterable_spec() -> None:
+    product = normalize_part_record(
+        "headphones",
+        {
+            "name": "SteelSeries Arctis Nova Pro Wireless for PC, PS5, and PS4",
+            "price": 326.99,
+            "type": "Circumaural",
+            "frequency_response": [10, 40],
+            "microphone": True,
+            "wireless": True,
+            "enclosure_type": "Closed",
+            "color": "Black",
+        },
+    )
+
+    assert product is not None
+    assert product.category == "耳机"
+    assert product.brand == "SteelSeries"
+    assert product.specs["wireless"] == "是"
+    assert product.specs["microphone"] == "是"
+    assert product.specs["frequency_response"] == "10 / 40"
+    assert attribute_flags("enclosure_type") == (True, True)
