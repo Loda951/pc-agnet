@@ -39,8 +39,13 @@ export type SuggestedAction = {
   payload: Record<string, unknown>;
 };
 
+export type BoundaryClassificationValue =
+  | "in_scope_auto"
+  | "human_handoff_required"
+  | "out_of_scope";
+
 export type BoundaryClassification = {
-  classification: "in_scope_auto" | "human_handoff_required" | "out_of_scope";
+  classification: BoundaryClassificationValue;
   reason: string;
   display_message: string;
 };
@@ -70,7 +75,14 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  createdAt: string;
+  status?: "sent" | "failed" | "received";
   boundary?: BoundaryClassification;
+  intent?: string;
+  evidenceCount?: number;
+  productCount?: number;
+  orderId?: number;
+  suggestedActions?: SuggestedAction[];
 };
 
 export type AfterSalesTicket = {
@@ -81,4 +93,48 @@ export type AfterSalesTicket = {
   reason: string;
   status: string;
   created_at: string;
+};
+
+export type ResponseStatus = "ready" | "loading" | "success" | "handoff" | "blocked" | "error";
+
+export type OperatorProfile = {
+  name: string;
+  role: string;
+  userId: number;
+  authState: "placeholder";
+  statusLabel: string;
+};
+
+export type PendingRequest = {
+  message: string;
+  conversationId?: number;
+  messageId?: string;
+};
+
+export type RequestError = {
+  message: string;
+  retryable: boolean;
+  status?: number;
+  request?: PendingRequest;
+};
+
+export type ConversationTurn = {
+  id: string;
+  userMessage: string;
+  assistantAnswer: string;
+  intent: string;
+  boundary: BoundaryClassification;
+  evidenceCount: number;
+  productCount: number;
+  orderId?: number;
+  suggestedActions: SuggestedAction[];
+  createdAt: string;
+};
+
+export type HandoffNotice = {
+  requested: boolean;
+  source: string;
+  reason: string;
+  orderId?: number;
+  updatedAt: string;
 };
