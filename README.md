@@ -20,15 +20,42 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
    cp .env.example .env
    ```
 
-2. 启动 Podman 本地基础设施：
+2. 一键初始化本地环境：
+
+   ```bash
+   make setup-local
+   ```
+
+   该命令会启动 Podman 基础设施、安装后端依赖、执行 Alembic migration、写入 demo 数据、下载 `docyx/pc-part-dataset` 到 `.cache/pc-part-dataset`、导入真实商品数据到 PostgreSQL，并同步知识库 RAG 到 ChromaDB。
+
+   macOS 首次使用 Podman 时，先执行 `podman machine init` 和 `podman machine start`。
+
+3. 启动后端：
+
+   ```bash
+   cd backend
+   .venv/bin/uvicorn app.main:app --reload
+   ```
+
+4. 启动前端：
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+## 手动初始化
+
+如果需要分步调试，可以按下面流程手动初始化。
+
+1. 启动 Podman 本地基础设施：
 
    ```bash
    ./scripts/podman-infra.sh up
    ```
 
-   macOS 首次使用 Podman 时，先执行 `podman machine init` 和 `podman machine start`。
-
-3. 初始化后端：
+2. 初始化后端：
 
    ```bash
    cd backend
@@ -41,7 +68,7 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
    uvicorn app.main:app --reload
    ```
 
-4. 启动前端：
+3. 启动前端：
 
    ```bash
    cd frontend
@@ -51,7 +78,26 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
 
 ## 数据集
 
-`docyx/pc-part-dataset` 可作为商品种子数据来源。导入适配器会把 JSON 里的 `name/price/color/connection_type/max_dpi/switches` 等字段映射为本项目的 `spu/sku + attribute_key/value + goods_attribute_relation` 模型。该数据集缺少库存、订单、售后和中文详情，因此本项目会生成本地 demo 库存与客服数据。
+`docyx/pc-part-dataset` 可作为商品种子数据来源。导入适配器会把 JSON 里的 `name/price/color/connection_type/max_dpi/switches/wireless/microphone` 等字段映射为本项目的 `spu/sku + attribute_key/value + goods_attribute_relation` 模型。该数据集缺少库存、订单、售后和中文详情，因此本项目会生成本地 demo 库存与客服数据。
+
+默认一键初始化会把数据集 clone 到 `.cache/pc-part-dataset`：
+
+```bash
+make dataset
+make data-import
+```
+
+如需使用已有数据集路径：
+
+```bash
+make data-import DATASET_DIR=/path/to/pc-part-dataset
+```
+
+知识库 RAG 数据源仍是 PostgreSQL 的 `knowledge_document`，同步到 ChromaDB：
+
+```bash
+make knowledge-sync
+```
 
 ## Podman 常用命令
 
