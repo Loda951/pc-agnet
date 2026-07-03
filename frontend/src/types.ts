@@ -39,10 +39,28 @@ export type SuggestedAction = {
   payload: Record<string, unknown>;
 };
 
+export type BoundaryClassification = {
+  classification: "in_scope_auto" | "human_handoff_required" | "out_of_scope";
+  reason: string;
+  display_message: string;
+};
+
+export type EvidenceItem = {
+  source_type: "knowledge_document";
+  source_id: number;
+  title: string;
+  document_type: string;
+  snippet: string;
+  score?: number | null;
+  metadata: Record<string, unknown>;
+};
+
 export type ChatResponse = {
   conversation_id: number;
   answer: string;
   intent: string;
+  boundary: BoundaryClassification;
+  evidence: EvidenceItem[];
   products: ProductCard[];
   order?: OrderCard | null;
   suggested_actions: SuggestedAction[];
@@ -52,6 +70,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  boundary?: BoundaryClassification;
 };
 
 export type AfterSalesTicket = {

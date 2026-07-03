@@ -32,10 +32,17 @@ async def health(
 
     try:
         async with httpx.AsyncClient(timeout=2) as client:
-            response = await client.get(
-                f"http://{settings.chroma_host}:{settings.chroma_port}/api/v1/heartbeat"
-            )
-            checks["chroma"] = "ok" if response.is_success else f"http {response.status_code}"
+            last_status = None
+            for path in ("/api/v2/heartbeat", "/api/v1/heartbeat"):
+                response = await client.get(
+                    f"http://{settings.chroma_host}:{settings.chroma_port}{path}"
+                )
+                if response.is_success:
+                    checks["chroma"] = "ok"
+                    break
+                last_status = response.status_code
+            else:
+                checks["chroma"] = f"http {last_status}"
     except Exception as exc:  # pragma: no cover
         checks["chroma"] = f"error: {exc}"
 

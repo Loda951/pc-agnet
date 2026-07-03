@@ -5,7 +5,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.intent import build_product_search, classify_intent, extract_order_id
+from app.agent.intent import (
+    build_product_search,
+    classify_boundary,
+    classify_intent,
+    extract_order_id,
+)
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -14,14 +19,27 @@ from app.models import AgentRun
 from app.repositories.catalog import CatalogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.orders import OrderRepository
-from app.schemas.chat import ChatRequest, ChatResponse, SuggestedAction
+from app.schemas.chat import (
+    BoundaryClassification,
+    ChatRequest,
+    ChatResponse,
+    EvidenceItem,
+    SuggestedAction,
+)
+from app.services.knowledge_rag import ChromaKnowledgeService
 
 
 class AgentRuntime:
-    def __init__(self, session: AsyncSession, settings: Settings):
+    def __init__(
+        self,
+        session: AsyncSession,
+        settings: Settings,
+        knowledge_service: ChromaKnowledgeService | None = None,
+    ):
         self.session = session
         self.settings = settings
         self.llm = build_chat_model(settings)
+        self.knowledge_service = knowledge_service or ChromaKnowledgeService(session, settings)
 
     async def run(self, request: ChatRequest) -> ChatResponse:
         graph = self._build_graph()
@@ -36,6 +54,8 @@ class AgentRuntime:
             conversation_id=result["conversation_id"],
             answer=result["answer"],
             intent=result["intent"],
+            boundary=BoundaryClassification(**result["boundary"]),
+            evidence=_normalize_evidence(result.get("evidence", [])),
             products=result.get("products", []),
             order=result.get("order"),
             suggested_actions=[
@@ -46,14 +66,22 @@ class AgentRuntime:
     def _build_graph(self):
         workflow = StateGraph(AgentState)
         workflow.add_node("load_context", self._load_context)
+        workflow.add_node("classify_boundary", self._classify_boundary)
         workflow.add_node("route_intent", self._route_intent)
         workflow.add_node("retrieve", self._retrieve)
+        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("generate", self._generate)
         workflow.add_node("persist", self._persist)
         workflow.set_entry_point("load_context")
-        workflow.add_edge("load_context", "route_intent")
+        workflow.add_edge("load_context", "classify_boundary")
+        workflow.add_conditional_edges(
+            "classify_boundary",
+            self._route_by_boundary,
+            {"auto": "route_intent", "blocked": "generate"},
+        )
         workflow.add_edge("route_intent", "retrieve")
-        workflow.add_edge("retrieve", "generate")
+        workflow.add_edge("retrieve", "retrieve_knowledge")
+        workflow.add_edge("retrieve_knowledge", "generate")
         workflow.add_edge("generate", "persist")
         workflow.add_edge("persist", END)
         return workflow.compile()
@@ -71,6 +99,22 @@ class AgentRuntime:
         ]
         return state
 
+    async def _classify_boundary(self, state: AgentState) -> AgentState:
+        boundary = classify_boundary(state["message"])
+        state["boundary"] = boundary.model_dump(mode="json")
+        if boundary.classification != "in_scope_auto":
+            state["intent"] = (
+                "out_of_scope"
+                if boundary.classification == "out_of_scope"
+                else classify_intent(state["message"])
+            )
+            state["parsed"] = {}
+        return state
+
+    def _route_by_boundary(self, state: AgentState) -> str:
+        boundary = state["boundary"]["classification"]
+        return "auto" if boundary == "in_scope_auto" else "blocked"
+
     async def _route_intent(self, state: AgentState) -> AgentState:
         intent = classify_intent(state["message"])
         parsed: dict[str, Any] = {}
@@ -82,6 +126,7 @@ class AgentRuntime:
             parsed["order_id"] = extract_order_id(state["message"])
         state["intent"] = intent
         state["parsed"] = parsed
+        state["evidence"] = []
         return state
 
     async def _retrieve(self, state: AgentState) -> AgentState:
@@ -116,8 +161,34 @@ class AgentRuntime:
             )
         return state
 
+    async def _retrieve_knowledge(self, state: AgentState) -> AgentState:
+        repo = ConversationRepository(self.session)
+        try:
+            evidence = await self.knowledge_service.retrieve(state["message"])
+            state["evidence"] = evidence
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                {"query": state["message"], "limit": 3},
+                {
+                    "count": len(evidence),
+                    "evidence": [item.model_dump(mode="json") for item in evidence],
+                },
+            )
+        except Exception as exc:
+            state["evidence"] = []
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                {"query": state["message"], "limit": 3},
+                {"error": type(exc).__name__, "message": str(exc)},
+            )
+        return state
+
     async def _generate(self, state: AgentState) -> AgentState:
-        if self.llm:
+        if state["boundary"]["classification"] != "in_scope_auto":
+            state["answer"] = self._generate_boundary_answer(state)
+        elif self.llm:
             state["answer"] = await self._generate_with_llm(state)
         else:
             state["answer"] = self._generate_fallback(state)
@@ -132,11 +203,14 @@ class AgentRuntime:
             state["answer"],
             {
                 "intent": state["intent"],
+                "boundary": state["boundary"],
+                "evidence": _dump_evidence(state.get("evidence", [])),
                 "products": [p.model_dump(mode="json") for p in state.get("products", [])],
                 "order": state["order"].model_dump(mode="json") if state.get("order") else None,
             },
         )
-        await self._maybe_update_memory(repo, state)
+        if state["boundary"]["classification"] == "in_scope_auto":
+            await self._maybe_update_memory(repo, state)
         run = await self.session.get(AgentRun, state["run_id"])
         if run:
             await repo.finish_run(run, state["intent"], _json_safe_state(state))
@@ -146,7 +220,9 @@ class AgentRuntime:
     async def _generate_with_llm(self, state: AgentState) -> str:
         context = {
             "intent": state["intent"],
+            "boundary": state["boundary"],
             "memory": state.get("memory", []),
+            "evidence": _dump_evidence(state.get("evidence", [])),
             "products": [p.model_dump(mode="json") for p in state.get("products", [])],
             "order": state["order"].model_dump(mode="json") if state.get("order") else None,
         }
@@ -158,7 +234,12 @@ class AgentRuntime:
         )
         return str(response.content)
 
+    def _generate_boundary_answer(self, state: AgentState) -> str:
+        boundary = BoundaryClassification(**state["boundary"])
+        return boundary.display_message
+
     def _generate_fallback(self, state: AgentState) -> str:
+        evidence = _normalize_evidence(state.get("evidence", []))
         if state["intent"] == "product_recommendation":
             products = state.get("products", [])
             if not products:
@@ -176,7 +257,7 @@ class AgentRuntime:
             lines.append(
                 "如果你告诉我主要用途，比如 FPS、办公、剪辑或通勤，我可以再给你排个优先级。"
             )
-            return "\n".join(lines)
+            return _append_evidence("\n".join(lines), evidence)
 
         if state["intent"] == "order_status":
             order = state.get("order")
@@ -186,31 +267,48 @@ class AgentRuntime:
             ship_line = "暂未发货"
             if logistics and logistics.logistic_no:
                 ship_line = f"{logistics.express_company or '快递'} {logistics.logistic_no}"
-            return (
+            return _append_evidence(
                 f"订单 {order.id} 当前是「{order.status_label}」，实付 ¥{order.pay_amount}。\n"
                 f"物流：{ship_line}。\n"
                 f"订单里共有 {len(order.items)} 个明细，"
-                "需要退换货的话我可以基于具体明细创建售后工单。"
+                "需要退换货的话，我可以帮你整理信息并转人工处理。",
+                evidence,
             )
 
         if state["intent"] == "after_sales":
+            if evidence:
+                lines = ["我查到这些售后政策依据："]
+                lines.extend(_evidence_lines(evidence))
+                lines.append(
+                    "如果要申请办理、确认责任或承诺退款，需要转人工客服处理。"
+                )
+                return "\n".join(lines)
             return (
-                "可以创建退换货工单。请提供订单号、要处理的商品明细，以及是退货、换货、退款还是维修。"
-                "如果你已经在订单卡片里看到商品，前端可以直接点“创建售后”。"
+                "我可以说明退换货、退款和维修的基础流程；如果要申请办理、确认责任或承诺退款，"
+                "需要转人工客服处理。"
             )
 
+        if evidence:
+            return "\n".join(["我按知识库信息先回答：", *_evidence_lines(evidence)])
+
         return (
-            "我可以帮你推荐 PC 外设、查询订单物流，也可以创建退换货工单。你可以直接说预算和用途。"
+            "我可以帮你推荐 PC 外设、查询订单物流，也可以说明售后流程。"
+            "涉及退换货、退款或维修办理时会转人工。"
         )
 
     def _suggest_actions(self, state: AgentState) -> list[dict[str, Any]]:
+        boundary = state["boundary"]["classification"]
+        if boundary == "human_handoff_required":
+            return [{"label": "转人工客服", "payload": {"handoff": True}}]
+        if boundary == "out_of_scope":
+            return [{"label": "咨询外设推荐", "payload": {"message": "推荐 300 元以内无线鼠标"}}]
         if state["intent"] == "product_recommendation" and state.get("products"):
             return [
                 {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},
                 {"label": "换成无线", "payload": {"message": "推荐无线款"}},
             ]
         if state["intent"] == "order_status" and state.get("order"):
-            return [{"label": "创建售后工单", "payload": {"orderId": state["order"].id}}]
+            return [{"label": "转人工处理售后", "payload": {"orderId": state["order"].id}}]
         return []
 
     async def _maybe_update_memory(self, repo: ConversationRepository, state: AgentState) -> None:
@@ -226,6 +324,8 @@ def _json_safe_state(state: AgentState) -> dict[str, Any]:
     for key, value in state.items():
         if key == "products":
             result[key] = [item.model_dump(mode="json") for item in value]
+        elif key == "evidence":
+            result[key] = _dump_evidence(value)
         elif key == "order" and value is not None:
             result[key] = value.model_dump(mode="json")
         elif isinstance(value, Decimal):
@@ -233,3 +333,21 @@ def _json_safe_state(state: AgentState) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _normalize_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[EvidenceItem]:
+    return [item if isinstance(item, EvidenceItem) else EvidenceItem(**item) for item in items]
+
+
+def _dump_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item.model_dump(mode="json") for item in _normalize_evidence(items)]
+
+
+def _append_evidence(answer: str, evidence: list[EvidenceItem]) -> str:
+    if not evidence:
+        return answer
+    return "\n\n参考依据：\n" + "\n".join(_evidence_lines(evidence))
+
+
+def _evidence_lines(evidence: list[EvidenceItem]) -> list[str]:
+    return [f"- [{item.document_type}] {item.title}：{item.snippet}" for item in evidence[:3]]

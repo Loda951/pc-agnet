@@ -13,6 +13,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  min-height: 100vh;
 }
 
 button,
@@ -65,7 +66,8 @@ button {
 .topbar span,
 .product-card small,
 .order-box small,
-.metric span {
+.metric span,
+.boundary-card p {
   color: #69777d;
 }
 
@@ -126,9 +128,15 @@ button {
 
 .chat-panel {
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
+  height: 100dvh;
+  max-height: 100vh;
+  max-height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: #eef2f4;
+  overflow: hidden;
 }
 
 .topbar {
@@ -166,8 +174,58 @@ button {
   border-color: #f0d19d;
 }
 
+.status-stack {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.boundary-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.boundary-badge.compact {
+  width: fit-content;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.boundary-badge.auto,
+.boundary-card.auto {
+  color: #0b6b57;
+  background: #ecf8f3;
+  border-color: #b7d4ca;
+}
+
+.boundary-badge.handoff,
+.boundary-card.handoff {
+  color: #8a4b00;
+  background: #fff8e8;
+  border-color: #edcf95;
+}
+
+.boundary-badge.blocked,
+.boundary-card.blocked {
+  color: #9f1239;
+  background: #fff1f3;
+  border-color: #fecdd3;
+}
+
 .messages {
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 22px;
   display: flex;
   flex-direction: column;
@@ -191,7 +249,13 @@ button {
   grid-column: 2;
 }
 
-.message.user p {
+.message.user .bubble-stack {
+  grid-column: 1;
+  grid-row: 1;
+  justify-items: end;
+}
+
+.message.user .bubble-stack p {
   grid-column: 1;
   grid-row: 1;
   background: #12343b;
@@ -207,6 +271,13 @@ button {
   background: #ffffff;
   color: #0b6b57;
   border: 1px solid #d9e1e3;
+}
+
+.bubble-stack {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
 }
 
 .message p {
@@ -279,9 +350,16 @@ button {
   gap: 10px;
 }
 
+.evidence-list {
+  display: grid;
+  gap: 10px;
+}
+
 .product-card,
+.evidence-card,
 .order-box,
-.ticket-result,
+.handoff-note,
+.boundary-card,
 .empty-state {
   border: 1px solid #d9e1e3;
   border-radius: 8px;
@@ -335,12 +413,48 @@ button {
   font-size: 13px;
 }
 
+.evidence-card {
+  padding: 12px;
+}
+
+.evidence-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.evidence-card-head strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.evidence-card-head span {
+  flex: 0 0 auto;
+  color: #0b6b57;
+  background: #ecf8f3;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.evidence-card p {
+  margin: 8px 0;
+  color: #516168;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.evidence-card small {
+  color: #69777d;
+}
+
 .order-box {
   padding: 12px;
 }
 
 .order-head,
-.ticket-result {
+.handoff-note {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -348,7 +462,7 @@ button {
 }
 
 .order-head span,
-.ticket-result span {
+.handoff-note span {
   color: #0b6b57;
   background: #ecf8f3;
   border-radius: 999px;
@@ -373,9 +487,24 @@ button {
   border-color: #0b6b57;
 }
 
-.ticket-result {
+.handoff-note {
   margin-top: 10px;
   padding: 10px;
+}
+
+.boundary-card {
+  padding: 12px;
+}
+
+.boundary-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boundary-card p {
+  margin: 8px 0 0;
+  line-height: 1.45;
 }
 
 .empty-state {

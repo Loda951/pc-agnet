@@ -6,6 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AgentRun, Conversation, MemoryFact, Message, ToolCall
 
 
+def utc_now_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 class ConversationRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -51,7 +55,7 @@ class ConversationRepository:
         run.status = "completed"
         run.intent = intent
         run.state_json = state
-        run.completed_at = datetime.now(UTC)
+        run.completed_at = utc_now_naive()
 
     async def add_tool_call(
         self, agent_run_id: int, tool_name: str, input_json: dict, output_json: dict
@@ -85,7 +89,7 @@ class ConversationRepository:
         if existing:
             existing.value = value
             existing.confidence = confidence
-            existing.updated_at = datetime.now(UTC)
+            existing.updated_at = utc_now_naive()
         else:
             self.session.add(
                 MemoryFact(user_id=user_id, key=key, value=value, confidence=confidence)
