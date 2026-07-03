@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, ForeignKey, Index, Numeric, String, Text, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,9 +16,11 @@ class AppUser(Base):
     display_name: Mapped[str] = mapped_column(String(64), nullable=False)
     phone: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    last_login_at: Mapped[datetime | None]
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
 
 class UserAuthCredential(Base):
@@ -28,9 +30,15 @@ class UserAuthCredential(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False, unique=True)
     login_identifier: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    password_updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
-    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
-    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    password_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
     user: Mapped[AppUser] = relationship()
 
@@ -43,10 +51,14 @@ class UserSession(Base):
     refresh_token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     user_agent: Mapped[str | None] = mapped_column(String(255))
-    expires_at: Mapped[datetime] = mapped_column(nullable=False)
-    revoked_at: Mapped[datetime | None]
-    last_used_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
-    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
     user: Mapped[AppUser] = relationship()
 

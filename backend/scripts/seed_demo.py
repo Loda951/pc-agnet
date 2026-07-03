@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
 from app.models import (
@@ -120,6 +120,8 @@ async def _get_or_create_user(session):
     if user:
         user.login_identifier = normalize_login_identifier(DEMO_LOGIN_IDENTIFIER)
         user.status = "active"
+        user.updated_at = datetime.now(UTC)
+        await _sync_app_user_id_sequence(session)
         return user
     user = AppUser(
         id=1,
@@ -130,6 +132,7 @@ async def _get_or_create_user(session):
     )
     session.add(user)
     await session.flush()
+    await _sync_app_user_id_sequence(session)
     return user
 
 
@@ -148,7 +151,7 @@ async def _ensure_user_auth_credential(
     if credential:
         credential.login_identifier = login_identifier
         credential.password_hash = password_hash
-        credential.updated_at = utc_now_naive()
+        credential.updated_at = datetime.now(UTC)
         return credential
     credential = UserAuthCredential(
         user_id=user.id,
@@ -158,6 +161,19 @@ async def _ensure_user_auth_credential(
     session.add(credential)
     await session.flush()
     return credential
+
+
+async def _sync_app_user_id_sequence(session) -> None:
+    await session.execute(
+        text(
+            """
+            SELECT setval(
+              pg_get_serial_sequence('app_user', 'id'),
+              GREATEST((SELECT COALESCE(MAX(id), 1) FROM app_user), 1)
+            )
+            """
+        )
+    )
 
 
 async def _upsert_product(session, product: ImportedProduct) -> Sku:
