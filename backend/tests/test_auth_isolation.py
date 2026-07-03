@@ -104,6 +104,19 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
     )
     assert user_b_chat.status_code == 200
     assert user_b_chat.json()["conversation_id"] != user_a_conversation_id
+    user_b_conversation_id = user_b_chat.json()["conversation_id"]
+
+    conversations_response = await api_client.get("/api/conversations", headers=user_b_headers)
+    assert conversations_response.status_code == 200
+    conversation_ids = {item["id"] for item in conversations_response.json()}
+    assert user_b_conversation_id in conversation_ids
+    assert user_a_conversation_id not in conversation_ids
+
+    forbidden_conversation = await api_client.get(
+        f"/api/conversations/{user_a_conversation_id}",
+        headers=user_b_headers,
+    )
+    assert forbidden_conversation.status_code == 404
 
     ticket_response = await api_client.get(f"/api/after-sales/{ticket_id}", headers=user_b_headers)
     assert ticket_response.status_code == 404

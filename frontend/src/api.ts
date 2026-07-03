@@ -1,4 +1,12 @@
-import type { AuthSession, AuthTokenResponse, AuthUser, ChatResponse } from "./types";
+import type {
+  AuthSession,
+  AuthTokenResponse,
+  AuthUser,
+  ChatResponse,
+  ChatStreamEvent,
+  ConversationDetail,
+  ConversationSummary
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const ACCESS_TOKEN_KEY = "pc-agent.accessToken";
@@ -145,6 +153,180 @@ export async function sendChat(message: string, conversationId?: number): Promis
   return response.json();
 }
 
+type SendChatStreamOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  onEvent: (event: ChatStreamEvent) => void;
+};
+
+export async function sendChatStream(
+  message: string,
+  conversationId: number | undefined,
+  options: SendChatStreamOptions
+): Promise<ChatResponse> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 45000;
+  let timeoutTriggered = false;
+  let finalResponse: ChatResponse | null = null;
+  let errorEvent: Extract<ChatStreamEvent, { type: "error" }> | null = null;
+  let timeoutId = window.setTimeout(() => {
+    timeoutTriggered = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const resetTimeout = () => {
+    window.clearTimeout(timeoutId);
+    timeoutId = window.setTimeout(() => {
+      timeoutTriggered = true;
+      controller.abort();
+    }, timeoutMs);
+  };
+
+  const abortFromCaller = () => controller.abort();
+  if (options.signal?.aborted) {
+    abortFromCaller();
+  } else {
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+
+  try {
+    const response = await authorizedFetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const detail = await parseErrorDetail(response);
+      throw new ApiError(formatApiError(response.status, detail), {
+        status: response.status,
+        detail,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500
+      });
+    }
+
+    if (!response.body) {
+      throw new ApiError("浏览器没有收到流式响应体，请稍后重试。", { retryable: true });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      resetTimeout();
+      buffer += decoder.decode(value, { stream: true });
+      const events = consumeSseEvents(buffer);
+      buffer = events.remaining;
+
+      for (const event of events.items) {
+        options.onEvent(event);
+        if (event.type === "done") {
+          finalResponse = event.response;
+        } else if (event.type === "error") {
+          errorEvent = event;
+        }
+      }
+    }
+
+    buffer += decoder.decode();
+    const events = consumeSseEvents(buffer, true);
+    for (const event of events.items) {
+      options.onEvent(event);
+      if (event.type === "done") {
+        finalResponse = event.response;
+      } else if (event.type === "error") {
+        errorEvent = event;
+      }
+    }
+
+    if (errorEvent) {
+      throw new ApiError(errorEvent.message, {
+        retryable: errorEvent.retryable ?? true
+      });
+    }
+
+    if (!finalResponse) {
+      throw new ApiError("连接中断，AI 回答未完成，可以重试。", {
+        retryable: true
+      });
+    }
+
+    return finalResponse;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    if (isAbortError(error) || controller.signal.aborted) {
+      if (timeoutTriggered) {
+        throw new ApiError("等待 AI 回复超时，请重试或稍后再试。", {
+          status: 408,
+          retryable: true
+        });
+      }
+      throw new ApiError("已取消本次回答。", {
+        status: 499,
+        retryable: false
+      });
+    }
+    throw new ApiError("流式连接异常中断，请稍后重试。", {
+      retryable: true
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+export async function listConversations(): Promise<ConversationSummary[]> {
+  const response = await authorizedFetch("/api/conversations", { method: "GET" });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+  return response.json();
+}
+
+export async function deleteConversation(conversationId: number): Promise<void> {
+  const response = await authorizedFetch(`/api/conversations/${conversationId}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+}
+
+export async function getConversation(conversationId: number): Promise<ConversationDetail> {
+  const response = await authorizedFetch(`/api/conversations/${conversationId}`, {
+    method: "GET"
+  });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+  return response.json();
+}
+
 function saveAuthSession(payload: AuthTokenResponse): AuthSession {
   localStorage.setItem(ACCESS_TOKEN_KEY, payload.access_token);
   localStorage.setItem(REFRESH_TOKEN_KEY, payload.refresh_token);
@@ -197,7 +379,10 @@ async function authorizedFetch(
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, withAuthHeader(init));
-  } catch {
+  } catch (error) {
+    if (isAbortError(error) || init.signal?.aborted) {
+      throw error;
+    }
     throw new ApiError("无法连接后端服务，请确认 API 或 Vite 代理已启动。", {
       retryable: true
     });
@@ -215,7 +400,10 @@ async function authorizedFetch(
 
   try {
     return await fetch(`${API_BASE}${path}`, withAuthHeader(init));
-  } catch {
+  } catch (error) {
+    if (isAbortError(error) || init.signal?.aborted) {
+      throw error;
+    }
     throw new ApiError("无法连接后端服务，请确认 API 或 Vite 代理已启动。", {
       retryable: true
     });
@@ -229,6 +417,38 @@ function withAuthHeader(init: RequestInit): RequestInit {
     headers.set("Authorization", `Bearer ${accessToken}`);
   }
   return { ...init, headers };
+}
+
+function consumeSseEvents(
+  buffer: string,
+  flush = false
+): { items: ChatStreamEvent[]; remaining: string } {
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const blocks = normalized.split("\n\n");
+  const remaining = flush ? "" : (blocks.pop() ?? "");
+  const completeBlocks = flush ? blocks.filter(Boolean) : blocks;
+  return {
+    items: completeBlocks.flatMap(parseSseBlock),
+    remaining
+  };
+}
+
+function parseSseBlock(block: string): ChatStreamEvent[] {
+  const data = block
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.replace(/^data:\s?/, ""))
+    .join("\n")
+    .trim();
+
+  if (!data) return [];
+
+  try {
+    const payload = JSON.parse(data) as ChatStreamEvent;
+    return payload && typeof payload.type === "string" ? [payload] : [];
+  } catch {
+    return [];
+  }
 }
 
 async function parseErrorDetail(response: Response): Promise<unknown> {
@@ -271,4 +491,8 @@ function formatApiError(status: number, detail: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }

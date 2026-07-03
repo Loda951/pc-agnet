@@ -33,10 +33,16 @@ async def chat_stream(
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
-        response = await AgentRuntime(session, settings).run(request, current_user.id)
-        payload = response.model_dump(mode="json")
-        for line in response.answer.splitlines() or [response.answer]:
-            yield f"data: {json.dumps({'type': 'delta', 'content': line}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'response': payload}, ensure_ascii=False)}\n\n"
+        async for event in AgentRuntime(session, settings).run_stream(request, current_user.id):
+            event_type = event.get("type", "message")
+            payload = json.dumps(event, ensure_ascii=False, default=str)
+            yield f"event: {event_type}\ndata: {payload}\n\n"
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

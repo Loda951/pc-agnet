@@ -99,7 +99,8 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
-  status?: "sent" | "failed" | "received";
+  status?: "sent" | "failed" | "received" | "streaming" | "cancelled";
+  streamStage?: string;
   boundary?: BoundaryClassification;
   intent?: string;
   evidenceCount?: number;
@@ -118,7 +119,15 @@ export type AfterSalesTicket = {
   created_at: string;
 };
 
-export type ResponseStatus = "ready" | "loading" | "success" | "handoff" | "blocked" | "error";
+export type ResponseStatus =
+  | "ready"
+  | "loading"
+  | "streaming"
+  | "success"
+  | "handoff"
+  | "blocked"
+  | "error"
+  | "cancelled";
 
 export type OperatorProfile = {
   name: string;
@@ -141,6 +150,84 @@ export type RequestError = {
   status?: number;
   request?: PendingRequest;
 };
+
+export type ConversationSummary = {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message?: string | null;
+  last_message_role?: "user" | "assistant" | null;
+  last_message_at?: string | null;
+};
+
+export type ConversationMessageItem = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type ConversationDetail = {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: ConversationMessageItem[];
+};
+
+export type ChatStreamEvent =
+  | {
+      type: "run_started";
+      conversation_id: number;
+      run_id: number;
+    }
+  | {
+      type: "boundary";
+      conversation_id: number;
+      run_id: number;
+      boundary: BoundaryClassification;
+    }
+  | {
+      type: "tool_call";
+      conversation_id: number;
+      run_id: number;
+      tool_name: string;
+      status: "started" | "completed" | "error";
+      input?: Record<string, unknown>;
+      output?: Record<string, unknown>;
+    }
+  | {
+      type: "context";
+      conversation_id: number;
+      run_id: number;
+      intent?: string;
+      boundary?: BoundaryClassification;
+      evidence: EvidenceItem[];
+      products: ProductCard[];
+      order?: OrderCard | null;
+    }
+  | {
+      type: "delta";
+      conversation_id: number;
+      run_id: number;
+      delta: string;
+    }
+  | {
+      type: "done";
+      conversation_id: number;
+      run_id: number;
+      response: ChatResponse;
+    }
+  | {
+      type: "error";
+      conversation_id?: number;
+      run_id?: number;
+      error_type?: string;
+      message: string;
+      retryable?: boolean;
+    };
 
 export type ConversationTurn = {
   id: string;
