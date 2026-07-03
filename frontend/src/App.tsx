@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   clearAuthSession,
+  deleteConversation as deleteConversationApi,
   getConversation,
   listConversations,
   login,
@@ -171,6 +172,21 @@ export default function App() {
   function handleNewConversation() {
     if (loading) return;
     resetActiveConversation();
+  }
+
+  async function handleDeleteConversation(targetId: number) {
+    try {
+      await deleteConversationApi(targetId);
+      if (targetId === conversationId) {
+        resetActiveConversation();
+      }
+      await refreshConversations();
+    } catch (err) {
+      const requestError = toRequestError(err, { message: "delete conversation" });
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+      }
+    }
   }
 
   async function handleSelectConversation(nextConversationId: number) {
@@ -560,9 +576,6 @@ export default function App() {
     <div className="shell">
       <Sidebar
         operator={operatorProfile}
-        skuCount={products.length}
-        orderCount={order ? 1 : 0}
-        evidenceCount={evidence.length}
         conversations={conversations}
         activeConversationId={conversationId}
         conversationsLoading={conversationsLoading}
@@ -570,6 +583,7 @@ export default function App() {
         onLogout={() => void handleLogout()}
         onNewConversation={handleNewConversation}
         onSelectConversation={(id) => void handleSelectConversation(id)}
+        onDeleteConversation={handleDeleteConversation}
       />
 
       <ChatPanel
@@ -598,6 +612,9 @@ export default function App() {
         ticketType={ticketType}
         ticketReason={ticketReason}
         loading={loading}
+        skuCount={products.length}
+        orderCount={order ? 1 : 0}
+        evidenceCount={evidence.length}
         onTicketTypeChange={setTicketType}
         onTicketReasonChange={setTicketReason}
         onRequestHandoff={handleRequestHandoff}

@@ -9,7 +9,8 @@ import {
   PackageSearch,
   RotateCcw,
   ShieldCheck,
-  Truck
+  Truck,
+  Boxes
 } from "lucide-react";
 import { useState } from "react";
 import { BoundaryBadge, BoundaryStatusCard } from "./Boundary";
@@ -33,6 +34,9 @@ type ContextPanelProps = {
   ticketType: string;
   ticketReason: string;
   loading: boolean;
+  skuCount: number;
+  orderCount: number;
+  evidenceCount: number;
   onTicketTypeChange: (value: string) => void;
   onTicketReasonChange: (value: string) => void;
   onRequestHandoff: () => void;
@@ -49,105 +53,152 @@ export function ContextPanel({
   ticketType,
   ticketReason,
   loading,
+  skuCount,
+  orderCount,
+  evidenceCount,
   onTicketTypeChange,
   onTicketReasonChange,
   onRequestHandoff,
   onAcknowledgeHandoff
 }: ContextPanelProps) {
+  const showAfterSales =
+    boundary?.classification === "human_handoff_required" || handoffNotice !== null;
+
   return (
     <aside className="context-panel">
+      <div className="metrics-strip">
+        <Metric icon={<Boxes size={14} />} label="SKU" value={skuCount} />
+        <Metric icon={<Truck size={14} />} label="订单" value={orderCount} />
+        <Metric icon={<BookOpenText size={14} />} label="依据" value={evidenceCount} />
+      </div>
+
       <section className="panel-section">
         <div className="section-title">
-          <ShieldCheck size={18} />
+          <ShieldCheck size={14} />
           <h2>边界</h2>
         </div>
-        {boundary ? <BoundaryStatusCard boundary={boundary} /> : <EmptyState text="等待请求" />}
+        {boundary ? (
+          <BoundaryStatusCard boundary={boundary} />
+        ) : (
+          <EmptyState text="等待请求" />
+        )}
       </section>
 
-      <section className="panel-section">
-        <div className="section-title">
-          <Headset size={18} />
-          <h2>接管</h2>
-        </div>
-        <HandoffPanel
-          boundary={boundary}
-          notice={handoffNotice}
-          order={order}
-          onAcknowledge={onAcknowledgeHandoff}
-        />
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <History size={18} />
-          <h2>上下文</h2>
-        </div>
-        <ConversationTimeline turns={turns} />
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <BookOpenText size={18} />
-          <h2>依据</h2>
-        </div>
-        <div className="evidence-list">
-          {evidence.map((item) => (
-            <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
-          ))}
-          {!evidence.length && <EmptyState text="暂无知识库依据" />}
-        </div>
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <PackageSearch size={18} />
-          <h2>商品</h2>
-        </div>
-        <div className="product-list">
-          {products.map((product) => (
-            <ProductCardView key={product.sku_id} product={product} />
-          ))}
-          {!products.length && <EmptyState text="暂无检索结果" />}
-        </div>
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <Truck size={18} />
-          <h2>订单</h2>
-        </div>
-        {order ? <OrderCardView order={order} /> : <EmptyState text="暂无订单上下文" />}
-      </section>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <RotateCcw size={18} />
-          <h2>售后</h2>
-        </div>
-        <div className="ticket-form">
-          <select
-            aria-label="售后类型"
-            value={ticketType}
-            onChange={(event) => onTicketTypeChange(event.target.value)}
-            disabled={loading}
-          >
-            <option value="return">退货</option>
-            <option value="exchange">换货</option>
-            <option value="refund">退款</option>
-            <option value="repair">维修</option>
-          </select>
-          <input
-            aria-label="售后原因"
-            value={ticketReason}
-            onChange={(event) => onTicketReasonChange(event.target.value)}
-            disabled={loading}
+      {(boundary?.classification === "human_handoff_required" || handoffNotice) && (
+        <section className="panel-section">
+          <div className="section-title">
+            <Headset size={14} />
+            <h2>接管</h2>
+          </div>
+          <HandoffPanel
+            boundary={boundary}
+            notice={handoffNotice}
+            order={order}
+            onAcknowledge={onAcknowledgeHandoff}
           />
-          <button type="button" onClick={onRequestHandoff} disabled={loading || !ticketReason.trim()}>
-            转人工处理
-          </button>
-        </div>
-      </section>
+        </section>
+      )}
+
+      {turns.length > 0 && (
+        <section className="panel-section">
+          <div className="section-title">
+            <History size={14} />
+            <h2>上下文</h2>
+          </div>
+          <ConversationTimeline turns={turns} />
+        </section>
+      )}
+
+      {evidence.length > 0 && (
+        <section className="panel-section">
+          <div className="section-title">
+            <BookOpenText size={14} />
+            <h2>依据</h2>
+          </div>
+          <div className="evidence-list">
+            {evidence.map((item) => (
+              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {products.length > 0 && (
+        <section className="panel-section">
+          <div className="section-title">
+            <PackageSearch size={14} />
+            <h2>商品</h2>
+          </div>
+          <div className="product-list">
+            {products.map((product) => (
+              <ProductCardView key={product.sku_id} product={product} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {order && (
+        <section className="panel-section">
+          <div className="section-title">
+            <Truck size={14} />
+            <h2>订单</h2>
+          </div>
+          <OrderCardView order={order} />
+        </section>
+      )}
+
+      {showAfterSales && (
+        <section className="panel-section">
+          <div className="section-title">
+            <RotateCcw size={14} />
+            <h2>售后</h2>
+          </div>
+          <div className="ticket-form">
+            <select
+              aria-label="售后类型"
+              value={ticketType}
+              onChange={(event) => onTicketTypeChange(event.target.value)}
+              disabled={loading}
+            >
+              <option value="return">退货</option>
+              <option value="exchange">换货</option>
+              <option value="refund">退款</option>
+              <option value="repair">维修</option>
+            </select>
+            <input
+              aria-label="售后原因"
+              value={ticketReason}
+              onChange={(event) => onTicketReasonChange(event.target.value)}
+              disabled={loading}
+              placeholder="描述售后原因"
+            />
+            <button type="button" onClick={onRequestHandoff} disabled={loading || !ticketReason.trim()}>
+              转人工处理
+            </button>
+          </div>
+        </section>
+      )}
     </aside>
+  );
+}
+
+function Metric({
+  icon,
+  label,
+  value
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number;
+}) {
+  return (
+    <div className="metric">
+      {icon}
+      <div>
+        <strong>{value}</strong>
+        <span>{label}</span>
+      </div>
+    </div>
   );
 }
 
@@ -162,19 +213,16 @@ function HandoffPanel({
   order: OrderCard | null;
   onAcknowledge: () => void;
 }) {
-  const activeBoundary = boundary?.classification === "human_handoff_required" ? boundary : null;
-  const isActive = Boolean(activeBoundary || notice);
-  if (!isActive) {
-    return <EmptyState text="暂无接管请求" />;
-  }
-
+  const activeBoundary =
+    boundary?.classification === "human_handoff_required" ? boundary : null;
   const requested = notice?.requested ?? false;
   const orderId = notice?.orderId ?? order?.id;
+
   return (
     <article className="handoff-card">
       <div className="handoff-card-head">
         <div>
-          <Headset size={18} />
+          <Headset size={16} />
           <strong>人工接管</strong>
         </div>
         <span>{requested ? "已提醒" : "待确认"}</span>
@@ -195,9 +243,6 @@ function HandoffPanel({
 
 function ConversationTimeline({ turns }: { turns: ConversationTurn[] }) {
   const recentTurns = turns.slice(-5).reverse();
-  if (!recentTurns.length) {
-    return <EmptyState text="暂无会话上下文" />;
-  }
 
   return (
     <div className="turn-list">
@@ -254,7 +299,7 @@ function ProductCardView({ product }: { product: ProductCard }) {
   return (
     <article className="product-card">
       <div className="thumb">
-        <PackageSearch size={22} />
+        <PackageSearch size={20} />
       </div>
       <div>
         <h3>{product.title}</h3>

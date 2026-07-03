@@ -298,6 +298,20 @@ export async function listConversations(): Promise<ConversationSummary[]> {
   return response.json();
 }
 
+export async function deleteConversation(conversationId: number): Promise<void> {
+  const response = await authorizedFetch(`/api/conversations/${conversationId}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+}
+
 export async function getConversation(conversationId: number): Promise<ConversationDetail> {
   const response = await authorizedFetch(`/api/conversations/${conversationId}`, {
     method: "GET"

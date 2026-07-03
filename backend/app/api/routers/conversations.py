@@ -31,3 +31,17 @@ async def get_conversation(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
+
+
+@router.delete("/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: int,
+    current_user: AppUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    deleted = await ConversationRepository(session).delete_conversation(
+        current_user.id, conversation_id
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await session.commit()

@@ -170,6 +170,48 @@ class ConversationRepository:
             )
         )
 
+    async def delete_conversation(self, user_id: int, conversation_id: int) -> bool:
+        """Delete a conversation and all its messages, agent runs, and tool calls.
+
+        Returns True if the conversation was found and deleted, False if not found.
+        """
+        conversation = (
+            await self.session.execute(
+                select(Conversation).where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            return False
+
+        # Delete tool calls for all agent runs in this conversation
+        agent_runs = (
+            await self.session.execute(
+                select(AgentRun).where(AgentRun.conversation_id == conversation_id)
+            )
+        ).scalars().all()
+        for run in agent_runs:
+            await self.session.execute(
+                ToolCall.__table__.delete().where(ToolCall.agent_run_id == run.id)
+            )
+
+        # Delete agent runs
+        await self.session.execute(
+            AgentRun.__table__.delete().where(AgentRun.conversation_id == conversation_id)
+        )
+
+        # Delete messages
+        await self.session.execute(
+            Message.__table__.delete().where(Message.conversation_id == conversation_id)
+        )
+
+        # Delete the conversation itself
+        await self.session.delete(conversation)
+        await self.session.flush()
+        return True
+
     async def list_memory(self, user_id: int, limit: int = 10) -> list[MemoryFact]:
         stmt = (
             select(MemoryFact)
