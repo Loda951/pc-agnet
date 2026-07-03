@@ -4,57 +4,88 @@ from hashlib import sha1
 from typing import Any
 
 CATEGORY_NAME_MAP = {
+    "mice": "鼠标",
     "mouse": "鼠标",
     "keyboard": "键盘",
+    "keyboards": "键盘",
+    "headphone": "耳机",
     "headphones": "耳机",
+    "headset": "耳机",
+    "headsets": "耳机",
     "monitor": "显示器",
+    "monitors": "显示器",
     "webcam": "摄像头",
+    "webcams": "摄像头",
     "speakers": "音箱",
 }
 
 KNOWN_BRANDS = [
-    "Logitech",
-    "Razer",
-    "SteelSeries",
+    "Audio-Technica",
+    "Beyerdynamic",
     "Corsair",
-    "Asus",
-    "ROG",
-    "Redragon",
     "Glorious",
+    "HiFiMAN",
     "HyperX",
-    "HP",
+    "Logitech",
     "Microsoft",
-    "Wooting",
     "RK Royal Kludge",
+    "Redragon",
+    "Razer",
+    "Sennheiser",
+    "SteelSeries",
+    "Wooting",
     "Royal Kludge",
+    "Asus",
+    "Sony",
+    "Syba",
+    "ROG",
+    "HP",
 ]
 
 FILTER_ATTRIBUTES = {
+    "backlit",
     "color",
     "connection_type",
-    "tracking_method",
-    "max_dpi",
+    "enclosure_type",
+    "frequency_response",
     "hand_orientation",
-    "style",
-    "switches",
-    "backlit",
-    "tenkeyless",
-    "wireless",
+    "max_dpi",
     "microphone",
     "panel_type",
     "refresh_rate",
     "resolution",
+    "style",
+    "switches",
+    "tenkeyless",
+    "tracking_method",
+    "type",
+    "wireless",
 }
 
 SPEC_ATTRIBUTES = {
+    "backlit",
     "color",
     "connection_type",
-    "switches",
-    "backlit",
-    "tenkeyless",
-    "wireless",
+    "enclosure_type",
+    "frequency_response",
+    "hand_orientation",
+    "max_dpi",
     "microphone",
+    "refresh_rate",
+    "resolution",
+    "style",
+    "switches",
+    "tenkeyless",
+    "tracking_method",
+    "type",
+    "wireless",
 }
+
+ATTRIBUTE_KEY_ALIASES = {
+    "connection": "connection_type",
+}
+
+SKU_VARIANT_ATTRIBUTES = ("color", "switches")
 
 
 @dataclass(frozen=True)
@@ -77,14 +108,20 @@ def infer_brand(name: str) -> str:
     return name.split(" ", 1)[0]
 
 
+def normalize_attribute_key(key: str) -> str:
+    normalized = key.strip().lower().replace(" ", "_").replace("-", "_")
+    return ATTRIBUTE_KEY_ALIASES.get(normalized, normalized)
+
+
 def normalize_value(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, list):
-        return " / ".join(str(item) for item in value)
-    return str(value)
+        return " / ".join(str(item) for item in value if item is not None)
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def normalize_part_record(
@@ -98,17 +135,17 @@ def normalize_part_record(
         return None
 
     brand = infer_brand(name)
-    category = CATEGORY_NAME_MAP.get(part_type, part_type)
+    category = CATEGORY_NAME_MAP.get(part_type.lower(), part_type)
     price_cny = (Decimal(str(price)) * exchange_rate).quantize(Decimal("0.01"), ROUND_HALF_UP)
     attributes = {
-        key: value
+        normalize_attribute_key(key): value
         for key, raw in record.items()
         if key not in {"name", "price"} and (value := normalize_value(raw)) is not None
     }
     specs = {key: value for key, value in attributes.items() if key in SPEC_ATTRIBUTES}
 
     sku_suffix = []
-    for key in ("color", "connection_type", "switches"):
+    for key in SKU_VARIANT_ATTRIBUTES:
         value = attributes.get(key)
         if value and value.lower() not in name.lower():
             sku_suffix.append(value)

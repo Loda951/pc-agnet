@@ -20,4 +20,5 @@ def build_chat_model(settings: Settings) -> ChatOpenAI | None:
         base_url=resolve_llm_base_url(settings),
         model=settings.llm_model,
         temperature=0.2,
+        streaming=True,
     )

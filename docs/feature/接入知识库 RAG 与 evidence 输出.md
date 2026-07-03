@@ -1,3 +1,14 @@
+---
+title: 接入知识库 RAG 与 evidence 输出
+description: "记录知识库 RAG 基础闭环的目标、实现方案、ChromaDB 同步、evidence schema、前端依据展示、测试验证和后续生产化债务。"
+tags: [feature, RAG, evidence, 知识库, ChromaDB, embedding, LangGraph, FastAPI, 前端展示]
+category: feature
+doc_type: feature-summary
+stage: phase-1
+status: completed
+priority: P0
+---
+
 # 接入知识库 RAG 与 evidence 输出
 
 ## 背景与目标

@@ -8,6 +8,7 @@ from app.agent.graph import AgentRuntime
 from app.agent.intent import classify_boundary
 from app.api.routers.after_sales import create_after_sales_ticket
 from app.core.config import Settings
+from app.models import AppUser
 from app.schemas.after_sales import CreateAfterSalesRequest
 
 
@@ -58,7 +59,15 @@ async def test_after_sales_create_endpoint_is_downgraded_to_handoff() -> None:
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await create_after_sales_ticket(request)
+        await create_after_sales_ticket(
+            request,
+            AppUser(
+                id=1,
+                login_identifier="demo@example.com",
+                display_name="Demo 用户",
+                status="active",
+            ),
+        )
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["classification"] == "human_handoff_required"
