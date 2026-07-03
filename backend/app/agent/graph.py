@@ -41,11 +41,11 @@ class AgentRuntime:
         self.llm = build_chat_model(settings)
         self.knowledge_service = knowledge_service or ChromaKnowledgeService(session, settings)
 
-    async def run(self, request: ChatRequest) -> ChatResponse:
+    async def run(self, request: ChatRequest, user_id: int) -> ChatResponse:
         graph = self._build_graph()
         result: AgentState = await graph.ainvoke(
             {
-                "user_id": request.user_id or self.settings.default_user_id,
+                "user_id": user_id,
                 "conversation_id": request.conversation_id,
                 "message": request.message,
             }

@@ -39,6 +39,29 @@ export type SuggestedAction = {
   payload: Record<string, unknown>;
 };
 
+export type AuthUser = {
+  id: number;
+  login_identifier: string;
+  display_name: string;
+  status: string;
+  last_login_at?: string | null;
+};
+
+export type AuthTokenResponse = {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  expires_in: number;
+  user: AuthUser;
+};
+
+export type AuthSession = {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: AuthUser;
+};
+
 export type BoundaryClassificationValue =
   | "in_scope_auto"
   | "human_handoff_required"
@@ -101,7 +124,8 @@ export type OperatorProfile = {
   name: string;
   role: string;
   userId: number;
-  authState: "placeholder";
+  loginIdentifier: string;
+  authState: "authenticated";
   statusLabel: string;
 };
 

@@ -1,3 +1,4 @@
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AfterSalesEvent, AfterSalesTicket
@@ -48,3 +49,32 @@ class AfterSalesRepository:
             status=ticket.status,
             created_at=ticket.created_at,
         )
+
+    async def list_tickets(self, user_id: int) -> list[AfterSalesTicketCard]:
+        stmt = (
+            select(AfterSalesTicket)
+            .where(AfterSalesTicket.user_id == user_id)
+            .order_by(AfterSalesTicket.created_at.desc())
+        )
+        tickets = (await self.session.execute(stmt)).scalars().all()
+        return [_to_ticket_card(ticket) for ticket in tickets]
+
+    async def get_ticket(self, user_id: int, ticket_id: int) -> AfterSalesTicketCard | None:
+        stmt = select(AfterSalesTicket).where(
+            AfterSalesTicket.user_id == user_id,
+            AfterSalesTicket.id == ticket_id,
+        )
+        ticket = (await self.session.execute(stmt)).scalar_one_or_none()
+        return _to_ticket_card(ticket) if ticket else None
+
+
+def _to_ticket_card(ticket: AfterSalesTicket) -> AfterSalesTicketCard:
+    return AfterSalesTicketCard(
+        id=ticket.id,
+        order_id=ticket.order_id,
+        order_item_id=ticket.order_item_id,
+        ticket_type=ticket.ticket_type,
+        reason=ticket.reason,
+        status=ticket.status,
+        created_at=ticket.created_at,
+    )

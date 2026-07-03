@@ -2,13 +2,22 @@ from collections.abc import AsyncIterator, Callable
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.core.config import get_settings
+from app.agent.graph import AgentRuntime
+from app.api.routers import chat as chat_router
+from app.core.config import Settings, get_settings
+from app.core.database import get_session
+from app.main import app
+from app.schemas.chat import EvidenceItem
 from app.services.dataset_mapper import normalize_part_record
 from scripts.seed_demo import (
+    DEMO_LOGIN_IDENTIFIER,
+    DEMO_PASSWORD,
+    _ensure_user_auth_credential,
     _get_or_create_user,
     _seed_knowledge,
     _seed_order,
@@ -82,6 +91,67 @@ TEST_PRODUCT_RECORDS = [
 ]
 
 
+class FakeKnowledgeService:
+    async def retrieve(self, query: str) -> list[EvidenceItem]:
+        if "退货" not in query:
+            return []
+        return [
+            EvidenceItem(
+                source_type="knowledge_document",
+                source_id=9001,
+                title="测试退货政策",
+                document_type="policy",
+                snippet="签收次日起七天内，未影响二次销售可申请七天无理由退货。",
+                score=0.91,
+                metadata={"scenario": "return"},
+            )
+        ]
+
+
+class RuntimeWithFakeKnowledge(AgentRuntime):
+    def __init__(self, session: AsyncSession, settings: Settings):
+        super().__init__(session, settings, knowledge_service=FakeKnowledgeService())
+
+
+@pytest.fixture
+def demo_credentials() -> tuple[str, str]:
+    return DEMO_LOGIN_IDENTIFIER, DEMO_PASSWORD
+
+
+@pytest_asyncio.fixture
+async def api_client(
+    db_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[AsyncClient]:
+    async def override_get_session() -> AsyncIterator[AsyncSession]:
+        async with db_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_settings] = lambda: Settings(llm_api_key="")
+    monkeypatch.setattr(chat_router, "AgentRuntime", RuntimeWithFakeKnowledge)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def auth_headers(
+    api_client: AsyncClient,
+    demo_credentials: tuple[str, str],
+) -> dict[str, str]:
+    login_identifier, password = demo_credentials
+    response = await api_client.post(
+        "/api/auth/login",
+        json={"login_identifier": login_identifier, "password": password},
+    )
+    assert response.status_code == 200
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
 @pytest_asyncio.fixture
 async def db_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
     test_engine = create_async_engine(
@@ -104,6 +174,7 @@ async def db_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
     try:
         async with session_factory() as session:
             user = await _get_or_create_user(session)
+            await _ensure_user_auth_credential(session, user)
             first_sku = None
             for part_type, record in TEST_PRODUCT_RECORDS:
                 product = normalize_part_record(part_type, record)

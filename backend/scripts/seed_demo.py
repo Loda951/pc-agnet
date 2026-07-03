@@ -2,7 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.database import AsyncSessionLocal
 from app.models import (
@@ -18,8 +18,13 @@ from app.models import (
     OrderLogistics,
     Sku,
     Spu,
+    UserAuthCredential,
 )
+from app.services.auth import PasswordHasher, normalize_login_identifier
 from app.services.dataset_mapper import ImportedProduct, attribute_flags, normalize_part_record
+
+DEMO_LOGIN_IDENTIFIER = "demo@example.com"
+DEMO_PASSWORD = "demo-password"
 
 DEMO_PARTS = [
     (
@@ -94,6 +99,7 @@ def utc_now_naive() -> datetime:
 async def main() -> None:
     async with AsyncSessionLocal() as session:
         user = await _get_or_create_user(session)
+        await _ensure_user_auth_credential(session, user)
         imported = [
             product
             for part_type, record in DEMO_PARTS
@@ -112,11 +118,62 @@ async def main() -> None:
 async def _get_or_create_user(session):
     user = await session.get(AppUser, 1)
     if user:
+        user.login_identifier = normalize_login_identifier(DEMO_LOGIN_IDENTIFIER)
+        user.status = "active"
+        user.updated_at = datetime.now(UTC)
+        await _sync_app_user_id_sequence(session)
         return user
-    user = AppUser(id=1, display_name="Demo 用户", phone="13800000000")
+    user = AppUser(
+        id=1,
+        login_identifier=normalize_login_identifier(DEMO_LOGIN_IDENTIFIER),
+        display_name="Demo 用户",
+        phone="13800000000",
+        status="active",
+    )
     session.add(user)
     await session.flush()
+    await _sync_app_user_id_sequence(session)
     return user
+
+
+async def _ensure_user_auth_credential(
+    session,
+    user: AppUser,
+    password: str = DEMO_PASSWORD,
+) -> UserAuthCredential:
+    login_identifier = normalize_login_identifier(user.login_identifier)
+    credential = (
+        await session.execute(
+            select(UserAuthCredential).where(UserAuthCredential.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    password_hash = PasswordHasher.hash_password(password)
+    if credential:
+        credential.login_identifier = login_identifier
+        credential.password_hash = password_hash
+        credential.updated_at = datetime.now(UTC)
+        return credential
+    credential = UserAuthCredential(
+        user_id=user.id,
+        login_identifier=login_identifier,
+        password_hash=password_hash,
+    )
+    session.add(credential)
+    await session.flush()
+    return credential
+
+
+async def _sync_app_user_id_sequence(session) -> None:
+    await session.execute(
+        text(
+            """
+            SELECT setval(
+              pg_get_serial_sequence('app_user', 'id'),
+              GREATEST((SELECT COALESCE(MAX(id), 1) FROM app_user), 1)
+            )
+            """
+        )
+    )
 
 
 async def _upsert_product(session, product: ImportedProduct) -> Sku:

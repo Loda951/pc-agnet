@@ -1,4 +1,4 @@
-import { BookOpenText, Boxes, Sparkles, Truck, UserRound } from "lucide-react";
+import { BookOpenText, Boxes, LogOut, Sparkles, Truck, UserRound } from "lucide-react";
 import type { ReactNode } from "react";
 import type { OperatorProfile } from "../types";
 
@@ -15,6 +15,7 @@ type SidebarProps = {
   evidenceCount: number;
   quickPrompts: string[];
   disabled: boolean;
+  onLogout: () => void;
   onPrompt: (prompt: string) => void;
 };
 
@@ -25,6 +26,7 @@ export function Sidebar({
   evidenceCount,
   quickPrompts,
   disabled,
+  onLogout,
   onPrompt
 }: SidebarProps) {
   const metrics: SidebarMetric[] = [
@@ -62,10 +64,14 @@ export function Sidebar({
             <dd>#{operator.userId}</dd>
           </div>
           <div>
-            <dt>权限</dt>
-            <dd>{operator.authState === "placeholder" ? "占位" : operator.authState}</dd>
+            <dt>登录</dt>
+            <dd>{operator.loginIdentifier}</dd>
           </div>
         </dl>
+        <button type="button" className="logout-button" onClick={onLogout} disabled={disabled}>
+          <LogOut size={15} />
+          退出登录
+        </button>
       </section>
 
       <div className="metric-grid">

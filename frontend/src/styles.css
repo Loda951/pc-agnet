@@ -42,6 +42,99 @@ select:focus-visible {
   background: #edf1f2;
 }
 
+.login-shell {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: #edf1f2;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 22px;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.login-brand span {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #0b6b57;
+  color: #ffffff;
+}
+
+.login-brand strong,
+.login-brand small {
+  display: block;
+}
+
+.login-brand small {
+  color: #65747b;
+}
+
+.login-form {
+  display: grid;
+  gap: 12px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 6px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.login-form input {
+  width: 100%;
+  border: 1px solid #cbd6d9;
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: #ffffff;
+  color: #20282d;
+}
+
+.login-form button {
+  min-height: 42px;
+  border: 1px solid #0b6b57;
+  border-radius: 8px;
+  background: #0b6b57;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.login-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.login-error {
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  background: #fff7f8;
+  color: #9f1239;
+  padding: 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.4;
+}
+
 .sidebar,
 .context-panel {
   min-width: 0;
@@ -188,6 +281,21 @@ select:focus-visible {
 .operator-facts dd {
   margin-top: 2px;
   font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.logout-button {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 12px;
+  border: 1px solid #cbd6d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #20282d;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .metric-grid {
@@ -227,7 +335,8 @@ select:focus-visible {
 .ticket-form button,
 .suggestion-strip button,
 .ghost-button,
-.handoff-card button {
+.handoff-card button,
+.logout-button {
   border-radius: 8px;
   min-height: 38px;
   transition:
@@ -248,7 +357,8 @@ select:focus-visible {
 .ticket-form button:hover,
 .suggestion-strip button:hover,
 .ghost-button:hover,
-.handoff-card button:hover {
+.handoff-card button:hover,
+.logout-button:hover {
   border-color: #0b6b57;
 }
 
@@ -258,7 +368,8 @@ select:focus-visible {
 .ticket-form input:disabled,
 .ticket-form select:disabled,
 .suggestion-strip button:disabled,
-.handoff-card button:disabled {
+.handoff-card button:disabled,
+.logout-button:disabled {
   cursor: not-allowed;
   opacity: 0.52;
 }
