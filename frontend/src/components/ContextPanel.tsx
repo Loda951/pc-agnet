@@ -1,6 +1,8 @@
 import {
   BookOpenText,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
   Headset,
   History,
@@ -9,6 +11,7 @@ import {
   ShieldCheck,
   Truck
 } from "lucide-react";
+import { useState } from "react";
 import { BoundaryBadge, BoundaryStatusCard } from "./Boundary";
 import { EmptyState, displayValue, formatDateTime } from "./common";
 import type {
@@ -269,14 +272,22 @@ function ProductCardView({ product }: { product: ProductCard }) {
 }
 
 function OrderCardView({ order }: { order: OrderCard }) {
+  const [expanded, setExpanded] = useState(false);
   const activeOrderItem = order.items[0];
   const lastTrace = order.logistics?.trace.at(-1);
   return (
     <article className="order-box">
-      <div className="order-head">
-        <strong>#{order.id}</strong>
-        <span>{order.status_label}</span>
-      </div>
+      <button
+        type="button"
+        className="order-summary-button"
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="order-head">
+          <strong>#{order.id}</strong>
+          <span>{order.status_label}</span>
+        </span>
+        {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+      </button>
       <p>{activeOrderItem?.sku_name ?? "订单商品待确认"}</p>
       <dl className="order-facts">
         <div>
@@ -295,6 +306,50 @@ function OrderCardView({ order }: { order: OrderCard }) {
         </span>
       </div>
       {lastTrace && <small>{Object.values(lastTrace).slice(0, 2).join(" · ")}</small>}
+      {expanded && (
+        <div className="order-detail">
+          <div className="order-detail-section">
+            <strong>商品明细</strong>
+            <div className="order-item-list">
+              {order.items.map((item) => (
+                <div className="order-item-row" key={item.id}>
+                  <span>{item.sku_name}</span>
+                  <small>{formatSkuSpecs(item.sku_specs)}</small>
+                  <b>
+                    ¥{item.price} × {item.quantity}
+                  </b>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="order-detail-section">
+            <strong>物流轨迹</strong>
+            <div className="trace-list">
+              {order.logistics?.trace.length ? (
+                order.logistics.trace.map((trace, index) => (
+                  <div className="trace-row" key={`${order.id}-trace-${index}`}>
+                    {Object.values(trace)
+                      .slice(0, 3)
+                      .map((value) => (
+                        <span key={value}>{value}</span>
+                      ))}
+                  </div>
+                ))
+              ) : (
+                <span className="trace-empty">暂无轨迹</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </article>
   );
+}
+
+function formatSkuSpecs(specs: Record<string, unknown> | null | undefined) {
+  if (!specs || !Object.keys(specs).length) return "规格未标注";
+  return Object.entries(specs)
+    .slice(0, 3)
+    .map(([key, value]) => `${key}: ${displayValue(value)}`)
+    .join(" · ");
 }

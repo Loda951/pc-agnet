@@ -28,7 +28,7 @@ priority: P0
 
 ### 后端 API
 
-- 已完成：`/api/chat` 和 `/api/chat/stream`，由 `AgentRuntime` 驱动 LangGraph 流程。
+- 已完成：`/api/chat` 和 `/api/chat/stream`；`/api/chat/stream` 已由 `AgentRuntime.run_stream()` 输出 run/boundary/tool/context/delta/done/error SSE 事件。
 - 已完成：`/api/catalog/search`，支持商品关键词、分类、价格、规格过滤。
 - 已完成：`/api/orders/latest` 和 `/api/orders/{order_id}`，按用户 ID 查询订单与物流。
 - 已完成：`/api/after-sales`，可创建 demo 售后工单。
@@ -114,7 +114,7 @@ priority: P0
 - 数据质量有限：真实外设导入路径已打通，但本地环境仍需按需执行导入脚本；搜索排序还缺离线评测集。
 - 测试覆盖不足：已补 API 集成、边界分类和 RAG 回归测试；仍缺真实鉴权、权限隔离和多轮指代消解测试。
 - 错误处理较薄：LLM 超时、DeepSeek 错误、数据库异常、外部服务降级尚未形成统一错误码和用户可读策略。
-- Frontend 仍是 demo 工作台：单用户、无登录、无路由、缺少完整 loading/error/retry 体验和浏览器端验收记录。
+- Frontend 仍是 demo 工作台：登录、会话列表、SSE loading/error/retry/cancel 基础体验已完成；仍缺完整路由、会话管理高级操作和浏览器端验收记录。
 
 ## 设计目标与当前实现的差距分析（对照 design.md）
 
@@ -218,7 +218,7 @@ priority: P0
 
 1. P0：真实鉴权与权限隔离。`docs/feature/收敛 read-only 边界与人工接管策略.md` 已把订单 query `user_id` 标为遗留风险，必须先补。
 2. P0：人工接管从“提示”升级为“可追踪队列”。当前 `human_handoff_required` 只改变回答和前端状态，尚未形成客服可处理记录。
-3. P0：前端 SSE 真流式输出与状态体验。`/api/chat/stream` 目前是在完整回答生成后按行发送，并非 token/progress 级流式。
+3. P0：前端 SSE 真流式输出与状态体验。基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 4. P1：工作记忆与个性化记忆分层。当前只有简单 `MemoryFact`，缺少上一款商品、当前筛选条件、最近订单等会话级工作记忆。
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
@@ -243,6 +243,7 @@ priority: P0
 
 ## P0：AI 回复 SSE 真流式输出
 
+- 状态：基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 - 所属维度：优化前端展示。
 - 简明描述：把聊天体验从“等待完整回答”改为可见的事件流，让用户先看到边界判断、检索进度、依据更新和逐字回答。
 - 需要实现的功能点：后端新增 `AgentRuntime.run_stream()` 或等价流式接口，事件类型建议包含 `run_started`、`boundary`、`tool_call`、`context`、`delta`、`done`、`error`；LLM provider 支持 token streaming，fallback 回答也按 chunk 输出；`/api/chat/stream` 使用 POST + `StreamingResponse`，避免等待 `run()` 完整结束后再按行拆分；前端新增 `sendChatStream`，用 fetch reader 解析 SSE，因为 EventSource 不适合携带 POST body；消息气泡边生成边渲染，右侧商品、订单、evidence 面板在 `context` 事件到达时更新；断流、超时、取消和重试都要有用户可理解的状态。

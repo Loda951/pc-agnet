@@ -3,6 +3,7 @@ import {
   Bot,
   CheckCircle2,
   CircleSlash,
+  CircleStop,
   Headset,
   Loader2,
   RefreshCcw,
@@ -31,6 +32,7 @@ type ChatPanelProps = {
   error: RequestError | null;
   onInputChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onCancel: () => void;
   onRetry: () => void;
   onSuggestedAction: (action: SuggestedAction) => void;
 };
@@ -46,6 +48,7 @@ export function ChatPanel({
   error,
   onInputChange,
   onSubmit,
+  onCancel,
   onRetry,
   onSuggestedAction
 }: ChatPanelProps) {
@@ -72,7 +75,7 @@ export function ChatPanel({
         {messages.map((message) => (
           <MessageRow key={message.id} message={message} />
         ))}
-        {loading && (
+        {loading && !messages.some((message) => message.status === "streaming") && (
           <article className="message assistant pending">
             <span className="avatar">
               <Bot size={17} />
@@ -114,6 +117,9 @@ export function ChatPanel({
         <button type="submit" disabled={loading || !input.trim()} title="发送">
           {loading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
         </button>
+        <button type="button" disabled={!loading} title="取消" onClick={onCancel}>
+          <CircleStop size={18} />
+        </button>
       </form>
     </main>
   );
@@ -121,14 +127,26 @@ export function ChatPanel({
 
 function MessageRow({ message }: { message: ChatMessage }) {
   const metaParts = messageMeta(message);
+  const bubbleContent =
+    message.content ||
+    (message.status === "streaming" ? message.streamStage || "正在处理" : message.content);
   return (
-    <article className={`message ${message.role} ${message.status === "failed" ? "failed" : ""}`}>
+    <article
+      className={`message ${message.role} ${message.status === "failed" ? "failed" : ""} ${
+        message.status === "streaming" ? "streaming" : ""
+      }`}
+    >
       <span className="avatar">
         {message.role === "assistant" ? <Bot size={17} /> : <UserRound size={17} />}
       </span>
       <div className="bubble-stack">
         {message.boundary && <BoundaryBadge boundary={message.boundary} compact />}
-        <p>{message.content}</p>
+        <p>
+          {message.status === "streaming" && !message.content && (
+            <Loader2 size={15} className="spin inline-icon" />
+          )}
+          {bubbleContent}
+        </p>
         {metaParts.length > 0 && (
           <div className="message-meta">
             {metaParts.map((part) => (
@@ -179,6 +197,13 @@ function statusMeta(status: ResponseStatus | "loading") {
       label: "处理中"
     };
   }
+  if (status === "streaming") {
+    return {
+      className: "busy",
+      icon: <Loader2 size={14} className="spin" />,
+      label: "生成中"
+    };
+  }
   if (status === "handoff") {
     return {
       className: "handoff",
@@ -200,6 +225,13 @@ function statusMeta(status: ResponseStatus | "loading") {
       label: "错误"
     };
   }
+  if (status === "cancelled") {
+    return {
+      className: "blocked",
+      icon: <CircleStop size={14} />,
+      label: "已取消"
+    };
+  }
   if (status === "success") {
     return {
       className: "success",
@@ -217,6 +249,8 @@ function statusMeta(status: ResponseStatus | "loading") {
 function messageMeta(message: ChatMessage) {
   const parts = [formatClock(message.createdAt)].filter(Boolean);
   if (message.status === "failed") parts.push("发送失败");
+  if (message.status === "streaming") parts.push(message.streamStage ?? "生成中");
+  if (message.status === "cancelled") parts.push("已取消");
   if (message.intent) parts.push(message.intent);
   if (message.evidenceCount) parts.push(`${message.evidenceCount} 条依据`);
   if (message.productCount) parts.push(`${message.productCount} 个商品`);

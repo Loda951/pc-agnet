@@ -1,6 +1,17 @@
-import { BookOpenText, Boxes, LogOut, Sparkles, Truck, UserRound } from "lucide-react";
+import {
+  BookOpenText,
+  Boxes,
+  Loader2,
+  LogOut,
+  MessageSquarePlus,
+  MessagesSquare,
+  Sparkles,
+  Truck,
+  UserRound
+} from "lucide-react";
 import type { ReactNode } from "react";
-import type { OperatorProfile } from "../types";
+import { formatClock } from "./common";
+import type { ConversationSummary, OperatorProfile } from "../types";
 
 type SidebarMetric = {
   icon: ReactNode;
@@ -13,10 +24,13 @@ type SidebarProps = {
   skuCount: number;
   orderCount: number;
   evidenceCount: number;
-  quickPrompts: string[];
+  conversations: ConversationSummary[];
+  activeConversationId?: number;
+  conversationsLoading: boolean;
   disabled: boolean;
   onLogout: () => void;
-  onPrompt: (prompt: string) => void;
+  onNewConversation: () => void;
+  onSelectConversation: (conversationId: number) => void;
 };
 
 export function Sidebar({
@@ -24,10 +38,13 @@ export function Sidebar({
   skuCount,
   orderCount,
   evidenceCount,
-  quickPrompts,
+  conversations,
+  activeConversationId,
+  conversationsLoading,
   disabled,
   onLogout,
-  onPrompt
+  onNewConversation,
+  onSelectConversation
 }: SidebarProps) {
   const metrics: SidebarMetric[] = [
     { icon: <Boxes size={18} />, label: "SKU", value: skuCount },
@@ -80,14 +97,41 @@ export function Sidebar({
         ))}
       </div>
 
-      <section className="quick-section">
-        <h2>快捷请求</h2>
-        <div className="quick-list">
-          {quickPrompts.map((prompt) => (
-            <button key={prompt} type="button" disabled={disabled} onClick={() => onPrompt(prompt)}>
-              {prompt}
+      <section className="conversation-section">
+        <div className="conversation-section-head">
+          <h2>会话</h2>
+          <button type="button" onClick={onNewConversation} disabled={disabled} title="新建会话">
+            <MessageSquarePlus size={16} />
+          </button>
+        </div>
+        <div className="conversation-list">
+          {conversations.map((conversation) => (
+            <button
+              key={conversation.id}
+              type="button"
+              className={conversation.id === activeConversationId ? "active" : ""}
+              disabled={disabled}
+              onClick={() => onSelectConversation(conversation.id)}
+            >
+              <MessagesSquare size={16} />
+              <span>
+                <strong>{conversation.title}</strong>
+                <small>
+                  {conversation.last_message ?? "暂无消息"}
+                  {conversation.last_message_at ? ` · ${formatClock(conversation.last_message_at)}` : ""}
+                </small>
+              </span>
             </button>
           ))}
+          {conversationsLoading && (
+            <div className="conversation-loading">
+              <Loader2 size={15} className="spin" />
+              <span>加载中</span>
+            </div>
+          )}
+          {!conversations.length && !conversationsLoading && (
+            <div className="conversation-empty">暂无历史会话</div>
+          )}
         </div>
       </section>
     </aside>

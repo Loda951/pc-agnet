@@ -1,3 +1,5 @@
+import asyncio
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
@@ -50,18 +52,64 @@ class AgentRuntime:
                 "message": request.message,
             }
         )
-        return ChatResponse(
-            conversation_id=result["conversation_id"],
-            answer=result["answer"],
-            intent=result["intent"],
-            boundary=BoundaryClassification(**result["boundary"]),
-            evidence=_normalize_evidence(result.get("evidence", [])),
-            products=result.get("products", []),
-            order=result.get("order"),
-            suggested_actions=[
-                SuggestedAction(**item) for item in result.get("suggested_actions", [])
-            ],
-        )
+        return self._response_from_state(result)
+
+    async def run_stream(
+        self, request: ChatRequest, user_id: int
+    ) -> AsyncIterator[dict[str, Any]]:
+        state: AgentState = {
+            "user_id": user_id,
+            "conversation_id": request.conversation_id,
+            "message": request.message,
+        }
+        try:
+            state = await self._load_context(state)
+            yield _stream_event("run_started", state)
+
+            state = await self._classify_boundary(state)
+            yield _stream_event("boundary", state, boundary=state["boundary"])
+
+            if state["boundary"]["classification"] == "in_scope_auto":
+                state = await self._route_intent(state)
+                yield _stream_event(
+                    "tool_call",
+                    state,
+                    tool_name="intent.route",
+                    status="completed",
+                    output={"intent": state["intent"], "parsed": state.get("parsed", {})},
+                )
+                async for event in self._retrieve_stream(state):
+                    yield event
+                async for event in self._retrieve_knowledge_stream(state):
+                    yield event
+
+            answer_parts: list[str] = []
+            async for delta in self._answer_deltas(state):
+                if not delta:
+                    continue
+                answer_parts.append(delta)
+                yield _stream_event("delta", state, delta=delta)
+
+            state["answer"] = "".join(answer_parts)
+            state["suggested_actions"] = self._suggest_actions(state)
+            state = await self._persist(state)
+            yield _stream_event(
+                "done",
+                state,
+                response=self._response_from_state(state).model_dump(mode="json"),
+            )
+        except asyncio.CancelledError:
+            await self._mark_stream_failed(state, "cancelled", "client disconnected")
+            raise
+        except Exception as exc:
+            await self._mark_stream_failed(state, type(exc).__name__, str(exc))
+            yield _stream_event(
+                "error",
+                state,
+                error_type=type(exc).__name__,
+                message="AI 回复生成失败，请稍后重试。",
+                retryable=True,
+            )
 
     def _build_graph(self):
         workflow = StateGraph(AgentState)
@@ -161,6 +209,74 @@ class AgentRuntime:
             )
         return state
 
+    async def _retrieve_stream(self, state: AgentState) -> AsyncIterator[dict[str, Any]]:
+        repo = ConversationRepository(self.session)
+        if state["intent"] == "product_recommendation":
+            search = build_product_search(state["message"])
+            input_json = search.model_dump(mode="json")
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="catalog.search_products",
+                status="started",
+                input=input_json,
+            )
+            products = await CatalogRepository(self.session).search_products(search)
+            state["products"] = products
+            output_json = {
+                "count": len(products),
+                "products": [p.model_dump(mode="json") for p in products],
+            }
+            await repo.add_tool_call(
+                state["run_id"],
+                "catalog.search_products",
+                input_json,
+                output_json,
+            )
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="catalog.search_products",
+                status="completed",
+                output=output_json,
+            )
+            yield _context_event(state)
+        elif state["intent"] == "order_status":
+            order_id = state.get("parsed", {}).get("order_id")
+            input_json = {"order_id": order_id}
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="order.get_order",
+                status="started",
+                input=input_json,
+            )
+            orders = OrderRepository(self.session)
+            order = (
+                await orders.get_order(state["user_id"], order_id)
+                if order_id
+                else await orders.latest_order(state["user_id"])
+            )
+            state["order"] = order
+            output_json = {
+                "found": order is not None,
+                "order": order.model_dump(mode="json") if order else None,
+            }
+            await repo.add_tool_call(
+                state["run_id"],
+                "order.get_order",
+                input_json,
+                output_json,
+            )
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="order.get_order",
+                status="completed",
+                output=output_json,
+            )
+            yield _context_event(state)
+
     async def _retrieve_knowledge(self, state: AgentState) -> AgentState:
         repo = ConversationRepository(self.session)
         try:
@@ -184,6 +300,56 @@ class AgentRuntime:
                 {"error": type(exc).__name__, "message": str(exc)},
             )
         return state
+
+    async def _retrieve_knowledge_stream(
+        self, state: AgentState
+    ) -> AsyncIterator[dict[str, Any]]:
+        repo = ConversationRepository(self.session)
+        input_json = {"query": state["message"], "limit": 3}
+        yield _stream_event(
+            "tool_call",
+            state,
+            tool_name="knowledge.retrieve",
+            status="started",
+            input=input_json,
+        )
+        try:
+            evidence = await self.knowledge_service.retrieve(state["message"])
+            state["evidence"] = evidence
+            output_json = {
+                "count": len(evidence),
+                "evidence": [item.model_dump(mode="json") for item in evidence],
+            }
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                input_json,
+                output_json,
+            )
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="knowledge.retrieve",
+                status="completed",
+                output=output_json,
+            )
+            yield _context_event(state)
+        except Exception as exc:
+            state["evidence"] = []
+            output_json = {"error": type(exc).__name__, "message": str(exc)}
+            await repo.add_tool_call(
+                state["run_id"],
+                "knowledge.retrieve",
+                input_json,
+                output_json,
+            )
+            yield _stream_event(
+                "tool_call",
+                state,
+                tool_name="knowledge.retrieve",
+                status="error",
+                output=output_json,
+            )
 
     async def _generate(self, state: AgentState) -> AgentState:
         if state["boundary"]["classification"] != "in_scope_auto":
@@ -218,21 +384,26 @@ class AgentRuntime:
         return state
 
     async def _generate_with_llm(self, state: AgentState) -> str:
-        context = {
-            "intent": state["intent"],
-            "boundary": state["boundary"],
-            "memory": state.get("memory", []),
-            "evidence": _dump_evidence(state.get("evidence", [])),
-            "products": [p.model_dump(mode="json") for p in state.get("products", [])],
-            "order": state["order"].model_dump(mode="json") if state.get("order") else None,
-        }
-        response = await self.llm.ainvoke(
-            [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=f"用户问题：{state['message']}\n检索上下文：{context}"),
-            ]
-        )
+        response = await self.llm.ainvoke(_llm_messages(state))
         return str(response.content)
+
+    async def _answer_deltas(self, state: AgentState) -> AsyncIterator[str]:
+        if state["boundary"]["classification"] != "in_scope_auto":
+            for chunk in _chunk_text(self._generate_boundary_answer(state)):
+                await asyncio.sleep(0)
+                yield chunk
+            return
+
+        if self.llm:
+            async for chunk in self.llm.astream(_llm_messages(state)):
+                text = _content_to_text(chunk.content)
+                if text:
+                    yield text
+            return
+
+        for chunk in _chunk_text(self._generate_fallback(state)):
+            await asyncio.sleep(0)
+            yield chunk
 
     def _generate_boundary_answer(self, state: AgentState) -> str:
         boundary = BoundaryClassification(**state["boundary"])
@@ -321,6 +492,49 @@ class AgentRuntime:
         if "fps" in message.lower() or "游戏" in message:
             await repo.upsert_memory(state["user_id"], "usage_preference", "偏好游戏场景", 0.75)
 
+    async def _mark_stream_failed(
+        self, state: AgentState, error_type: str, message: str
+    ) -> None:
+        if not state.get("run_id"):
+            return
+        repo = ConversationRepository(self.session)
+        await repo.fail_run(
+            state["run_id"],
+            state.get("intent"),
+            _json_safe_state(state),
+            {"type": error_type, "message": message},
+        )
+        await self.session.commit()
+
+    def _response_from_state(self, state: AgentState) -> ChatResponse:
+        return ChatResponse(
+            conversation_id=state["conversation_id"],
+            answer=state["answer"],
+            intent=state["intent"],
+            boundary=BoundaryClassification(**state["boundary"]),
+            evidence=_normalize_evidence(state.get("evidence", [])),
+            products=state.get("products", []),
+            order=state.get("order"),
+            suggested_actions=[
+                SuggestedAction(**item) for item in state.get("suggested_actions", [])
+            ],
+        )
+
+
+def _llm_messages(state: AgentState) -> list[SystemMessage | HumanMessage]:
+    context = {
+        "intent": state["intent"],
+        "boundary": state["boundary"],
+        "memory": state.get("memory", []),
+        "evidence": _dump_evidence(state.get("evidence", [])),
+        "products": [p.model_dump(mode="json") for p in state.get("products", [])],
+        "order": state["order"].model_dump(mode="json") if state.get("order") else None,
+    }
+    return [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=f"用户问题：{state['message']}\n检索上下文：{context}"),
+    ]
+
 
 def _json_safe_state(state: AgentState) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -336,6 +550,49 @@ def _json_safe_state(state: AgentState) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def _stream_event(event_type: str, state: AgentState, **payload: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": event_type}
+    if state.get("conversation_id") is not None:
+        event["conversation_id"] = state["conversation_id"]
+    if state.get("run_id") is not None:
+        event["run_id"] = state["run_id"]
+    event.update(payload)
+    return event
+
+
+def _context_event(state: AgentState) -> dict[str, Any]:
+    return _stream_event(
+        "context",
+        state,
+        intent=state.get("intent"),
+        boundary=state.get("boundary"),
+        products=[p.model_dump(mode="json") for p in state.get("products", [])],
+        order=state["order"].model_dump(mode="json") if state.get("order") else None,
+        evidence=_dump_evidence(state.get("evidence", [])),
+    )
+
+
+def _chunk_text(text: str, chunk_size: int = 12) -> list[str]:
+    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)] or [""]
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                parts.append(str(text))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return "" if content is None else str(content)
 
 
 def _normalize_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[EvidenceItem]:

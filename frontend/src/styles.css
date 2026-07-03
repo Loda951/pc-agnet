@@ -321,17 +321,35 @@ select:focus-visible {
   line-height: 1.1;
 }
 
-.quick-section h2 {
+.conversation-section h2 {
   margin: 0 0 10px;
   font-size: 14px;
 }
 
-.quick-list {
+.conversation-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conversation-section-head button {
+  width: 34px;
+  height: 34px;
+  border: 1px solid #cbd6d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0b6b57;
+  display: grid;
+  place-items: center;
+}
+
+.conversation-list {
   display: grid;
   gap: 8px;
 }
 
-.quick-list button,
+.conversation-list button,
 .ticket-form button,
 .suggestion-strip button,
 .ghost-button,
@@ -345,15 +363,68 @@ select:focus-visible {
     color 120ms ease;
 }
 
-.quick-list button {
+.conversation-list button {
+  min-width: 0;
   border: 1px solid #cbd6d9;
   background: #ffffff;
   color: #20282d;
   padding: 10px 12px;
   text-align: left;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 }
 
-.quick-list button:hover,
+.conversation-list button svg {
+  margin-top: 2px;
+  color: #0b6b57;
+}
+
+.conversation-list button span,
+.conversation-list button strong,
+.conversation-list button small {
+  min-width: 0;
+  display: block;
+}
+
+.conversation-list button strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.conversation-list button small {
+  margin-top: 4px;
+  color: #65747b;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-list button.active {
+  border-color: #0b6b57;
+  background: #ecf8f3;
+}
+
+.conversation-loading,
+.conversation-empty {
+  min-height: 42px;
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #65747b;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.conversation-list button:hover,
+.conversation-section-head button:hover,
 .ticket-form button:hover,
 .suggestion-strip button:hover,
 .ghost-button:hover,
@@ -362,7 +433,8 @@ select:focus-visible {
   border-color: #0b6b57;
 }
 
-.quick-list button:disabled,
+.conversation-list button:disabled,
+.conversation-section-head button:disabled,
 .composer button:disabled,
 .ticket-form button:disabled,
 .ticket-form input:disabled,
@@ -544,7 +616,8 @@ select:focus-visible {
   color: #9f1239;
 }
 
-.message.pending p {
+.message.pending p,
+.message.streaming p {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -634,7 +707,7 @@ select:focus-visible {
 .composer {
   padding: 16px 20px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
   gap: 10px;
   border-top: 1px solid #d8e0e3;
   background: #ffffff;
@@ -660,6 +733,12 @@ select:focus-visible {
   color: #ffffff;
   display: grid;
   place-items: center;
+}
+
+.composer button[type="button"] {
+  border: 1px solid #cbd6d9;
+  background: #ffffff;
+  color: #9f1239;
 }
 
 .panel-section {
@@ -895,6 +974,22 @@ select:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.order-summary-button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 8px;
+  align-items: center;
+}
+
+.order-summary-button > svg {
+  color: #475569;
+}
+
 .order-head span {
   color: #0b6b57;
   background: #ecf8f3;
@@ -926,6 +1021,66 @@ select:focus-visible {
   font-size: 13px;
   line-height: 1.4;
   margin-bottom: 8px;
+}
+
+.order-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #edf1f2;
+  display: grid;
+  gap: 12px;
+}
+
+.order-detail-section {
+  display: grid;
+  gap: 8px;
+}
+
+.order-detail-section > strong {
+  font-size: 13px;
+}
+
+.order-item-list,
+.trace-list {
+  display: grid;
+  gap: 8px;
+}
+
+.order-item-row,
+.trace-row {
+  min-width: 0;
+  border: 1px solid #edf1f2;
+  border-radius: 8px;
+  background: #f8faf9;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.order-item-row span,
+.order-item-row small,
+.order-item-row b,
+.trace-row span,
+.trace-empty {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.order-item-row span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.order-item-row b {
+  color: #a34800;
+  font-size: 13px;
+}
+
+.trace-row span,
+.trace-empty {
+  color: #516168;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .ticket-form {
