@@ -1,27 +1,21 @@
-import {
-  Ban,
-  BookOpenText,
-  Bot,
-  Boxes,
-  CheckCircle2,
-  Headset,
-  Loader2,
-  PackageSearch,
-  RotateCcw,
-  Send,
-  ShieldCheck,
-  Sparkles,
-  Truck,
-  UserRound
-} from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
-import { sendChat } from "./api";
+import { FormEvent, useState } from "react";
+import { ApiError, sendChat } from "./api";
+import { ChatPanel } from "./components/ChatPanel";
+import { ContextPanel } from "./components/ContextPanel";
+import { Sidebar } from "./components/Sidebar";
 import type {
   BoundaryClassification,
   ChatMessage,
+  ConversationTurn,
   EvidenceItem,
+  HandoffNotice,
+  OperatorProfile,
   OrderCard,
-  ProductCard
+  PendingRequest,
+  ProductCard,
+  RequestError,
+  ResponseStatus,
+  SuggestedAction
 } from "./types";
 
 const quickPrompts = [
@@ -39,327 +33,286 @@ const ticketTypeLabels: Record<string, string> = {
   repair: "维修"
 };
 
+const operatorProfile: OperatorProfile = {
+  name: "演示客服",
+  role: "PC 外设专员",
+  userId: 1,
+  authState: "placeholder",
+  statusLabel: "登录占位"
+};
+
+type SubmitOptions = {
+  appendUser?: boolean;
+  conversationId?: number;
+  messageId?: string;
+};
+
 export default function App() {
   const [conversationId, setConversationId] = useState<number | undefined>();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [responseStatus, setResponseStatus] = useState<ResponseStatus>("ready");
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: "hello", role: "assistant", content: "今天想看哪类外设？" }
+    {
+      id: "hello",
+      role: "assistant",
+      content: "今天想看哪类外设？",
+      createdAt: new Date().toISOString(),
+      status: "received"
+    }
   ]);
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [order, setOrder] = useState<OrderCard | null>(null);
   const [boundary, setBoundary] = useState<BoundaryClassification | null>(null);
   const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
+  const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
+  const [turns, setTurns] = useState<ConversationTurn[]>([]);
+  const [handoffNotice, setHandoffNotice] = useState<HandoffNotice | null>(null);
   const [ticketReason, setTicketReason] = useState("商品不符合预期");
   const [ticketType, setTicketType] = useState("return");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<RequestError | null>(null);
+  const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
 
-  async function submitMessage(message: string) {
+  async function submitMessage(message: string, options: SubmitOptions = {}) {
     const trimmed = message.trim();
     if (!trimmed || loading) return;
 
+    const shouldAppendUser = options.appendUser !== false;
+    const userMessageId = options.messageId ?? crypto.randomUUID();
+    const requestConversationId = options.conversationId ?? conversationId;
+    const request: PendingRequest = {
+      message: trimmed,
+      conversationId: requestConversationId,
+      messageId: userMessageId
+    };
+
     setInput("");
     setError(null);
+    setFailedRequest(null);
     setLoading(true);
-    setMessages((current) => [
-      ...current,
-      { id: crypto.randomUUID(), role: "user", content: trimmed }
-    ]);
+    setResponseStatus("loading");
+    setSuggestedActions([]);
 
-    try {
-      const response = await sendChat(trimmed, conversationId);
-      setConversationId(response.conversation_id);
-      setBoundary(response.boundary);
+    if (shouldAppendUser) {
       setMessages((current) => [
         ...current,
         {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: response.answer,
-          boundary: response.boundary
+          id: userMessageId,
+          role: "user",
+          content: trimmed,
+          createdAt: new Date().toISOString(),
+          status: "sent"
         }
       ]);
-      if (response.boundary.classification === "out_of_scope") {
-        setProducts([]);
-        setOrder(null);
-        setEvidence([]);
+    } else {
+      markMessageStatus(userMessageId, "sent");
+    }
+
+    try {
+      const response = await sendChat(trimmed, requestConversationId);
+      const receivedAt = new Date().toISOString();
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: response.answer,
+        createdAt: receivedAt,
+        status: "received",
+        boundary: response.boundary,
+        intent: response.intent,
+        evidenceCount: response.evidence.length,
+        productCount: response.products.length,
+        orderId: response.order?.id,
+        suggestedActions: response.suggested_actions
+      };
+
+      setConversationId(response.conversation_id);
+      setBoundary(response.boundary);
+      setEvidence(response.boundary.classification === "out_of_scope" ? [] : response.evidence);
+      setProducts(response.boundary.classification === "out_of_scope" ? [] : response.products);
+      setOrder((current) => {
+        if (response.boundary.classification === "out_of_scope") return null;
+        return response.order ?? current;
+      });
+      setSuggestedActions(response.suggested_actions);
+      setMessages((current) => [...current, assistantMessage]);
+      setTurns((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          userMessage: trimmed,
+          assistantAnswer: response.answer,
+          intent: response.intent,
+          boundary: response.boundary,
+          evidenceCount: response.evidence.length,
+          productCount: response.products.length,
+          orderId: response.order?.id ?? order?.id,
+          suggestedActions: response.suggested_actions,
+          createdAt: receivedAt
+        }
+      ]);
+
+      if (response.boundary.classification === "human_handoff_required") {
+        setHandoffNotice({
+          requested: false,
+          source: "边界分类",
+          reason: response.boundary.reason,
+          orderId: response.order?.id ?? order?.id,
+          updatedAt: receivedAt
+        });
       } else {
-        setEvidence(response.evidence);
-        if (response.products.length) setProducts(response.products);
-        if (response.order) setOrder(response.order);
+        setHandoffNotice(null);
       }
+      setResponseStatus(statusForBoundary(response.boundary));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "请求失败");
+      const requestError = toRequestError(err, request);
+      setError(requestError);
+      setFailedRequest(request);
+      setResponseStatus("error");
+      setSuggestedActions([]);
+      markMessageStatus(userMessageId, "failed");
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function markMessageStatus(messageId: string, status: "sent" | "failed") {
+    setMessages((current) =>
+      current.map((message) => (message.id === messageId ? { ...message, status } : message))
+    );
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await submitMessage(input);
+    void submitMessage(input);
   }
 
-  async function handleRequestHandoff() {
+  function handleRetry() {
+    if (!failedRequest) return;
+    void submitMessage(failedRequest.message, {
+      appendUser: false,
+      conversationId: failedRequest.conversationId,
+      messageId: failedRequest.messageId
+    });
+  }
+
+  function handleSuggestedAction(action: SuggestedAction) {
+    const message = typeof action.payload.message === "string" ? action.payload.message : null;
+    if (message) {
+      void submitMessage(message);
+      return;
+    }
+
+    const orderId = numberFromPayload(action.payload.orderId) ?? order?.id;
+    if (action.payload.handoff === true || orderId || action.label.includes("人工")) {
+      setHandoffNotice({
+        requested: true,
+        source: action.label,
+        reason: boundary?.reason ?? "需要人工确认",
+        orderId,
+        updatedAt: new Date().toISOString()
+      });
+      setResponseStatus("handoff");
+      setSuggestedActions([]);
+    }
+  }
+
+  function handleRequestHandoff() {
     const orderPart = order ? `，订单 ${order.id}` : "";
-    await submitMessage(`我要申请${ticketTypeLabels[ticketType]}${orderPart}，原因：${ticketReason}`);
+    void submitMessage(`我要申请${ticketTypeLabels[ticketType]}${orderPart}，原因：${ticketReason}`);
   }
 
-  const activeOrderItem = useMemo(() => order?.items[0], [order]);
+  function handleAcknowledgeHandoff() {
+    const now = new Date().toISOString();
+    setHandoffNotice((current) => ({
+      requested: true,
+      source: current?.source ?? "人工接管",
+      reason: current?.reason ?? boundary?.reason ?? "需要人工确认",
+      orderId: current?.orderId ?? order?.id,
+      updatedAt: now
+    }));
+    setResponseStatus("handoff");
+  }
 
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand-row">
-          <span className="brand-mark">
-            <Sparkles size={18} />
-          </span>
-          <div>
-            <strong>PC Agent</strong>
-            <small>single user</small>
-          </div>
-        </div>
+      <Sidebar
+        operator={operatorProfile}
+        skuCount={products.length}
+        orderCount={order ? 1 : 0}
+        evidenceCount={evidence.length}
+        quickPrompts={quickPrompts}
+        disabled={loading}
+        onPrompt={(prompt) => void submitMessage(prompt)}
+      />
 
-        <div className="metric-grid">
-          <Metric icon={<Boxes size={18} />} label="SKU" value={products.length || 5} />
-          <Metric icon={<Truck size={18} />} label="订单" value={order ? "1" : "0"} />
-        </div>
+      <ChatPanel
+        conversationId={conversationId}
+        messages={messages}
+        input={input}
+        loading={loading}
+        responseStatus={responseStatus}
+        boundary={boundary}
+        suggestedActions={suggestedActions}
+        error={error}
+        onInputChange={setInput}
+        onSubmit={handleSubmit}
+        onRetry={handleRetry}
+        onSuggestedAction={handleSuggestedAction}
+      />
 
-        <div className="quick-list">
-          {quickPrompts.map((prompt) => (
-            <button key={prompt} type="button" onClick={() => submitMessage(prompt)}>
-              {prompt}
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      <main className="chat-panel">
-        <header className="topbar">
-          <div>
-            <h1>客服会话</h1>
-            <span>{conversationId ? `#${conversationId}` : "ready"}</span>
-          </div>
-          <div className="status-stack">
-            {boundary && <BoundaryBadge boundary={boundary} />}
-            <span className={loading ? "status-pill busy" : "status-pill"}>
-              {loading ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
-              {loading ? "thinking" : "online"}
-            </span>
-          </div>
-        </header>
-
-        <section className="messages" aria-live="polite">
-          {messages.map((message) => (
-            <article key={message.id} className={`message ${message.role}`}>
-              <span className="avatar">
-                {message.role === "assistant" ? <Bot size={17} /> : <UserRound size={17} />}
-              </span>
-              <div className="bubble-stack">
-                {message.boundary && <BoundaryBadge boundary={message.boundary} compact />}
-                <p>{message.content}</p>
-              </div>
-            </article>
-          ))}
-          {error && <div className="error-line">{error}</div>}
-        </section>
-
-        <form className="composer" onSubmit={handleSubmit}>
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="输入预算、用途、订单号或售后诉求"
-          />
-          <button type="submit" disabled={loading || !input.trim()} title="发送">
-            {loading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
-          </button>
-        </form>
-      </main>
-
-      <aside className="context-panel">
-        <section className="panel-section">
-          <div className="section-title">
-            <ShieldCheck size={18} />
-            <h2>边界</h2>
-          </div>
-          {boundary ? <BoundaryStatusCard boundary={boundary} /> : <EmptyState text="等待请求" />}
-        </section>
-
-        <section className="panel-section">
-          <div className="section-title">
-            <BookOpenText size={18} />
-            <h2>依据</h2>
-          </div>
-          <div className="evidence-list">
-            {evidence.map((item) => (
-              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
-            ))}
-            {!evidence.length && <EmptyState text="暂无知识库依据" />}
-          </div>
-        </section>
-
-        <section className="panel-section">
-          <div className="section-title">
-            <PackageSearch size={18} />
-            <h2>商品</h2>
-          </div>
-          <div className="product-list">
-            {(products.length ? products : []).map((product) => (
-              <ProductCardView key={product.sku_id} product={product} />
-            ))}
-            {!products.length && <EmptyState text="暂无检索结果" />}
-          </div>
-        </section>
-
-        <section className="panel-section">
-          <div className="section-title">
-            <Truck size={18} />
-            <h2>订单</h2>
-          </div>
-          {order ? (
-            <div className="order-box">
-              <div className="order-head">
-                <strong>#{order.id}</strong>
-                <span>{order.status_label}</span>
-              </div>
-              <p>{activeOrderItem?.sku_name}</p>
-              <small>{order.logistics?.express_company ?? "待分配快递"} {order.logistics?.logistic_no ?? ""}</small>
-            </div>
-          ) : (
-            <EmptyState text="暂无订单上下文" />
-          )}
-        </section>
-
-        <section className="panel-section">
-          <div className="section-title">
-            <RotateCcw size={18} />
-            <h2>售后</h2>
-          </div>
-          <div className="ticket-form">
-            <select value={ticketType} onChange={(event) => setTicketType(event.target.value)}>
-              <option value="return">退货</option>
-              <option value="exchange">换货</option>
-              <option value="refund">退款</option>
-              <option value="repair">维修</option>
-            </select>
-            <input
-              value={ticketReason}
-              onChange={(event) => setTicketReason(event.target.value)}
-            />
-            <button type="button" onClick={handleRequestHandoff} disabled={loading || !ticketReason.trim()}>
-              转人工处理
-            </button>
-          </div>
-          <div className="handoff-note">
-            <strong>{order ? `#${order.id}` : "待补订单"}</strong>
-            <span>人工确认</span>
-          </div>
-        </section>
-      </aside>
+      <ContextPanel
+        boundary={boundary}
+        evidence={evidence}
+        products={products}
+        order={order}
+        turns={turns}
+        handoffNotice={handoffNotice}
+        ticketType={ticketType}
+        ticketReason={ticketReason}
+        loading={loading}
+        onTicketTypeChange={setTicketType}
+        onTicketReasonChange={setTicketReason}
+        onRequestHandoff={handleRequestHandoff}
+        onAcknowledgeHandoff={handleAcknowledgeHandoff}
+      />
     </div>
   );
 }
 
-function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | number }) {
-  return (
-    <div className="metric">
-      {icon}
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
+function statusForBoundary(boundary: BoundaryClassification): ResponseStatus {
+  if (boundary.classification === "human_handoff_required") return "handoff";
+  if (boundary.classification === "out_of_scope") return "blocked";
+  return "success";
 }
 
-function BoundaryBadge({
-  boundary,
-  compact = false
-}: {
-  boundary: BoundaryClassification;
-  compact?: boolean;
-}) {
-  const meta = boundaryMeta(boundary);
-  return (
-    <span className={`boundary-badge ${meta.className} ${compact ? "compact" : ""}`}>
-      {meta.icon}
-      {meta.label}
-    </span>
-  );
-}
-
-function BoundaryStatusCard({ boundary }: { boundary: BoundaryClassification }) {
-  const meta = boundaryMeta(boundary);
-  return (
-    <div className={`boundary-card ${meta.className}`}>
-      <div className="boundary-card-head">
-        {meta.icon}
-        <strong>{meta.label}</strong>
-      </div>
-      <p>{boundary.reason}</p>
-    </div>
-  );
-}
-
-function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
-  return (
-    <article className="evidence-card">
-      <div className="evidence-card-head">
-        <strong>{evidence.title}</strong>
-        <span>{evidence.document_type}</span>
-      </div>
-      <p>{evidence.snippet}</p>
-      <small>
-        #{evidence.source_id}
-        {typeof evidence.score === "number" ? ` · ${Math.round(evidence.score * 100)}%` : ""}
-      </small>
-    </article>
-  );
-}
-
-function boundaryMeta(boundary: BoundaryClassification) {
-  if (boundary.classification === "human_handoff_required") {
+function toRequestError(error: unknown, request: PendingRequest): RequestError {
+  if (error instanceof ApiError) {
     return {
-      className: "handoff",
-      icon: <Headset size={14} />,
-      label: "人工接管"
+      message: error.message,
+      retryable: error.retryable,
+      status: error.status,
+      request
     };
   }
-  if (boundary.classification === "out_of_scope") {
+  if (error instanceof Error) {
     return {
-      className: "blocked",
-      icon: <Ban size={14} />,
-      label: "拒答"
+      message: error.message,
+      retryable: true,
+      request
     };
   }
   return {
-    className: "auto",
-    icon: <ShieldCheck size={14} />,
-    label: "自动回答"
+    message: "请求失败，请稍后重试。",
+    retryable: true,
+    request
   };
 }
 
-function ProductCardView({ product }: { product: ProductCard }) {
-  const specLine = Object.entries(product.specs)
-    .slice(0, 3)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(" · ");
-  return (
-    <article className="product-card">
-      <div className="thumb">
-        <PackageSearch size={22} />
-      </div>
-      <div>
-        <h3>{product.title}</h3>
-        <p>{product.brand} · {product.category}</p>
-        <small>{specLine || "规格未标注"}</small>
-      </div>
-      <div className="product-foot">
-        <strong>¥{product.price}</strong>
-        <span>库存 {product.stock}</span>
-      </div>
-    </article>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return <div className="empty-state">{text}</div>;
+function numberFromPayload(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
 }
