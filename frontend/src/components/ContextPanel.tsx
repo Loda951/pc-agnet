@@ -42,6 +42,7 @@ type ContextPanelProps = {
   orderCount: number;
   evidenceCount: number;
   highlightedProductId?: number | null;
+  mobileTab?: "chat" | "products" | "details";
   onTicketTypeChange: (value: string) => void;
   onTicketReasonChange: (value: string) => void;
   onRequestHandoff: () => void;
@@ -62,6 +63,7 @@ export function ContextPanel({
   orderCount,
   evidenceCount,
   highlightedProductId,
+  mobileTab,
   onTicketTypeChange,
   onTicketReasonChange,
   onRequestHandoff,
@@ -70,27 +72,37 @@ export function ContextPanel({
   const showAfterSales =
     boundary?.classification === "human_handoff_required" || handoffNotice !== null;
 
+  // On mobile, filter sections by active tab
+  const isMobile = mobileTab !== undefined;
+  const showProducts = !isMobile || mobileTab === "products";
+  const showDetails = !isMobile || mobileTab === "details";
+  const mobileVisible = isMobile && mobileTab !== "chat";
+
   return (
-    <aside className="context-panel">
-      <div className="metrics-strip">
-        <Metric icon={<Boxes size={14} />} label="SKU" value={skuCount} />
-        <Metric icon={<Truck size={14} />} label="订单" value={orderCount} />
-        <Metric icon={<BookOpenText size={14} />} label="依据" value={evidenceCount} />
-      </div>
-
-      <section className="panel-section">
-        <div className="section-title">
-          <ShieldCheck size={14} />
-          <h2>边界</h2>
+    <aside className={`context-panel${mobileVisible ? " mobile-visible" : ""}`}>
+      {showProducts && (
+        <div className="metrics-strip">
+          <Metric icon={<Boxes size={14} />} label="SKU" value={skuCount} />
+          <Metric icon={<Truck size={14} />} label="订单" value={orderCount} />
+          <Metric icon={<BookOpenText size={14} />} label="依据" value={evidenceCount} />
         </div>
-        {boundary ? (
-          <BoundaryStatusCard boundary={boundary} />
-        ) : (
-          <EmptyState text="等待请求" />
-        )}
-      </section>
+      )}
 
-      {(boundary?.classification === "human_handoff_required" || handoffNotice) && (
+      {showDetails && (
+        <section className="panel-section">
+          <div className="section-title">
+            <ShieldCheck size={14} />
+            <h2>边界</h2>
+          </div>
+          {boundary ? (
+            <BoundaryStatusCard boundary={boundary} />
+          ) : (
+            <EmptyState text="等待请求" />
+          )}
+        </section>
+      )}
+
+      {showDetails && (boundary?.classification === "human_handoff_required" || handoffNotice) && (
         <section className="panel-section">
           <div className="section-title">
             <Headset size={14} />
@@ -105,7 +117,7 @@ export function ContextPanel({
         </section>
       )}
 
-      {turns.length > 0 && (
+      {showDetails && turns.length > 0 && (
         <section className="panel-section">
           <div className="section-title">
             <History size={14} />
@@ -115,7 +127,7 @@ export function ContextPanel({
         </section>
       )}
 
-      {evidence.length > 0 && (
+      {showDetails && evidence.length > 0 && (
         <section className="panel-section">
           <div className="section-title">
             <BookOpenText size={14} />
@@ -129,7 +141,7 @@ export function ContextPanel({
         </section>
       )}
 
-      {products.length > 0 && (
+      {showProducts && products.length > 0 && (
         <section className="panel-section">
           <div className="section-title">
             <PackageSearch size={14} />
@@ -143,7 +155,7 @@ export function ContextPanel({
         </section>
       )}
 
-      {order && (
+      {showDetails && order && (
         <section className="panel-section">
           <div className="section-title">
             <Truck size={14} />
@@ -153,7 +165,7 @@ export function ContextPanel({
         </section>
       )}
 
-      {showAfterSales && (
+      {showDetails && showAfterSales && (
         <section className="panel-section">
           <div className="section-title">
             <RotateCcw size={14} />

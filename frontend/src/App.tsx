@@ -14,6 +14,8 @@ import {
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPanel } from "./components/ContextPanel";
 import { LoginPage } from "./components/LoginPage";
+import { MobileTabBar } from "./components/MobileTabBar";
+import type { MobileTab } from "./components/MobileTabBar";
 import { Sidebar } from "./components/Sidebar";
 import type {
   AuthSession,
@@ -76,6 +78,7 @@ export default function App() {
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
   const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
   const [contextPanelCollapsed, setContextPanelCollapsed] = useState(false);
+  const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("chat");
 
   const handleProductClick = useCallback((product: ProductCard) => {
     setHighlightedProductId(product.sku_id);
@@ -596,44 +599,51 @@ export default function App() {
         onDeleteConversation={handleDeleteConversation}
       />
 
-      <ChatPanel
-        conversationId={conversationId}
-        messages={messages}
-        input={input}
-        loading={loading}
-        responseStatus={responseStatus}
-        boundary={boundary}
-        suggestedActions={suggestedActions}
-        error={error}
-        onInputChange={setInput}
-        onSubmit={handleSubmit}
-        onCancel={handleCancelStream}
-        onRetry={handleRetry}
-        onSuggestedAction={handleSuggestedAction}
-        onProductClick={handleProductClick}
-      />
-
-      {!contextPanelCollapsed && (
-        <ContextPanel
-          boundary={boundary}
-          evidence={evidence}
-          products={products}
-          order={order}
-          turns={turns}
-          handoffNotice={handoffNotice}
-          ticketType={ticketType}
-          ticketReason={ticketReason}
+      <div className="chat-area">
+        <ChatPanel
+          conversationId={conversationId}
+          messages={messages}
+          input={input}
           loading={loading}
-          skuCount={products.length}
-          orderCount={order ? 1 : 0}
-          evidenceCount={evidence.length}
-          highlightedProductId={highlightedProductId}
-          onTicketTypeChange={setTicketType}
-          onTicketReasonChange={setTicketReason}
-          onRequestHandoff={handleRequestHandoff}
-          onAcknowledgeHandoff={handleAcknowledgeHandoff}
+          responseStatus={responseStatus}
+          boundary={boundary}
+          suggestedActions={suggestedActions}
+          error={error}
+          onInputChange={setInput}
+          onSubmit={handleSubmit}
+          onCancel={handleCancelStream}
+          onRetry={handleRetry}
+          onSuggestedAction={handleSuggestedAction}
+          onProductClick={handleProductClick}
         />
-      )}
+        <MobileTabBar
+          activeTab={activeMobileTab}
+          onTabChange={setActiveMobileTab}
+          productCount={products.length}
+          evidenceCount={evidence.length}
+        />
+      </div>
+
+      <ContextPanel
+        boundary={boundary}
+        evidence={evidence}
+        products={products}
+        order={order}
+        turns={turns}
+        handoffNotice={handoffNotice}
+        ticketType={ticketType}
+        ticketReason={ticketReason}
+        loading={loading}
+        skuCount={products.length}
+        orderCount={order ? 1 : 0}
+        evidenceCount={evidence.length}
+        highlightedProductId={highlightedProductId}
+        mobileTab={activeMobileTab}
+        onTicketTypeChange={setTicketType}
+        onTicketReasonChange={setTicketReason}
+        onRequestHandoff={handleRequestHandoff}
+        onAcknowledgeHandoff={handleAcknowledgeHandoff}
+      />
 
       <button
         type="button"
