@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import {
   ApiError,
   clearAuthSession,
@@ -74,6 +75,7 @@ export default function App() {
   const [error, setError] = useState<RequestError | null>(null);
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
   const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
+  const [contextPanelCollapsed, setContextPanelCollapsed] = useState(false);
 
   const handleProductClick = useCallback((product: ProductCard) => {
     setHighlightedProductId(product.sku_id);
@@ -581,7 +583,7 @@ export default function App() {
   };
 
   return (
-    <div className="shell">
+    <div className={`shell ${contextPanelCollapsed ? "shell-collapsed" : ""}`}>
       <Sidebar
         operator={operatorProfile}
         conversations={conversations}
@@ -611,25 +613,36 @@ export default function App() {
         onProductClick={handleProductClick}
       />
 
-      <ContextPanel
-        boundary={boundary}
-        evidence={evidence}
-        products={products}
-        order={order}
-        turns={turns}
-        handoffNotice={handoffNotice}
-        ticketType={ticketType}
-        ticketReason={ticketReason}
-        loading={loading}
-        skuCount={products.length}
-        orderCount={order ? 1 : 0}
-        evidenceCount={evidence.length}
-        highlightedProductId={highlightedProductId}
-        onTicketTypeChange={setTicketType}
-        onTicketReasonChange={setTicketReason}
-        onRequestHandoff={handleRequestHandoff}
-        onAcknowledgeHandoff={handleAcknowledgeHandoff}
-      />
+      {!contextPanelCollapsed && (
+        <ContextPanel
+          boundary={boundary}
+          evidence={evidence}
+          products={products}
+          order={order}
+          turns={turns}
+          handoffNotice={handoffNotice}
+          ticketType={ticketType}
+          ticketReason={ticketReason}
+          loading={loading}
+          skuCount={products.length}
+          orderCount={order ? 1 : 0}
+          evidenceCount={evidence.length}
+          highlightedProductId={highlightedProductId}
+          onTicketTypeChange={setTicketType}
+          onTicketReasonChange={setTicketReason}
+          onRequestHandoff={handleRequestHandoff}
+          onAcknowledgeHandoff={handleAcknowledgeHandoff}
+        />
+      )}
+
+      <button
+        type="button"
+        className="panel-toggle"
+        onClick={() => setContextPanelCollapsed((c) => !c)}
+        title={contextPanelCollapsed ? "展开详情" : "收起详情"}
+      >
+        {contextPanelCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+      </button>
     </div>
   );
 }

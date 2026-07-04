@@ -127,8 +127,13 @@ select:focus-visible {
 .shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr) 380px;
+  grid-template-columns: 256px minmax(0, 1fr) 360px;
   background: var(--bg-base);
+  position: relative;
+}
+
+.shell.shell-collapsed {
+  grid-template-columns: 256px minmax(0, 1fr) 0px;
 }
 
 /* --- Login ---------------------------------------------------------------- */
@@ -1617,6 +1622,35 @@ select:focus-visible {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* --- Panel Toggle --------------------------------------------------------- */
+.panel-toggle {
+  position: fixed;
+  right: 368px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 48px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  display: grid;
+  place-items: center;
+  z-index: 10;
+  transition: right var(--duration-med) var(--ease-out),
+              color var(--duration-fast) var(--ease-out),
+              background-color var(--duration-fast) var(--ease-out);
+}
+
+.shell.shell-collapsed .panel-toggle {
+  right: 8px;
+}
+
+.panel-toggle:hover {
+  color: var(--copper);
+  background: var(--bg-card);
 }
 
 /* --- Responsive ----------------------------------------------------------- */
