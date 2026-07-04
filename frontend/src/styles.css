@@ -813,10 +813,10 @@ select:focus-visible {
   justify-items: start;
 }
 
-.message p {
+.message p,
+.message .markdown-content {
   margin: 0;
   max-width: 100%;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.6;
   background: var(--bg-card);
@@ -824,6 +824,10 @@ select:focus-visible {
   border-radius: var(--radius-md);
   padding: var(--space-3) 14px;
   font-size: 14px;
+}
+
+.message p {
+  white-space: pre-wrap;
 }
 
 .message.user p {

@@ -13,6 +13,7 @@ import {
 import { FormEvent, useEffect, useRef } from "react";
 import { BoundaryBadge } from "./Boundary";
 import { formatClock } from "./common";
+import { MarkdownContent } from "./MarkdownContent";
 import type {
   BoundaryClassification,
   ChatMessage,
@@ -141,12 +142,18 @@ function MessageRow({ message }: { message: ChatMessage }) {
       </span>
       <div className="bubble-stack">
         {message.boundary && <BoundaryBadge boundary={message.boundary} compact />}
-        <p>
-          {message.status === "streaming" && !message.content && (
-            <Loader2 size={15} className="spin inline-icon" />
-          )}
-          {bubbleContent}
-        </p>
+        {message.role === "assistant" ? (
+          <MarkdownContent>
+            {bubbleContent}
+          </MarkdownContent>
+        ) : (
+          <p>
+            {message.status === "streaming" && !message.content && (
+              <Loader2 size={15} className="spin inline-icon" />
+            )}
+            {bubbleContent}
+          </p>
+        )}
         {metaParts.length > 0 && (
           <div className="message-meta">
             {metaParts.map((part) => (
