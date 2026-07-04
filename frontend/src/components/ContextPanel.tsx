@@ -37,6 +37,7 @@ type ContextPanelProps = {
   skuCount: number;
   orderCount: number;
   evidenceCount: number;
+  highlightedProductId?: number | null;
   onTicketTypeChange: (value: string) => void;
   onTicketReasonChange: (value: string) => void;
   onRequestHandoff: () => void;
@@ -56,6 +57,7 @@ export function ContextPanel({
   skuCount,
   orderCount,
   evidenceCount,
+  highlightedProductId,
   onTicketTypeChange,
   onTicketReasonChange,
   onRequestHandoff,
@@ -131,7 +133,7 @@ export function ContextPanel({
           </div>
           <div className="product-list">
             {products.map((product) => (
-              <ProductCardView key={product.sku_id} product={product} />
+              <ProductCardView key={product.sku_id} product={product} highlighted={product.sku_id === highlightedProductId} />
             ))}
           </div>
         </section>
@@ -291,13 +293,13 @@ function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
   );
 }
 
-function ProductCardView({ product }: { product: ProductCard }) {
+function ProductCardView({ product, highlighted }: { product: ProductCard; highlighted: boolean }) {
   const specLine = Object.entries(product.specs)
     .slice(0, 4)
     .map(([key, value]) => `${key}: ${value}`)
     .join(" · ");
   return (
-    <article className="product-card">
+    <article className={`product-card${highlighted ? " highlighted" : ""}`}>
       <div className="thumb">
         <PackageSearch size={20} />
       </div>

@@ -14,9 +14,11 @@ import { FormEvent, useEffect, useRef } from "react";
 import { BoundaryBadge } from "./Boundary";
 import { formatClock } from "./common";
 import { MarkdownContent } from "./MarkdownContent";
+import { ProductCardRow } from "./ProductInlineCard";
 import type {
   BoundaryClassification,
   ChatMessage,
+  ProductCard,
   RequestError,
   ResponseStatus,
   SuggestedAction
@@ -36,6 +38,7 @@ type ChatPanelProps = {
   onCancel: () => void;
   onRetry: () => void;
   onSuggestedAction: (action: SuggestedAction) => void;
+  onProductClick?: (product: ProductCard) => void;
 };
 
 export function ChatPanel({
@@ -51,7 +54,8 @@ export function ChatPanel({
   onSubmit,
   onCancel,
   onRetry,
-  onSuggestedAction
+  onSuggestedAction,
+  onProductClick
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -74,7 +78,7 @@ export function ChatPanel({
 
       <section className="messages" aria-live="polite">
         {messages.map((message) => (
-          <MessageRow key={message.id} message={message} />
+          <MessageRow key={message.id} message={message} onProductClick={onProductClick} />
         ))}
         {loading && !messages.some((message) => message.status === "streaming") && (
           <article className="message assistant pending">
@@ -126,7 +130,7 @@ export function ChatPanel({
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({ message, onProductClick }: { message: ChatMessage; onProductClick?: (product: ProductCard) => void }) {
   const metaParts = messageMeta(message);
   const bubbleContent =
     message.content ||
@@ -153,6 +157,9 @@ function MessageRow({ message }: { message: ChatMessage }) {
             )}
             {bubbleContent}
           </p>
+        )}
+        {message.role === "assistant" && message.products && message.products.length > 0 && (
+          <ProductCardRow products={message.products} onProductClick={onProductClick} />
         )}
         {metaParts.length > 0 && (
           <div className="message-meta">

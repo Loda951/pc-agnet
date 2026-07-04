@@ -1191,6 +1191,17 @@ select:focus-visible {
   border-color: var(--copper-dim);
 }
 
+.product-card.highlighted {
+  border-color: var(--copper);
+  animation: highlight-pulse 2s ease-out;
+}
+
+@keyframes highlight-pulse {
+  0% { box-shadow: 0 0 0 2px var(--copper-glow); }
+  50% { box-shadow: 0 0 8px 4px var(--copper-glow); }
+  100% { box-shadow: none; }
+}
+
 .thumb {
   width: 40px;
   height: 40px;

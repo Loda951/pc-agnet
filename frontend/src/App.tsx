@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   clearAuthSession,
@@ -73,6 +73,12 @@ export default function App() {
   const [ticketType, setTicketType] = useState("return");
   const [error, setError] = useState<RequestError | null>(null);
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
+  const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
+
+  const handleProductClick = useCallback((product: ProductCard) => {
+    setHighlightedProductId(product.sku_id);
+    setTimeout(() => setHighlightedProductId(null), 2000);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -602,6 +608,7 @@ export default function App() {
         onCancel={handleCancelStream}
         onRetry={handleRetry}
         onSuggestedAction={handleSuggestedAction}
+        onProductClick={handleProductClick}
       />
 
       <ContextPanel
@@ -617,6 +624,7 @@ export default function App() {
         skuCount={products.length}
         orderCount={order ? 1 : 0}
         evidenceCount={evidence.length}
+        highlightedProductId={highlightedProductId}
         onTicketTypeChange={setTicketType}
         onTicketReasonChange={setTicketReason}
         onRequestHandoff={handleRequestHandoff}
