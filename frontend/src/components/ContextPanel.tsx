@@ -1,16 +1,20 @@
 import {
   BookOpenText,
+  Boxes,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   ClipboardList,
+  Headphones,
   Headset,
   History,
+  Keyboard,
+  Mouse,
+  Package as PackageIcon,
   PackageSearch,
   RotateCcw,
   ShieldCheck,
-  Truck,
-  Boxes
+  Truck
 } from "lucide-react";
 import { useState } from "react";
 import { BoundaryBadge, BoundaryStatusCard } from "./Boundary";
@@ -293,7 +297,16 @@ function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
   );
 }
 
+function getCategoryIcon(category: string) {
+  const lower = category.toLowerCase();
+  if (lower.includes("mouse") || lower.includes("鼠标")) return Mouse;
+  if (lower.includes("keyboard") || lower.includes("键盘")) return Keyboard;
+  if (lower.includes("headphone") || lower.includes("headset") || lower.includes("耳机")) return Headphones;
+  return PackageIcon;
+}
+
 function ProductCardView({ product, highlighted }: { product: ProductCard; highlighted: boolean }) {
+  const IconComponent = getCategoryIcon(product.category);
   const specLine = Object.entries(product.specs)
     .slice(0, 4)
     .map(([key, value]) => `${key}: ${value}`)
@@ -301,7 +314,11 @@ function ProductCardView({ product, highlighted }: { product: ProductCard; highl
   return (
     <article className={`product-card${highlighted ? " highlighted" : ""}`}>
       <div className="thumb">
-        <PackageSearch size={20} />
+        {product.image_url ? (
+          <img src={product.image_url} alt={product.title} loading="lazy" />
+        ) : (
+          <IconComponent size={24} />
+        )}
       </div>
       <div>
         <h3>{product.title}</h3>
