@@ -10,6 +10,7 @@ import {
   MessageSquareText,
   PackageSearch,
   RotateCcw,
+  Search,
   ShieldCheck,
   Truck
 } from "lucide-react";
@@ -21,10 +22,21 @@ import type {
   BoundaryClassification,
   ConversationTurn,
   EvidenceItem,
+  HandoffRequest,
+  HandoffRequestType,
   HandoffNotice,
   OrderCard,
   ProductCard
 } from "../types";
+
+const handoffStatusLabels: Record<string, string> = {
+  pending: "待人工确认",
+  acknowledged: "已确认",
+  resolved: "已解决"
+};
+
+const handoffSafetyMessage =
+  "当前系统不会自动办理退款、退货、维修或订单修改等业务操作，请求已记录待人工确认";
 
 type ContextPanelProps = {
   boundary: BoundaryClassification | null;
@@ -33,9 +45,13 @@ type ContextPanelProps = {
   order: OrderCard | null;
   turns: ConversationTurn[];
   handoffNotice: HandoffNotice | null;
-  ticketType: string;
+  ticketType: HandoffRequestType;
   ticketReason: string;
   loading: boolean;
+  handoffQueryId: string;
+  handoffQueryLoading: boolean;
+  handoffQueryError: string | null;
+  handoffQueryResult: HandoffRequest | null;
   skuCount: number;
   orderCount: number;
   evidenceCount: number;
@@ -45,6 +61,8 @@ type ContextPanelProps = {
   onTicketReasonChange: (value: string) => void;
   onRequestHandoff: () => void;
   onAcknowledgeHandoff: () => void;
+  onHandoffQueryIdChange: (value: string) => void;
+  onQueryHandoffRequest: () => void;
 };
 
 export function ContextPanel({
@@ -57,6 +75,10 @@ export function ContextPanel({
   ticketType,
   ticketReason,
   loading,
+  handoffQueryId,
+  handoffQueryLoading,
+  handoffQueryError,
+  handoffQueryResult,
   skuCount,
   orderCount,
   evidenceCount,
@@ -65,7 +87,9 @@ export function ContextPanel({
   onTicketTypeChange,
   onTicketReasonChange,
   onRequestHandoff,
-  onAcknowledgeHandoff
+  onAcknowledgeHandoff,
+  onHandoffQueryIdChange,
+  onQueryHandoffRequest
 }: ContextPanelProps) {
   const showAfterSales =
     boundary?.classification === "human_handoff_required" || handoffNotice !== null;
@@ -209,7 +233,14 @@ export function ContextPanel({
             boundary={boundary}
             notice={handoffNotice}
             order={order}
+            loading={loading}
+            queryId={handoffQueryId}
+            queryLoading={handoffQueryLoading}
+            queryError={handoffQueryError}
+            queryResult={handoffQueryResult}
             onAcknowledge={onAcknowledgeHandoff}
+            onQueryIdChange={onHandoffQueryIdChange}
+            onQuery={onQueryHandoffRequest}
           />
         </section>
       )}
@@ -228,9 +259,10 @@ export function ContextPanel({
               disabled={loading}
             >
               <option value="return">退货</option>
-              <option value="exchange">换货</option>
               <option value="refund">退款</option>
               <option value="repair">维修</option>
+              <option value="order_change">订单修改</option>
+              <option value="other">其他</option>
             </select>
             <input
               aria-label="售后原因"
@@ -240,7 +272,7 @@ export function ContextPanel({
               placeholder="描述售后原因"
             />
             <button type="button" onClick={onRequestHandoff} disabled={loading || !ticketReason.trim()}>
-              转人工处理
+              记录人工确认诉求
             </button>
           </div>
         </section>
@@ -273,17 +305,34 @@ function HandoffPanel({
   boundary,
   notice,
   order,
-  onAcknowledge
+  loading,
+  queryId,
+  queryLoading,
+  queryError,
+  queryResult,
+  onAcknowledge,
+  onQueryIdChange,
+  onQuery
 }: {
   boundary: BoundaryClassification | null;
   notice: HandoffNotice | null;
   order: OrderCard | null;
+  loading: boolean;
+  queryId: string;
+  queryLoading: boolean;
+  queryError: string | null;
+  queryResult: HandoffRequest | null;
   onAcknowledge: () => void;
+  onQueryIdChange: (value: string) => void;
+  onQuery: () => void;
 }) {
   const activeBoundary =
     boundary?.classification === "human_handoff_required" ? boundary : null;
   const requested = notice?.requested ?? false;
   const orderId = notice?.orderId ?? order?.id;
+  const status = queryResult?.status ?? notice?.status;
+  const statusLabel = status ? handoffStatusLabels[status] : requested ? "已记录" : "待记录";
+  const requestId = queryResult?.id ?? notice?.requestId;
 
   return (
     <article className="handoff-card">
@@ -292,18 +341,41 @@ function HandoffPanel({
           <Headset size={16} />
           <strong>人工接管</strong>
         </div>
-        <span>{requested ? "已提醒" : "待确认"}</span>
+        <span>{requestId ? `#${requestId} · ${statusLabel}` : statusLabel}</span>
       </div>
-      <p>{activeBoundary?.display_message ?? notice?.reason}</p>
+      <p>{requested ? handoffSafetyMessage : activeBoundary?.display_message ?? notice?.reason}</p>
       <ul className="handoff-list">
         <li>{orderId ? `订单 #${orderId}` : "订单待确认"}</li>
-        <li>{notice?.source ?? "chat"}</li>
+        <li>{notice?.reason ?? activeBoundary?.reason ?? "需要人工确认"}</li>
         <li>{notice ? formatDateTime(notice.updatedAt) : "刚刚"}</li>
       </ul>
-      <button type="button" onClick={onAcknowledge} disabled={requested}>
+      {notice?.message && <p className="handoff-message">{notice.message}</p>}
+      <button type="button" onClick={onAcknowledge} disabled={loading || requested}>
         <CheckCircle2 size={15} />
-        {requested ? "已标记" : "标记已提醒"}
+        {requested ? "已记录" : "记录人工确认诉求"}
       </button>
+      <div className="handoff-query">
+        <div className="handoff-query-row">
+          <input
+            aria-label="人工接管请求编号"
+            inputMode="numeric"
+            value={queryId}
+            onChange={(event) => onQueryIdChange(event.target.value)}
+            placeholder="输入请求编号"
+          />
+          <button type="button" onClick={onQuery} disabled={queryLoading}>
+            <Search size={15} />
+            查询状态
+          </button>
+        </div>
+        {queryError && <p className="handoff-query-error">{queryError}</p>}
+        {queryResult && (
+          <p className="handoff-query-result">
+            查询结果：#{queryResult.id} · {handoffStatusLabels[queryResult.status]} ·{" "}
+            {formatDateTime(queryResult.updated_at)}
+          </p>
+        )}
+      </div>
     </article>
   );
 }

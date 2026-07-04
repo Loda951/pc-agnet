@@ -5,7 +5,10 @@ import type {
   ChatResponse,
   ChatStreamEvent,
   ConversationDetail,
-  ConversationSummary
+  ConversationSummary,
+  HandoffRequest,
+  HandoffRequestAccepted,
+  HandoffRequestType
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -148,6 +151,45 @@ export async function sendChat(message: string, conversationId?: number): Promis
       status: response.status,
       detail,
       retryable: response.status === 408 || response.status === 429 || response.status >= 500
+    });
+  }
+  return response.json();
+}
+
+export async function createHandoffRequest(payload: {
+  session_id: number;
+  order_id?: number;
+  request_type: HandoffRequestType;
+  reason: string;
+}): Promise<HandoffRequestAccepted> {
+  const response = await authorizedFetch("/api/after-sales", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+  return response.json();
+}
+
+export async function getHandoffRequest(requestId: number): Promise<HandoffRequest> {
+  const response = await authorizedFetch(`/api/after-sales/handoff-requests/${requestId}`, {
+    method: "GET"
+  });
+
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
     });
   }
   return response.json();
