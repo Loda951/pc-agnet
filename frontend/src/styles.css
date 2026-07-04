@@ -1244,6 +1244,123 @@ select:focus-visible {
   font-family: var(--font-mono);
 }
 
+/* --- Product Inline Card (Chat Bubble) ----------------------------------- */
+.product-card-row {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding: var(--space-1) 0;
+  margin-top: var(--space-2);
+  -webkit-overflow-scrolling: touch;
+}
+
+.product-card-row::-webkit-scrollbar {
+  height: 4px;
+}
+
+.product-card-row::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.product-card-row::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: var(--radius-pill);
+}
+
+.product-inline-card {
+  flex: 0 0 220px;
+  scroll-snap-align: start;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  padding: var(--space-2);
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: var(--space-2);
+  transition: border-color var(--duration-fast) var(--ease-out);
+}
+
+.product-inline-card:hover {
+  border-color: var(--copper-dim);
+}
+
+.product-inline-card[role="button"] {
+  cursor: pointer;
+}
+
+.product-inline-card[role="button"]:hover {
+  background: var(--bg-card-hover);
+}
+
+.product-inline-thumb {
+  grid-row: 1 / 3;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: var(--copper);
+}
+
+.product-inline-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.product-inline-info {
+  min-width: 0;
+}
+
+.product-inline-info h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-inline-info small {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-inline-info .specs {
+  color: var(--text-tertiary);
+  margin-top: 1px;
+}
+
+.product-inline-price {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.product-inline-price strong {
+  color: var(--copper);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+.product-inline-price span {
+  color: var(--green);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
 /* --- Evidence Card -------------------------------------------------------- */
 .evidence-card-head strong {
   min-width: 0;
