@@ -2,15 +2,13 @@ from collections.abc import Callable
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
-    AfterSalesTicket,
     AppUser,
     Conversation,
     MemoryFact,
-    OrderItem,
     UserAuthCredential,
 )
 from app.repositories.conversations import ConversationRepository
@@ -61,23 +59,8 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
                 password_hash=PasswordHasher.hash_password(user_b_password),
             )
         )
-        order_item = (
-            await session.execute(
-                select(OrderItem).where(OrderItem.order_id == 202607020001).limit(1)
-            )
-        ).scalar_one()
-        ticket = AfterSalesTicket(
-            user_id=1,
-            order_id=202607020001,
-            order_item_id=order_item.id,
-            ticket_type="return",
-            reason="A 用户的人工接管记录",
-            status="submitted",
-        )
-        session.add(ticket)
         await session.commit()
         user_b_id = user_b.id
-        ticket_id = ticket.id
 
     login_identifier, password = demo_credentials
     user_a_headers = await _login_headers(api_client, login_identifier, password)
@@ -90,6 +73,19 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
     )
     assert user_a_chat.status_code == 200
     user_a_conversation_id = user_a_chat.json()["conversation_id"]
+
+    handoff_response = await api_client.post(
+        "/api/after-sales",
+        json={
+            "session_id": user_a_conversation_id,
+            "order_id": 202607020001,
+            "request_type": "return",
+            "reason": "A 用户的人工接管记录",
+        },
+        headers=user_a_headers,
+    )
+    assert handoff_response.status_code == 202
+    handoff_request_id = handoff_response.json()["request_id"]
 
     order_response = await api_client.get(
         "/api/orders/202607020001?user_id=1",
@@ -118,8 +114,11 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
     )
     assert forbidden_conversation.status_code == 404
 
-    ticket_response = await api_client.get(f"/api/after-sales/{ticket_id}", headers=user_b_headers)
-    assert ticket_response.status_code == 404
+    handoff_query_response = await api_client.get(
+        f"/api/after-sales/handoff-requests/{handoff_request_id}",
+        headers=user_b_headers,
+    )
+    assert handoff_query_response.status_code == 404
 
     async with db_session_factory() as session:
         user_a_conversation = await session.get(Conversation, user_a_conversation_id)
@@ -140,9 +139,13 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
         user_b_memory = await ConversationRepository(session).list_memory(user_b_id)
         assert user_b_memory == []
 
-        ticket = await session.get(AfterSalesTicket, ticket_id)
-        assert ticket is not None
-        assert ticket.user_id == 1
+        handoff_user_id = (
+            await session.execute(
+                text("SELECT user_id FROM handoff_request WHERE id = :request_id"),
+                {"request_id": handoff_request_id},
+            )
+        ).scalar_one()
+        assert handoff_user_id == 1
 
 
 async def _login_headers(

@@ -33,3 +33,18 @@ class AfterSalesEvent(Base):
     note: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class HandoffRequest(Base):
+    __tablename__ = "handoff_request"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("order_info.id"))
+    request_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    boundary_category: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))

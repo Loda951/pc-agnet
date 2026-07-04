@@ -3,8 +3,10 @@ import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import {
   ApiError,
   clearAuthSession,
+  createHandoffRequest,
   deleteConversation as deleteConversationApi,
   getConversation,
+  getHandoffRequest,
   listConversations,
   login,
   logout,
@@ -26,6 +28,8 @@ import type {
   ConversationSummary,
   ConversationTurn,
   EvidenceItem,
+  HandoffRequest,
+  HandoffRequestType,
   HandoffNotice,
   OperatorProfile,
   OrderCard,
@@ -36,11 +40,12 @@ import type {
   SuggestedAction
 } from "./types";
 
-const ticketTypeLabels: Record<string, string> = {
+const ticketTypeLabels: Record<HandoffRequestType, string> = {
   return: "退货",
-  exchange: "换货",
   refund: "退款",
-  repair: "维修"
+  repair: "维修",
+  order_change: "订单修改",
+  other: "其他"
 };
 
 type SubmitOptions = {
@@ -73,7 +78,12 @@ export default function App() {
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [handoffNotice, setHandoffNotice] = useState<HandoffNotice | null>(null);
   const [ticketReason, setTicketReason] = useState("商品不符合预期");
-  const [ticketType, setTicketType] = useState("return");
+  const [ticketType, setTicketType] = useState<HandoffRequestType>("return");
+  const [handoffSubmitting, setHandoffSubmitting] = useState(false);
+  const [handoffQueryId, setHandoffQueryId] = useState("");
+  const [handoffQueryLoading, setHandoffQueryLoading] = useState(false);
+  const [handoffQueryError, setHandoffQueryError] = useState<string | null>(null);
+  const [handoffQueryResult, setHandoffQueryResult] = useState<HandoffRequest | null>(null);
   const [error, setError] = useState<RequestError | null>(null);
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
   const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
@@ -163,6 +173,11 @@ export default function App() {
     setSuggestedActions([]);
     setTurns([]);
     setHandoffNotice(null);
+    setHandoffSubmitting(false);
+    setHandoffQueryId("");
+    setHandoffQueryLoading(false);
+    setHandoffQueryError(null);
+    setHandoffQueryResult(null);
     setError(null);
     setFailedRequest(null);
   }
@@ -515,7 +530,7 @@ export default function App() {
     const orderId = numberFromPayload(action.payload.orderId) ?? order?.id;
     if (action.payload.handoff === true || orderId || action.label.includes("人工")) {
       setHandoffNotice({
-        requested: true,
+        requested: false,
         source: action.label,
         reason: boundary?.reason ?? "需要人工确认",
         orderId,
@@ -526,21 +541,95 @@ export default function App() {
     }
   }
 
-  function handleRequestHandoff() {
-    const orderPart = order ? `，订单 ${order.id}` : "";
-    void submitMessage(`我要申请${ticketTypeLabels[ticketType]}${orderPart}，原因：${ticketReason}`);
+  async function handleRequestHandoff() {
+    const reason = ticketReason.trim();
+    if (!conversationId) {
+      setError({
+        message: "请先在当前会话中说明诉求，再记录人工确认请求。",
+        retryable: false,
+        request: { message: "create handoff request" }
+      });
+      setResponseStatus("error");
+      return;
+    }
+    if (!reason) return;
+    if (handoffNotice?.requestId) return;
+
+    setHandoffSubmitting(true);
+    setHandoffQueryError(null);
+    setError(null);
+    try {
+      const response = await createHandoffRequest({
+        session_id: conversationId,
+        order_id: order?.id,
+        request_type: ticketType,
+        reason
+      });
+      const now = new Date().toISOString();
+      setHandoffNotice({
+        requested: true,
+        source: "人工确认诉求",
+        reason,
+        orderId: order?.id,
+        requestId: response.request_id,
+        status: response.status,
+        message: response.message,
+        updatedAt: now
+      });
+      setHandoffQueryId(String(response.request_id));
+      setHandoffQueryResult(null);
+      setResponseStatus("handoff");
+      setSuggestedActions([]);
+    } catch (err) {
+      const requestError = toRequestError(err, { message: "create handoff request" });
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+        return;
+      }
+      setError(requestError);
+      setResponseStatus("error");
+    } finally {
+      setHandoffSubmitting(false);
+    }
   }
 
   function handleAcknowledgeHandoff() {
-    const now = new Date().toISOString();
-    setHandoffNotice((current) => ({
-      requested: true,
-      source: current?.source ?? "人工接管",
-      reason: current?.reason ?? boundary?.reason ?? "需要人工确认",
-      orderId: current?.orderId ?? order?.id,
-      updatedAt: now
-    }));
-    setResponseStatus("handoff");
+    void handleRequestHandoff();
+  }
+
+  async function handleQueryHandoffRequest() {
+    const requestId = Number(handoffQueryId.trim() || handoffNotice?.requestId);
+    if (!Number.isInteger(requestId) || requestId <= 0) {
+      setHandoffQueryError("请输入有效的请求编号。");
+      return;
+    }
+
+    setHandoffQueryLoading(true);
+    setHandoffQueryError(null);
+    try {
+      const result = await getHandoffRequest(requestId);
+      setHandoffQueryResult(result);
+      setHandoffNotice((current) => ({
+        requested: true,
+        source: current?.source ?? "人工确认诉求",
+        reason: result.reason,
+        orderId: result.order_id ?? undefined,
+        requestId: result.id,
+        status: result.status,
+        message: current?.message,
+        updatedAt: result.updated_at
+      }));
+      setResponseStatus("handoff");
+    } catch (err) {
+      const requestError = toRequestError(err, { message: "query handoff request" });
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+        return;
+      }
+      setHandoffQueryError(requestError.message);
+    } finally {
+      setHandoffQueryLoading(false);
+    }
   }
 
   function applyConversationDetail(detail: ConversationDetail) {
@@ -634,16 +723,22 @@ export default function App() {
         handoffNotice={handoffNotice}
         ticketType={ticketType}
         ticketReason={ticketReason}
-        loading={loading}
+        loading={loading || handoffSubmitting}
+        handoffQueryId={handoffQueryId}
+        handoffQueryLoading={handoffQueryLoading}
+        handoffQueryError={handoffQueryError}
+        handoffQueryResult={handoffQueryResult}
         skuCount={products.length}
         orderCount={order ? 1 : 0}
         evidenceCount={evidence.length}
         highlightedProductId={highlightedProductId}
         mobileTab={isMobileContext ? activeMobileTab : undefined}
-        onTicketTypeChange={setTicketType}
+        onTicketTypeChange={(value) => setTicketType(value as HandoffRequestType)}
         onTicketReasonChange={setTicketReason}
         onRequestHandoff={handleRequestHandoff}
         onAcknowledgeHandoff={handleAcknowledgeHandoff}
+        onHandoffQueryIdChange={setHandoffQueryId}
+        onQueryHandoffRequest={handleQueryHandoffRequest}
       />
 
       <button
