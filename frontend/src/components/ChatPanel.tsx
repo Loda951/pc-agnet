@@ -132,12 +132,16 @@ export function ChatPanel({
 
 function MessageRow({ message, onProductClick }: { message: ChatMessage; onProductClick?: (product: ProductCard) => void }) {
   const metaParts = messageMeta(message);
+  const hasProducts =
+    message.role === "assistant" && message.products !== undefined && message.products.length > 0;
   const bubbleContent =
     message.content ||
     (message.status === "streaming" ? message.streamStage || "正在处理" : message.content);
   return (
     <article
-      className={`message ${message.role} ${message.status === "failed" ? "failed" : ""} ${
+      className={`message ${message.role} ${hasProducts ? "has-products" : ""} ${
+        message.status === "failed" ? "failed" : ""
+      } ${
         message.status === "streaming" ? "streaming" : ""
       }`}
     >

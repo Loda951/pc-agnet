@@ -850,6 +850,10 @@ select:focus-visible {
   grid-template-columns: minmax(0, auto) 30px;
 }
 
+.message.has-products {
+  width: min(720px, 88%);
+}
+
 .message.user .avatar {
   grid-column: 2;
 }
@@ -882,6 +886,10 @@ select:focus-visible {
   display: grid;
   gap: 5px;
   justify-items: start;
+}
+
+.message.has-products .bubble-stack {
+  width: 100%;
 }
 
 .message p,
@@ -1342,39 +1350,56 @@ select:focus-visible {
 
 /* --- Product Inline Card (Chat Bubble) ----------------------------------- */
 .product-card-row {
-  display: flex;
+  width: min(640px, 100%);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  display: grid;
   gap: var(--space-2);
-  overflow-x: auto;
-  scroll-snap-type: x mandatory;
-  padding: var(--space-1) 0;
+  padding: var(--space-2);
   margin-top: var(--space-2);
-  -webkit-overflow-scrolling: touch;
 }
 
-.product-card-row::-webkit-scrollbar {
-  height: 4px;
+.product-card-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-1);
 }
 
-.product-card-row::-webkit-scrollbar-track {
-  background: transparent;
+.product-card-row-head strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
 }
 
-.product-card-row::-webkit-scrollbar-thumb {
-  background: var(--border-default);
+.product-card-row-head span,
+.product-inline-more {
   border-radius: var(--radius-pill);
+  background: var(--bg-input);
+  color: var(--text-tertiary);
+  padding: 3px 7px;
+  font-size: 11px;
+  line-height: 1;
+  font-family: var(--font-mono);
+}
+
+.product-inline-list {
+  display: grid;
+  gap: var(--space-2);
 }
 
 .product-inline-card {
-  flex: 0 0 220px;
-  scroll-snap-align: start;
+  min-width: 0;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   padding: var(--space-2);
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   gap: var(--space-2);
+  align-items: center;
   transition: border-color var(--duration-fast) var(--ease-out);
 }
 
@@ -1391,9 +1416,8 @@ select:focus-visible {
 }
 
 .product-inline-thumb {
-  grid-row: 1 / 3;
-  width: 56px;
-  height: 56px;
+  width: 44px;
+  height: 44px;
   border-radius: var(--radius-sm);
   display: grid;
   place-items: center;
@@ -1453,12 +1477,12 @@ select:focus-visible {
 }
 
 .product-inline-price {
-  grid-column: 1 / -1;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: var(--space-1);
-  border-top: 1px solid var(--border-subtle);
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 3px;
+  min-width: 76px;
 }
 
 .product-inline-price strong {
@@ -1471,6 +1495,11 @@ select:focus-visible {
   color: var(--green);
   font-size: 11px;
   font-family: var(--font-mono);
+}
+
+.product-inline-more {
+  justify-self: start;
+  margin-left: var(--space-1);
 }
 
 /* --- Evidence Card -------------------------------------------------------- */
@@ -1986,6 +2015,24 @@ select:focus-visible {
   .error-card {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .product-inline-card {
+    grid-template-columns: 40px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .product-inline-thumb {
+    width: 40px;
+    height: 40px;
+  }
+
+  .product-inline-price {
+    grid-column: 2;
+    flex-direction: row;
+    justify-content: flex-start;
+    align-items: center;
+    min-width: 0;
   }
 }
 

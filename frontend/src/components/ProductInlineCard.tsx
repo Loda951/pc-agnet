@@ -54,18 +54,32 @@ type ProductCardRowProps = {
   onProductClick?: (product: ProductCard) => void;
 };
 
+const MAX_INLINE_PRODUCTS = 3;
+
 export function ProductCardRow({ products, onProductClick }: ProductCardRowProps) {
   if (products.length === 0) return null;
 
+  const visibleProducts = products.slice(0, MAX_INLINE_PRODUCTS);
+  const remainingCount = products.length - visibleProducts.length;
+
   return (
-    <div className="product-card-row">
-      {products.map((product) => (
-        <ProductInlineCard
-          key={product.sku_id}
-          product={product}
-          onClick={onProductClick ? () => onProductClick(product) : undefined}
-        />
-      ))}
+    <div className="product-card-row" aria-label={`推荐商品摘要，共 ${products.length} 个商品`}>
+      <div className="product-card-row-head">
+        <strong>推荐商品</strong>
+        <span>{products.length} 个候选</span>
+      </div>
+      <div className="product-inline-list">
+        {visibleProducts.map((product) => (
+          <ProductInlineCard
+            key={product.sku_id}
+            product={product}
+            onClick={onProductClick ? () => onProductClick(product) : undefined}
+          />
+        ))}
+      </div>
+      {remainingCount > 0 && (
+        <div className="product-inline-more">另有 {remainingCount} 个候选</div>
+      )}
     </div>
   );
 }
