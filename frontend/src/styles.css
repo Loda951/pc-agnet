@@ -271,10 +271,11 @@ select:focus-visible {
 
 .context-panel {
   border-width: 0 0 0 1px;
-  padding: var(--space-4);
+  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-2);
+  background: var(--bg-base);
 }
 
 /* Scrollbar styling */
@@ -646,10 +647,13 @@ select:focus-visible {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 
 .metric {
-  border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
   background: var(--bg-card);
   padding: var(--space-2) var(--space-3);
@@ -1092,6 +1096,9 @@ select:focus-visible {
 /* --- Context Panel Sections ----------------------------------------------- */
 .panel-section {
   min-width: 0;
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
 }
 
 .section-title {
@@ -1103,6 +1110,9 @@ select:focus-visible {
 
 .section-title svg {
   color: var(--copper);
+  background: var(--copper-weak);
+  padding: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .section-title h2 {
@@ -1245,6 +1255,7 @@ select:focus-visible {
 /* --- Product Card --------------------------------------------------------- */
 .product-card {
   border: 1px solid var(--border-default);
+  border-left: 3px solid var(--copper);
   border-radius: var(--radius-md);
   background: var(--bg-card);
   padding: var(--space-3);

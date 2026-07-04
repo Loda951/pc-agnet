@@ -13,7 +13,7 @@ import {
   Truck
 } from "lucide-react";
 import { useState } from "react";
-import { BoundaryBadge, BoundaryStatusCard } from "./Boundary";
+import { BoundaryBadge, BoundaryStatusCard, BoundaryStatusBar } from "./Boundary";
 import { EmptyState, displayValue, formatDateTime } from "./common";
 import { getCategoryIcon } from "../utils/category-icon";
 import type {
@@ -77,6 +77,7 @@ export function ContextPanel({
 
   return (
     <aside className={`context-panel${mobileVisible ? " mobile-visible" : ""}`}>
+      {/* L1: Status */}
       {showProducts && (
         <div className="metrics-strip">
           <Metric icon={<Boxes size={14} />} label="SKU" value={skuCount} />
@@ -89,55 +90,17 @@ export function ContextPanel({
         <section className="panel-section">
           <div className="section-title">
             <ShieldCheck size={14} />
-            <h2>边界</h2>
+            <h2>状态</h2>
           </div>
           {boundary ? (
-            <BoundaryStatusCard boundary={boundary} />
+            <BoundaryStatusBar boundary={boundary} />
           ) : (
             <EmptyState text="等待请求" />
           )}
         </section>
       )}
 
-      {showDetails && (boundary?.classification === "human_handoff_required" || handoffNotice) && (
-        <section className="panel-section">
-          <div className="section-title">
-            <Headset size={14} />
-            <h2>接管</h2>
-          </div>
-          <HandoffPanel
-            boundary={boundary}
-            notice={handoffNotice}
-            order={order}
-            onAcknowledge={onAcknowledgeHandoff}
-          />
-        </section>
-      )}
-
-      {showDetails && turns.length > 0 && (
-        <section className="panel-section">
-          <div className="section-title">
-            <History size={14} />
-            <h2>上下文</h2>
-          </div>
-          <ConversationTimeline turns={turns} />
-        </section>
-      )}
-
-      {showDetails && evidence.length > 0 && (
-        <section className="panel-section">
-          <div className="section-title">
-            <BookOpenText size={14} />
-            <h2>依据</h2>
-          </div>
-          <div className="evidence-list">
-            {evidence.map((item) => (
-              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
-            ))}
-          </div>
-        </section>
-      )}
-
+      {/* L2: Primary */}
       {showProducts && products.length > 0 && (
         <section className="panel-section">
           <div className="section-title">
@@ -159,6 +122,46 @@ export function ContextPanel({
             <h2>订单</h2>
           </div>
           <OrderCardView order={order} />
+        </section>
+      )}
+
+      {/* L3: Details */}
+      {showDetails && evidence.length > 0 && (
+        <section className="panel-section">
+          <div className="section-title">
+            <BookOpenText size={14} />
+            <h2>依据</h2>
+          </div>
+          <div className="evidence-list">
+            {evidence.map((item) => (
+              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showDetails && turns.length > 0 && (
+        <section className="panel-section">
+          <div className="section-title">
+            <History size={14} />
+            <h2>上下文</h2>
+          </div>
+          <ConversationTimeline turns={turns} />
+        </section>
+      )}
+
+      {showDetails && (boundary?.classification === "human_handoff_required" || handoffNotice) && (
+        <section className="panel-section">
+          <div className="section-title">
+            <Headset size={14} />
+            <h2>接管</h2>
+          </div>
+          <HandoffPanel
+            boundary={boundary}
+            notice={handoffNotice}
+            order={order}
+            onAcknowledge={onAcknowledgeHandoff}
+          />
         </section>
       )}
 
