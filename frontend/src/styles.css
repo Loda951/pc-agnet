@@ -452,6 +452,22 @@ select:focus-visible {
   min-height: 0;
 }
 
+.conversation-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.conversation-group-label {
+  margin: var(--space-2) 0 var(--space-1);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding-left: var(--space-1);
+}
+
 /* --- Conversation Item (row with delete) ---------------------------------- */
 .conversation-item {
   position: relative;
@@ -525,7 +541,7 @@ select:focus-visible {
   position: absolute;
   right: 6px;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(-50%) translateX(100%);
   width: 24px;
   height: 24px;
   border: 0;
@@ -535,13 +551,15 @@ select:focus-visible {
   display: grid;
   place-items: center;
   opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-out),
+  transition: transform var(--duration-med) var(--ease-out),
+              opacity var(--duration-fast) var(--ease-out),
               color var(--duration-fast) var(--ease-out),
               background-color var(--duration-fast) var(--ease-out);
 }
 
 .conversation-item:hover .conversation-delete {
   opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
 .conversation-delete:hover {
