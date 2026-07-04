@@ -782,6 +782,46 @@ select:focus-visible {
   font-size: 11px;
 }
 
+/* --- Boundary Status Bar --------------------------------------------------- */
+.boundary-status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.boundary-status-bar.auto {
+  background: var(--green-weak);
+  color: var(--green);
+  border-left: 3px solid var(--green);
+}
+
+.boundary-status-bar.handoff {
+  background: var(--amber-weak);
+  color: var(--amber);
+  border-left: 3px solid var(--amber);
+}
+
+.boundary-status-bar.blocked {
+  background: var(--crimson-weak);
+  color: var(--crimson);
+  border-left: 3px solid var(--crimson);
+}
+
+.boundary-status-bar strong {
+  font-weight: 600;
+}
+
+.boundary-status-bar span {
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-left: var(--space-1);
+}
+
 /* --- Messages ------------------------------------------------------------- */
 .messages {
   min-height: 0;
