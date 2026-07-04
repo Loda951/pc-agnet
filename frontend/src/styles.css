@@ -1684,6 +1684,80 @@ select:focus-visible {
   margin: 0;
 }
 
+/* --- Section Count Badge -------------------------------------------------- */
+.section-count {
+  margin-left: auto;
+  border-radius: var(--radius-pill);
+  background: var(--copper-weak);
+  color: var(--copper);
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+
+/* --- Hero Welcome Section ------------------------------------------------- */
+.panel-section-hero {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4);
+}
+
+.hero-icon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--copper-glow) 0%, var(--copper-weak) 100%);
+  color: var(--copper);
+  border: 1px solid var(--copper-dim);
+}
+
+.hero-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.hero-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 280px;
+}
+
+.hero-hints {
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
+  margin-top: var(--space-1);
+}
+
+.hero-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: left;
+}
+
+.hero-hint svg {
+  color: var(--copper);
+  flex-shrink: 0;
+}
+
 /* --- Spin Animation ------------------------------------------------------- */
 .spin {
   animation: spin 0.9s linear infinite;
@@ -1762,7 +1836,8 @@ select:focus-visible {
     margin-bottom: 0;
   }
 
-  .metrics-strip {
+  .metrics-strip,
+  .panel-section-hero {
     grid-column: 1 / -1;
   }
 }

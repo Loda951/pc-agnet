@@ -79,6 +79,7 @@ export default function App() {
   const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
   const [contextPanelCollapsed, setContextPanelCollapsed] = useState(false);
   const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("chat");
+  const isMobileContext = useMediaQuery("(max-width: 820px)");
 
   const handleProductClick = useCallback((product: ProductCard) => {
     setHighlightedProductId(product.sku_id);
@@ -638,7 +639,7 @@ export default function App() {
         orderCount={order ? 1 : 0}
         evidenceCount={evidence.length}
         highlightedProductId={highlightedProductId}
-        mobileTab={activeMobileTab}
+        mobileTab={isMobileContext ? activeMobileTab : undefined}
         onTicketTypeChange={setTicketType}
         onTicketReasonChange={setTicketReason}
         onRequestHandoff={handleRequestHandoff}
@@ -747,6 +748,25 @@ function listFromMetadata<T>(value: unknown): T[] {
 
 function orderFromMetadata(value: unknown): OrderCard | null {
   return isRecord(value) && typeof value.id === "number" ? (value as OrderCard) : null;
+}
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(query).matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mediaQuery = window.matchMedia(query);
+    const handleChange = (event: MediaQueryListEvent) => setMatches(event.matches);
+
+    setMatches(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, [query]);
+
+  return matches;
 }
 
 function toolCallStage(toolName: string, status: "started" | "completed" | "error") {

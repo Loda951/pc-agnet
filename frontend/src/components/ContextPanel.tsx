@@ -7,6 +7,7 @@ import {
   ClipboardList,
   Headset,
   History,
+  MessageSquareText,
   PackageSearch,
   RotateCcw,
   ShieldCheck,
@@ -75,6 +76,8 @@ export function ContextPanel({
   const showDetails = !isMobile || mobileTab === "details";
   const mobileVisible = isMobile && mobileTab !== "chat";
 
+  const hasData = products.length > 0 || order !== null || evidence.length > 0 || turns.length > 0;
+
   return (
     <aside className={`context-panel${mobileVisible ? " mobile-visible" : ""}`}>
       {/* L1: Status */}
@@ -100,53 +103,99 @@ export function ContextPanel({
         </section>
       )}
 
-      {/* L2: Primary */}
-      {showProducts && products.length > 0 && (
-        <section className="panel-section">
-          <div className="section-title">
-            <PackageSearch size={14} />
-            <h2>商品</h2>
+      {/* Welcome guide when no data yet */}
+      {showDetails && !hasData && !boundary && (
+        <section className="panel-section panel-section-hero">
+          <div className="hero-icon">
+            <MessageSquareText size={28} />
           </div>
-          <div className="product-list">
-            {products.map((product) => (
-              <ProductCardView key={product.sku_id} product={product} highlighted={product.sku_id === highlightedProductId} />
-            ))}
+          <h3 className="hero-title">工作台详情</h3>
+          <p className="hero-desc">
+            在左侧发送消息，这里会实时展示检索到的商品、订单和知识依据。
+          </p>
+          <div className="hero-hints">
+            <div className="hero-hint">
+              <PackageSearch size={14} />
+              <span>推荐商品与规格对比</span>
+            </div>
+            <div className="hero-hint">
+              <Truck size={14} />
+              <span>订单与物流查询</span>
+            </div>
+            <div className="hero-hint">
+              <BookOpenText size={14} />
+              <span>售后政策与知识依据</span>
+            </div>
           </div>
         </section>
       )}
 
-      {showDetails && order && (
+      {/* L2: Primary */}
+      {showProducts && (
+        <section className="panel-section">
+          <div className="section-title">
+            <PackageSearch size={14} />
+            <h2>商品</h2>
+            {products.length > 0 && <span className="section-count">{products.length}</span>}
+          </div>
+          {products.length > 0 ? (
+            <div className="product-list">
+              {products.map((product) => (
+                <ProductCardView key={product.sku_id} product={product} highlighted={product.sku_id === highlightedProductId} />
+              ))}
+            </div>
+          ) : (
+            <EmptyState text="询问商品推荐后展示" />
+          )}
+        </section>
+      )}
+
+      {showDetails && (
         <section className="panel-section">
           <div className="section-title">
             <Truck size={14} />
             <h2>订单</h2>
           </div>
-          <OrderCardView order={order} />
+          {order ? (
+            <OrderCardView order={order} />
+          ) : (
+            <EmptyState text="查询订单后展示" />
+          )}
         </section>
       )}
 
       {/* L3: Details */}
-      {showDetails && evidence.length > 0 && (
+      {showDetails && (
         <section className="panel-section">
           <div className="section-title">
             <BookOpenText size={14} />
             <h2>依据</h2>
+            {evidence.length > 0 && <span className="section-count">{evidence.length}</span>}
           </div>
-          <div className="evidence-list">
-            {evidence.map((item) => (
-              <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
-            ))}
-          </div>
+          {evidence.length > 0 ? (
+            <div className="evidence-list">
+              {evidence.map((item) => (
+                <EvidenceCard key={`${item.source_type}-${item.source_id}`} evidence={item} />
+              ))}
+            </div>
+          ) : (
+            <EmptyState text="回答带依据时展示" />
+          )}
         </section>
       )}
 
-      {showDetails && turns.length > 0 && (
+      {showDetails && (
         <section className="panel-section">
           <div className="section-title">
             <History size={14} />
             <h2>上下文</h2>
+            {turns.length > 0 && <span className="section-count">{turns.length}</span>}
           </div>
-          <ConversationTimeline turns={turns} />
+          {turns.length > 0 ? (
+            <ConversationTimeline turns={turns} />
+          ) : (
+            <EmptyState text="多轮对话后展示" />
+          )}
         </section>
       )}
 
