@@ -107,6 +107,7 @@ export type ChatMessage = {
   productCount?: number;
   orderId?: number;
   suggestedActions?: SuggestedAction[];
+  products?: ProductCard[];
 };
 
 export type AfterSalesTicket = {

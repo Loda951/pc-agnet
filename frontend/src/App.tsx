@@ -363,6 +363,7 @@ export default function App() {
         evidenceCount: event.evidence.length,
         productCount: event.products.length,
         orderId: event.order?.id ?? message.orderId,
+        products: event.boundary?.classification === "out_of_scope" ? [] : event.products,
         streamStage: "上下文已更新"
       }));
       return;
@@ -429,7 +430,8 @@ export default function App() {
       evidenceCount: response.evidence.length,
       productCount: response.products.length,
       orderId,
-      suggestedActions: response.suggested_actions
+      suggestedActions: response.suggested_actions,
+      products: response.boundary.classification === "out_of_scope" ? [] : response.products
     }));
     setTurns((current) => [
       ...current,
