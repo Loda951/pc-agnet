@@ -5,12 +5,8 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardList,
-  Headphones,
   Headset,
   History,
-  Keyboard,
-  Mouse,
-  Package as PackageIcon,
   PackageSearch,
   RotateCcw,
   ShieldCheck,
@@ -19,6 +15,7 @@ import {
 import { useState } from "react";
 import { BoundaryBadge, BoundaryStatusCard } from "./Boundary";
 import { EmptyState, displayValue, formatDateTime } from "./common";
+import { getCategoryIcon } from "../utils/category-icon";
 import type {
   BoundaryClassification,
   ConversationTurn,
@@ -307,14 +304,6 @@ function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
       </small>
     </article>
   );
-}
-
-function getCategoryIcon(category: string) {
-  const lower = category.toLowerCase();
-  if (lower.includes("mouse") || lower.includes("鼠标")) return Mouse;
-  if (lower.includes("keyboard") || lower.includes("键盘")) return Keyboard;
-  if (lower.includes("headphone") || lower.includes("headset") || lower.includes("耳机")) return Headphones;
-  return PackageIcon;
 }
 
 function ProductCardView({ product, highlighted }: { product: ProductCard; highlighted: boolean }) {

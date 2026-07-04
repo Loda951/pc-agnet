@@ -1356,6 +1356,22 @@ select:focus-visible {
   object-fit: cover;
 }
 
+.product-inline-thumb--mouse {
+  background: linear-gradient(135deg, var(--copper-glow) 0%, var(--copper-weak) 100%);
+}
+
+.product-inline-thumb--keyboard {
+  background: linear-gradient(135deg, var(--green-glow) 0%, var(--green-weak) 100%);
+}
+
+.product-inline-thumb--headphone {
+  background: linear-gradient(135deg, var(--blue-glow) 0%, rgba(91, 156, 245, 0.06) 100%);
+}
+
+.product-inline-thumb--default {
+  background: linear-gradient(135deg, var(--amber-glow) 0%, var(--amber-weak) 100%);
+}
+
 .product-inline-info {
   min-width: 0;
 }

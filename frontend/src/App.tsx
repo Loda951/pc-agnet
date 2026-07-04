@@ -689,7 +689,8 @@ function messageFromHistory(message: ConversationDetail["messages"][number]): Ch
     intent: typeof metadata.intent === "string" ? metadata.intent : undefined,
     evidenceCount: evidence.length || undefined,
     productCount: products.length || undefined,
-    orderId: order?.id
+    orderId: order?.id,
+    products: products.length > 0 ? products : undefined
   };
 }
 
