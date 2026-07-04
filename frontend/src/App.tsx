@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import {
   ApiError,
   clearAuthSession,
@@ -13,6 +14,8 @@ import {
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPanel } from "./components/ContextPanel";
 import { LoginPage } from "./components/LoginPage";
+import { MobileTabBar } from "./components/MobileTabBar";
+import type { MobileTab } from "./components/MobileTabBar";
 import { Sidebar } from "./components/Sidebar";
 import type {
   AuthSession,
@@ -73,6 +76,15 @@ export default function App() {
   const [ticketType, setTicketType] = useState("return");
   const [error, setError] = useState<RequestError | null>(null);
   const [failedRequest, setFailedRequest] = useState<PendingRequest | null>(null);
+  const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
+  const [contextPanelCollapsed, setContextPanelCollapsed] = useState(false);
+  const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("chat");
+  const isMobileContext = useMediaQuery("(max-width: 820px)");
+
+  const handleProductClick = useCallback((product: ProductCard) => {
+    setHighlightedProductId(product.sku_id);
+    setTimeout(() => setHighlightedProductId(null), 2000);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -363,6 +375,7 @@ export default function App() {
         evidenceCount: event.evidence.length,
         productCount: event.products.length,
         orderId: event.order?.id ?? message.orderId,
+        products: event.boundary?.classification === "out_of_scope" ? [] : event.products,
         streamStage: "上下文已更新"
       }));
       return;
@@ -429,7 +442,8 @@ export default function App() {
       evidenceCount: response.evidence.length,
       productCount: response.products.length,
       orderId,
-      suggestedActions: response.suggested_actions
+      suggestedActions: response.suggested_actions,
+      products: response.boundary.classification === "out_of_scope" ? [] : response.products
     }));
     setTurns((current) => [
       ...current,
@@ -573,7 +587,7 @@ export default function App() {
   };
 
   return (
-    <div className="shell">
+    <div className={`shell ${contextPanelCollapsed ? "shell-collapsed" : ""}`}>
       <Sidebar
         operator={operatorProfile}
         conversations={conversations}
@@ -586,21 +600,30 @@ export default function App() {
         onDeleteConversation={handleDeleteConversation}
       />
 
-      <ChatPanel
-        conversationId={conversationId}
-        messages={messages}
-        input={input}
-        loading={loading}
-        responseStatus={responseStatus}
-        boundary={boundary}
-        suggestedActions={suggestedActions}
-        error={error}
-        onInputChange={setInput}
-        onSubmit={handleSubmit}
-        onCancel={handleCancelStream}
-        onRetry={handleRetry}
-        onSuggestedAction={handleSuggestedAction}
-      />
+      <div className="chat-area">
+        <ChatPanel
+          conversationId={conversationId}
+          messages={messages}
+          input={input}
+          loading={loading}
+          responseStatus={responseStatus}
+          boundary={boundary}
+          suggestedActions={suggestedActions}
+          error={error}
+          onInputChange={setInput}
+          onSubmit={handleSubmit}
+          onCancel={handleCancelStream}
+          onRetry={handleRetry}
+          onSuggestedAction={handleSuggestedAction}
+          onProductClick={handleProductClick}
+        />
+        <MobileTabBar
+          activeTab={activeMobileTab}
+          onTabChange={setActiveMobileTab}
+          productCount={products.length}
+          evidenceCount={evidence.length}
+        />
+      </div>
 
       <ContextPanel
         boundary={boundary}
@@ -615,11 +638,22 @@ export default function App() {
         skuCount={products.length}
         orderCount={order ? 1 : 0}
         evidenceCount={evidence.length}
+        highlightedProductId={highlightedProductId}
+        mobileTab={isMobileContext ? activeMobileTab : undefined}
         onTicketTypeChange={setTicketType}
         onTicketReasonChange={setTicketReason}
         onRequestHandoff={handleRequestHandoff}
         onAcknowledgeHandoff={handleAcknowledgeHandoff}
       />
+
+      <button
+        type="button"
+        className="panel-toggle"
+        onClick={() => setContextPanelCollapsed((c) => !c)}
+        title={contextPanelCollapsed ? "展开详情" : "收起详情"}
+      >
+        {contextPanelCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+      </button>
     </div>
   );
 }
@@ -656,7 +690,8 @@ function messageFromHistory(message: ConversationDetail["messages"][number]): Ch
     intent: typeof metadata.intent === "string" ? metadata.intent : undefined,
     evidenceCount: evidence.length || undefined,
     productCount: products.length || undefined,
-    orderId: order?.id
+    orderId: order?.id,
+    products: products.length > 0 ? products : undefined
   };
 }
 
@@ -713,6 +748,25 @@ function listFromMetadata<T>(value: unknown): T[] {
 
 function orderFromMetadata(value: unknown): OrderCard | null {
   return isRecord(value) && typeof value.id === "number" ? (value as OrderCard) : null;
+}
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(query).matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mediaQuery = window.matchMedia(query);
+    const handleChange = (event: MediaQueryListEvent) => setMatches(event.matches);
+
+    setMatches(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, [query]);
+
+  return matches;
 }
 
 function toolCallStage(toolName: string, status: "started" | "completed" | "error") {
