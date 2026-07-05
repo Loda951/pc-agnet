@@ -42,6 +42,17 @@ class OrderRepository:
             return None
         return _to_order_card(order)
 
+    async def list_recent_orders(self, user_id: int, limit: int = 5) -> list[OrderCard]:
+        stmt = (
+            select(OrderInfo)
+            .where(OrderInfo.user_id == user_id)
+            .order_by(OrderInfo.created_at.desc(), OrderInfo.id.desc())
+            .options(selectinload(OrderInfo.items), selectinload(OrderInfo.logistics))
+            .limit(limit)
+        )
+        orders = (await self.session.execute(stmt)).scalars().all()
+        return [_to_order_card(order) for order in orders]
+
     async def item_belongs_to_user(self, user_id: int, order_id: int, order_item_id: int) -> bool:
         stmt = (
             select(OrderItem.id)
