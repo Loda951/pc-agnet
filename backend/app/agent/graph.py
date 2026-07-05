@@ -8,12 +8,13 @@ from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.intent import (
+    boundary_for_classification,
     build_product_search,
     classify_boundary,
     classify_intent,
     extract_order_id,
 )
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import BOUNDARY_PROTOCOL_PROMPT, SYSTEM_PROMPT
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.core.llm import build_chat_model
@@ -362,6 +363,7 @@ class AgentRuntime:
         return state
 
     async def _persist(self, state: AgentState) -> AgentState:
+        state["intent"] = _final_intent(state)
         repo = ConversationRepository(self.session)
         await repo.add_message(
             state["conversation_id"],
@@ -385,7 +387,8 @@ class AgentRuntime:
 
     async def _generate_with_llm(self, state: AgentState) -> str:
         response = await self.llm.ainvoke(_llm_messages(state))
-        return str(response.content)
+        raw_text = _content_to_text(response.content)
+        return self._resolve_protocol_completion(state, raw_text)
 
     async def _answer_deltas(self, state: AgentState) -> AsyncIterator[str]:
         if state["boundary"]["classification"] != "in_scope_auto":
@@ -395,15 +398,104 @@ class AgentRuntime:
             return
 
         if self.llm:
-            async for chunk in self.llm.astream(_llm_messages(state)):
-                text = _content_to_text(chunk.content)
-                if text:
-                    yield text
+            async for delta in self._stream_llm_with_protocol(state):
+                yield delta
             return
 
         for chunk in _chunk_text(self._generate_fallback(state)):
             await asyncio.sleep(0)
             yield chunk
+
+    def _resolve_protocol_completion(self, state: AgentState, raw_text: str) -> str:
+        protocol = _parse_boundary_protocol(raw_text)
+        if protocol is None:
+            return raw_text
+
+        if protocol == "in_scope_auto":
+            body = _protocol_body(raw_text)
+            return body if body.strip() else self._generate_fallback(state)
+
+        self._apply_runtime_boundary(state, protocol)
+        return self._generate_boundary_answer(state)
+
+    async def _stream_llm_with_protocol(self, state: AgentState) -> AsyncIterator[str]:
+        header_buffer = ""
+        protocol: str | None = None
+        emitted_body = False
+        handed_off = False
+
+        async for chunk in self.llm.astream(_llm_messages(state)):
+            text = _content_to_text(chunk.content)
+            if not text:
+                continue
+
+            if protocol is None:
+                header_buffer += text
+                if "\n" not in header_buffer:
+                    continue
+
+                first_line, remainder = _split_first_line(header_buffer)
+                parsed = _parse_boundary_header(first_line)
+                if parsed is None:
+                    protocol = "in_scope_auto"
+                    if header_buffer:
+                        emitted_body = bool(header_buffer.strip()) or emitted_body
+                        yield header_buffer
+                    header_buffer = ""
+                    continue
+
+                protocol = parsed
+                header_buffer = ""
+                if protocol == "in_scope_auto":
+                    if remainder:
+                        emitted_body = bool(remainder.strip()) or emitted_body
+                        yield remainder
+                    continue
+
+                self._apply_runtime_boundary(state, protocol)
+                handed_off = True
+                for boundary_chunk in _chunk_text(self._generate_boundary_answer(state)):
+                    yield boundary_chunk
+                continue
+
+            if handed_off:
+                continue
+
+            emitted_body = bool(text.strip()) or emitted_body
+            yield text
+
+        if protocol is None and header_buffer:
+            parsed = _parse_boundary_header(header_buffer)
+            if parsed is None:
+                yield header_buffer
+                return
+
+            if parsed == "in_scope_auto":
+                for chunk in _chunk_text(self._generate_fallback(state)):
+                    await asyncio.sleep(0)
+                    yield chunk
+                return
+
+            self._apply_runtime_boundary(state, parsed)
+            for chunk in _chunk_text(self._generate_boundary_answer(state)):
+                yield chunk
+            return
+
+        if protocol == "in_scope_auto" and not emitted_body:
+            for chunk in _chunk_text(self._generate_fallback(state)):
+                await asyncio.sleep(0)
+                yield chunk
+
+    def _apply_runtime_boundary(self, state: AgentState, classification: str) -> None:
+        reason = {
+            "human_handoff_required": "生成阶段识别为需要人工确认或执行的请求",
+            "out_of_scope": "生成阶段识别为超出 PC 外设商城客服范围",
+        }.get(classification)
+        state["boundary"] = boundary_for_classification(
+            classification,
+            reason=reason,
+        ).model_dump(mode="json")
+        state["intent"] = classification
 
     def _generate_boundary_answer(self, state: AgentState) -> str:
         boundary = BoundaryClassification(**state["boundary"])
@@ -510,7 +602,7 @@ class AgentRuntime:
         return ChatResponse(
             conversation_id=state["conversation_id"],
             answer=state["answer"],
-            intent=state["intent"],
+            intent=_final_intent(state),
             boundary=BoundaryClassification(**state["boundary"]),
             evidence=_normalize_evidence(state.get("evidence", [])),
             products=state.get("products", []),
@@ -531,7 +623,7 @@ def _llm_messages(state: AgentState) -> list[SystemMessage | HumanMessage]:
         "order": state["order"].model_dump(mode="json") if state.get("order") else None,
     }
     return [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=f"{SYSTEM_PROMPT}\n\n{BOUNDARY_PROTOCOL_PROMPT}"),
         HumanMessage(content=f"用户问题：{state['message']}\n检索上下文：{context}"),
     ]
 
@@ -593,6 +685,42 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "".join(parts)
     return "" if content is None else str(content)
+
+
+def _split_first_line(text: str) -> tuple[str, str]:
+    normalized = text.replace("\r\n", "\n")
+    if "\n" not in normalized:
+        return normalized, ""
+    first_line, remainder = normalized.split("\n", 1)
+    return first_line, remainder
+
+
+def _parse_boundary_header(line: str) -> str | None:
+    normalized = line.strip().upper()
+    if normalized == "BOUNDARY: IN_SCOPE":
+        return "in_scope_auto"
+    if normalized == "BOUNDARY: HANDOFF":
+        return "human_handoff_required"
+    if normalized == "BOUNDARY: OOS":
+        return "out_of_scope"
+    return None
+
+
+def _parse_boundary_protocol(text: str) -> str | None:
+    first_line, _ = _split_first_line(text)
+    return _parse_boundary_header(first_line)
+
+
+def _protocol_body(text: str) -> str:
+    _, remainder = _split_first_line(text)
+    return remainder
+
+
+def _final_intent(state: AgentState) -> str:
+    boundary = state.get("boundary", {}).get("classification")
+    if boundary in {"human_handoff_required", "out_of_scope"} and state.get("intent") == "general":
+        return str(boundary)
+    return state.get("intent", "general")
 
 
 def _normalize_evidence(items: list[EvidenceItem | dict[str, Any]]) -> list[EvidenceItem]:
