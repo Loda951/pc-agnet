@@ -100,15 +100,16 @@ async def main() -> None:
     async with AsyncSessionLocal() as session:
         user = await _get_or_create_user(session)
         await _ensure_user_auth_credential(session, user)
-        imported = [
-            product
-            for part_type, record in DEMO_PARTS
-            if (product := normalize_part_record(part_type, record)) is not None
-        ]
-        first_sku = None
-        for product in imported:
-            sku = await _upsert_product(session, product)
-            first_sku = first_sku or sku
+        first_sku = await _get_first_active_sku(session)
+        if first_sku is None:
+            imported = [
+                product
+                for part_type, record in DEMO_PARTS
+                if (product := normalize_part_record(part_type, record)) is not None
+            ]
+            for product in imported:
+                sku = await _upsert_product(session, product)
+                first_sku = first_sku or sku
         if first_sku:
             await _seed_order(session, user.id, first_sku)
         await _seed_knowledge(session)
@@ -193,12 +194,14 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
             sub_title=f"{product.category} 热门款，本地 demo 数据",
             detail_html=f"<p>{product.spu_title}，适合电商客服推荐与参数问答。</p>",
             status=1,
+            sales_count=max(product.sales_count, 0),
         )
         session.add(spu)
         await session.flush()
     else:
         spu.brand_id = brand.id
         spu.status = 1
+        spu.sales_count = max(spu.sales_count or 0, product.sales_count)
 
     sku = (
         await session.execute(
@@ -249,6 +252,18 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
                 )
             )
     return sku
+
+
+async def _get_first_active_sku(session) -> Sku | None:
+    return (
+        await session.execute(
+            select(Sku)
+            .join(Spu, Sku.spu_id == Spu.id)
+            .where(Sku.status == 1, Spu.status == 1)
+            .order_by(Sku.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def _get_or_create_category(session, name: str) -> Category:

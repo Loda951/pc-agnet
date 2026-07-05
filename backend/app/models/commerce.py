@@ -112,6 +112,7 @@ class Spu(Base):
     sub_title: Mapped[str | None] = mapped_column(String(255))
     detail_html: Mapped[str | None] = mapped_column(Text)
     status: Mapped[int] = mapped_column(default=0, server_default="0")
+    sales_count: Mapped[int] = mapped_column(default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 

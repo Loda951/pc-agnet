@@ -4,8 +4,17 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.repositories.catalog import CatalogRepository
+from app.repositories.catalog import CATEGORY_ALIASES, CatalogRepository
 from app.schemas.catalog import ProductSearchRequest
+
+
+def test_category_aliases_include_compact_catalog_categories() -> None:
+    assert CATEGORY_ALIASES["speakers"] == "音箱"
+    assert CATEGORY_ALIASES["speaker"] == "音箱"
+    assert CATEGORY_ALIASES["音箱"] == "音箱"
+    assert CATEGORY_ALIASES["webcam"] == "摄像头"
+    assert CATEGORY_ALIASES["webcams"] == "摄像头"
+    assert CATEGORY_ALIASES["摄像头"] == "摄像头"
 
 
 @pytest.mark.asyncio

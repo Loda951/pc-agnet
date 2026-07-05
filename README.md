@@ -19,7 +19,7 @@ PC 外设商城电商客服 AI Agent。后端使用 FastAPI + LangGraph + LangCh
 
 - Python 3.11+
 - Node.js 20+ 和 npm
-- Git，用于下载真实商品数据集
+- Git，可选，仅用于下载旧版外部商品数据集
 - Make，用于执行仓库里的初始化命令
 - Podman，用于启动 PostgreSQL、Redis、ChromaDB
 
@@ -49,9 +49,8 @@ podman machine start
    - 启动 PostgreSQL、Redis、ChromaDB
    - 安装后端依赖
    - 执行 Alembic migration，在 PostgreSQL 中创建/升级表结构
-   - 写入 demo 用户、登录凭据、示例商品、示例订单和知识文档
-   - 下载 `docyx/pc-part-dataset` 到 `.cache/pc-part-dataset`
-   - 将 GitHub 数据集中的商品数据导入 PostgreSQL
+   - 导入 6 个外设类目的紧凑商品目录
+   - 写入 demo 用户、登录凭据、示例订单和知识文档
    - 将 PostgreSQL 里的知识文档同步到 ChromaDB
 
 3. 启动后端：
@@ -105,28 +104,28 @@ podman machine start
 
    这一步会执行 `backend/alembic/versions/` 下的 migration，创建/升级 `app_user`、商品、订单、会话、记忆、知识文档、售后、鉴权凭据和 session 等表。重复执行是安全的；已经在最新版本时不会重复建表。
 
-4. 写入本地 demo 数据：
+4. 导入紧凑商品目录：
 
    ```bash
+   cd ..
+   make data-import
+   ```
+
+   这一步会导入 6 个类目：鼠标、键盘、耳机、显示器、音箱、摄像头。默认规模为
+   24 个类目-品牌组合、192 个 SPU、2304 个 SKU。
+
+5. 写入本地 demo 数据：
+
+   ```bash
+   cd backend
    python -m scripts.seed_demo
    ```
 
    这一步会写入：
 
    - 演示用户和登录凭据：`demo@example.com` / `demo-password`
-   - 少量鼠标、键盘、耳机 demo 商品
    - 一个示例订单、订单明细和物流轨迹
    - 售后政策、FAQ、店铺规则和外设知识文档
-
-5. 下载并导入 GitHub 真实商品数据集：
-
-   ```bash
-   cd ..
-   make dataset
-   make data-import
-   ```
-
-   `make dataset` 会把 `https://github.com/docyx/pc-part-dataset.git` clone 到 `.cache/pc-part-dataset`。`make data-import` 会读取 `.cache/pc-part-dataset/data/json`，通过 `backend/scripts/import_pc_part_dataset.py` 将商品写入 PostgreSQL 的 `category`、`brand`、`spu`、`sku`、`attribute_key`、`attribute_value`、`goods_attribute_relation` 等表。
 
 6. 同步知识库 RAG 索引：
 
@@ -159,9 +158,10 @@ podman machine start
 | --- | --- | --- | --- |
 | 启动基础设施 | `make infra-up` | Podman 容器和 volume | 启动 PostgreSQL、Redis、ChromaDB |
 | 创建/升级表 | `make db-migrate` | PostgreSQL schema | 执行 Alembic migration，创建业务表和索引 |
-| 写 demo 数据 | `make db-seed` | PostgreSQL rows | 写 demo 用户、凭据、示例商品、订单、物流、知识文档 |
-| 下载数据集 | `make dataset` | `.cache/pc-part-dataset` | clone `docyx/pc-part-dataset` |
-| 导入真实商品 | `make data-import` | PostgreSQL rows | 将 JSON 商品数据导入商品和属性表 |
+| 导入紧凑商品 | `make data-import` | PostgreSQL rows | 写入 6 个外设类目的受控商品目录 |
+| 写 demo 数据 | `make db-seed` | PostgreSQL rows | 写 demo 用户、凭据、订单、物流、知识文档 |
+| 下载旧外部数据集 | `make dataset` | `.cache/pc-part-dataset` | clone `docyx/pc-part-dataset` |
+| 导入旧外部商品 | `make legacy-data-import` | PostgreSQL rows | 将 GitHub JSON 商品数据导入商品和属性表 |
 | 同步知识库 | `make knowledge-sync` | ChromaDB collection | 将 `knowledge_document` 同步为 RAG 向量索引 |
 
 ### PostgreSQL 表是怎么建的？
@@ -173,7 +173,7 @@ cd backend
 .venv/bin/alembic upgrade head
 ```
 
-这一步会读取 `backend/alembic/versions/` 下的 migration 文件并创建表。`scripts.seed_demo`、`scripts.import_pc_part_dataset`、`scripts.sync_knowledge` 都不负责建表；它们假设 migration 已经执行完成。
+这一步会读取 `backend/alembic/versions/` 下的 migration 文件并创建表。`scripts.import_compact_catalog`、`scripts.seed_demo`、`scripts.import_pc_part_dataset`、`scripts.sync_knowledge` 都不负责建表；它们假设 migration 已经执行完成。
 
 如果本地数据库是全新的，推荐顺序是：
 
@@ -181,10 +181,9 @@ cd backend
 ./scripts/podman-infra.sh up
 cd backend
 .venv/bin/alembic upgrade head
-.venv/bin/python -m scripts.seed_demo
 cd ..
-make dataset
 make data-import
+make db-seed
 make knowledge-sync
 ```
 
@@ -195,21 +194,41 @@ CONFIRM_RESET=1 ./scripts/podman-infra.sh reset
 make setup-local
 ```
 
-### GitHub 商品数据集导入
+### 紧凑商品目录导入
+
+默认 `make data-import` 使用 `backend/scripts/import_compact_catalog.py` 生成并导入受控目录：
+
+- 6 个类目：鼠标、键盘、耳机、显示器、音箱、摄像头
+- 每个类目 4 个品牌，合计 24 个类目-品牌组合
+- 每个品牌 8 个 SPU
+- 每个 SPU 12 个 SKU
+
+```bash
+make data-import
+```
+
+也可以只做生成预览，不写数据库：
+
+```bash
+cd backend
+.venv/bin/python -m scripts.import_compact_catalog --dry-run
+```
+
+### GitHub 商品数据集导入（可选）
 
 `docyx/pc-part-dataset` 是真实商品种子数据来源。导入适配器会把 JSON 里的 `name`、`price`、`color`、`connection_type`、`max_dpi`、`switches`、`wireless`、`microphone` 等字段映射为本项目的 `spu/sku + attribute_key/value + goods_attribute_relation` 模型。
 
-默认一键初始化会把数据集 clone 到 `.cache/pc-part-dataset`，再导入 Makefile 中配置的 `PART_TYPES`：
+如果需要旧版外部大数据集，可以手动 clone 到 `.cache/pc-part-dataset`，再导入 Makefile 中配置的 `PART_TYPES`：
 
 ```bash
 make dataset
-make data-import
+make legacy-data-import
 ```
 
 如果只想导入核心外设数据，可以覆盖 `PART_TYPES`：
 
 ```bash
-make data-import PART_TYPES=headphones,keyboard,mouse
+make legacy-data-import PART_TYPES=headphones,keyboard,mouse
 ```
 
 如果想先小批量导入验证，可以直接调用脚本：
@@ -222,7 +241,7 @@ cd backend
 如需使用已有数据集路径：
 
 ```bash
-make data-import DATASET_DIR=/path/to/pc-part-dataset
+make legacy-data-import DATASET_DIR=/path/to/pc-part-dataset
 ```
 
 该 GitHub 数据集主要提供商品和规格信息，不包含本项目需要的用户、登录凭据、订单、物流、售后记录或中文客服知识。因此这些本地演示数据仍由 `python -m scripts.seed_demo` 写入。
