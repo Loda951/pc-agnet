@@ -18,8 +18,12 @@ from app.schemas.after_sales import CreateAfterSalesRequest, HandoffRequestCard
         ("推荐 300 元以内无线鼠标", "in_scope_auto"),
         ("帮我查最近订单物流", "in_scope_auto"),
         ("退货政策怎么走", "in_scope_auto"),
+        ("怎么下单购买键盘", "in_scope_auto"),
+        ("支持哪些支付方式", "in_scope_auto"),
         ("我要申请退货", "human_handoff_required"),
         ("帮我取消订单", "human_handoff_required"),
+        ("帮我下单这个鼠标", "human_handoff_required"),
+        ("帮我支付这个订单", "human_handoff_required"),
         ("帮我写一段 Python 爬虫", "out_of_scope"),
         ("推荐一台手机", "out_of_scope"),
     ],
@@ -47,6 +51,28 @@ async def test_handoff_answer_uses_boundary_message_without_auto_workflow() -> N
 
     assert result["answer"] == boundary.display_message
     assert result["suggested_actions"] == [{"label": "转人工客服", "payload": {"handoff": True}}]
+
+
+@pytest.mark.asyncio
+async def test_purchase_guidance_fallback_explains_read_only_order_flow() -> None:
+    boundary = classify_boundary("怎么下单购买键盘")
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    state = {
+        "message": "怎么下单购买键盘",
+        "intent": "purchase_guidance",
+        "boundary": boundary.model_dump(mode="json"),
+        "parsed": {},
+        "evidence": [],
+    }
+
+    result = await runtime._generate(state)
+
+    assert result["answer"].startswith("下单流程可以按这几步走")
+    assert "我不能在聊天里替你提交订单或完成支付" in result["answer"]
+    assert result["suggested_actions"] == [
+        {"label": "继续选购外设", "payload": {"message": "推荐 300 元以内无线鼠标"}},
+        {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},
+    ]
 
 
 @pytest.mark.asyncio

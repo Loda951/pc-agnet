@@ -32,7 +32,7 @@ AFTER_SALES_WRITE_TERMS = [
     "想退",
     "想换",
 ]
-ORDER_WRITE_TERMS = [
+ORDER_CHANGE_WRITE_TERMS = [
     "取消订单",
     "修改订单",
     "改地址",
@@ -40,8 +40,25 @@ ORDER_WRITE_TERMS = [
     "换地址",
     "催发货",
     "补发",
+]
+PURCHASE_ACTION_TERMS = [
     "下单",
     "支付",
+    "付款",
+    "提交订单",
+    "结算",
+]
+PURCHASE_INFO_TERMS = [
+    "怎么",
+    "如何",
+    "流程",
+    "步骤",
+    "方式",
+    "支持",
+    "入口",
+    "哪里",
+    "在哪",
+    "说明",
 ]
 OUT_OF_SCOPE_TERMS = [
     "天气",
@@ -138,7 +155,7 @@ def classify_boundary(message: str) -> BoundaryClassification:
 
 
 def _requires_human_handoff(message: str, compact: str) -> bool:
-    if any(term in compact for term in ORDER_WRITE_TERMS):
+    if _requires_order_handoff(message, compact):
         return True
 
     has_after_sales = any(term in message for term in AFTER_SALES_TERMS)
@@ -165,6 +182,34 @@ def _requires_human_handoff(message: str, compact: str) -> bool:
     )
 
 
+def _requires_order_handoff(message: str, compact: str) -> bool:
+    if any(term in compact for term in ORDER_CHANGE_WRITE_TERMS):
+        return True
+
+    if not any(term in compact for term in PURCHASE_ACTION_TERMS):
+        return False
+
+    asks_for_info = any(term in compact for term in PURCHASE_INFO_TERMS)
+    explicit_agent_action = re.search(
+        r"(帮我|给我|替我|代我|客服|你).{0,8}(下单|支付|付款|提交订单|结算)",
+        message,
+    )
+    user_direct_action = re.search(
+        r"(我要|需要|现在|马上|直接).{0,8}(下单|支付|付款|提交订单|结算)",
+        message,
+    )
+    direct_write_suffix = re.search(
+        r"(下单|支付|付款|提交订单|结算).{0,6}(吧|一下|操作|办理|提交|完成)",
+        message,
+    )
+
+    return bool(
+        explicit_agent_action
+        or direct_write_suffix
+        or (user_direct_action and not asks_for_info)
+    )
+
+
 def _is_explicitly_out_of_scope(message: str, lowered: str, compact: str) -> bool:
     has_scope_signal = _has_strong_scope_signal(message, lowered, compact)
     return any(term in compact for term in OUT_OF_SCOPE_TERMS) and not has_scope_signal
@@ -181,17 +226,29 @@ def _has_strong_scope_signal(message: str, lowered: str, compact: str) -> bool:
 
 def classify_intent(message: str) -> str:
     lowered = message.lower()
-    if any(keyword in message for keyword in ["退货", "换货", "退款", "维修", "售后", "工单"]):
+    compact = re.sub(r"\s+", "", lowered)
+    if any(
+        keyword in message
+        for keyword in ["退货", "换货", "退款", "维修", "售后", "工单"]
+    ):
         return "after_sales"
     if any(keyword in message for keyword in ["订单", "物流", "快递", "发货"]) or re.search(
         r"\b\d{8,}\b", lowered
     ):
         return "order_status"
+    if _is_purchase_guidance(compact):
+        return "purchase_guidance"
     if any(keyword in lowered for keyword in CATEGORY_KEYWORDS) or any(
         keyword in message for keyword in ["推荐", "预算", "买", "选", "对比"]
     ):
         return "product_recommendation"
     return "general"
+
+
+def _is_purchase_guidance(compact: str) -> bool:
+    return any(term in compact for term in PURCHASE_ACTION_TERMS) and any(
+        term in compact for term in PURCHASE_INFO_TERMS
+    )
 
 
 def extract_order_id(message: str) -> int | None:
