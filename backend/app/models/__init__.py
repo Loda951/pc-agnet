@@ -22,7 +22,7 @@ from app.models.conversation import (
     Message,
     ToolCall,
 )
-from app.models.support import AfterSalesEvent, AfterSalesTicket
+from app.models.support import AfterSalesEvent, AfterSalesTicket, HandoffRequest
 
 __all__ = [
     "AgentRun",
@@ -36,6 +36,7 @@ __all__ = [
     "Category",
     "Conversation",
     "GoodsAttributeRelation",
+    "HandoffRequest",
     "KnowledgeDocument",
     "MemoryFact",
     "Message",

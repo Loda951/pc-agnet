@@ -13,9 +13,12 @@ import {
 import { FormEvent, useEffect, useRef } from "react";
 import { BoundaryBadge } from "./Boundary";
 import { formatClock } from "./common";
+import { MarkdownContent } from "./MarkdownContent";
+import { ProductCardRow } from "./ProductInlineCard";
 import type {
   BoundaryClassification,
   ChatMessage,
+  ProductCard,
   RequestError,
   ResponseStatus,
   SuggestedAction
@@ -35,6 +38,7 @@ type ChatPanelProps = {
   onCancel: () => void;
   onRetry: () => void;
   onSuggestedAction: (action: SuggestedAction) => void;
+  onProductClick?: (product: ProductCard) => void;
 };
 
 export function ChatPanel({
@@ -50,7 +54,8 @@ export function ChatPanel({
   onSubmit,
   onCancel,
   onRetry,
-  onSuggestedAction
+  onSuggestedAction,
+  onProductClick
 }: ChatPanelProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -73,7 +78,7 @@ export function ChatPanel({
 
       <section className="messages" aria-live="polite">
         {messages.map((message) => (
-          <MessageRow key={message.id} message={message} />
+          <MessageRow key={message.id} message={message} onProductClick={onProductClick} />
         ))}
         {loading && !messages.some((message) => message.status === "streaming") && (
           <article className="message assistant pending">
@@ -125,14 +130,18 @@ export function ChatPanel({
   );
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({ message, onProductClick }: { message: ChatMessage; onProductClick?: (product: ProductCard) => void }) {
   const metaParts = messageMeta(message);
+  const hasProducts =
+    message.role === "assistant" && message.products !== undefined && message.products.length > 0;
   const bubbleContent =
     message.content ||
     (message.status === "streaming" ? message.streamStage || "正在处理" : message.content);
   return (
     <article
-      className={`message ${message.role} ${message.status === "failed" ? "failed" : ""} ${
+      className={`message ${message.role} ${hasProducts ? "has-products" : ""} ${
+        message.status === "failed" ? "failed" : ""
+      } ${
         message.status === "streaming" ? "streaming" : ""
       }`}
     >
@@ -141,12 +150,21 @@ function MessageRow({ message }: { message: ChatMessage }) {
       </span>
       <div className="bubble-stack">
         {message.boundary && <BoundaryBadge boundary={message.boundary} compact />}
-        <p>
-          {message.status === "streaming" && !message.content && (
-            <Loader2 size={15} className="spin inline-icon" />
-          )}
-          {bubbleContent}
-        </p>
+        {message.role === "assistant" ? (
+          <MarkdownContent>
+            {bubbleContent}
+          </MarkdownContent>
+        ) : (
+          <p>
+            {message.status === "streaming" && !message.content && (
+              <Loader2 size={15} className="spin inline-icon" />
+            )}
+            {bubbleContent}
+          </p>
+        )}
+        {message.role === "assistant" && message.products && message.products.length > 0 && (
+          <ProductCardRow products={message.products} onProductClick={onProductClick} />
+        )}
         {metaParts.length > 0 && (
           <div className="message-meta">
             {metaParts.map((part) => (

@@ -23,6 +23,31 @@ type SidebarProps = {
   onDeleteConversation: (conversationId: number) => void;
 };
 
+function groupConversations(conversations: ConversationSummary[]) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today.getTime() - 86400000);
+
+  const groups: { label: string; conversations: ConversationSummary[] }[] = [
+    { label: "今天", conversations: [] },
+    { label: "昨天", conversations: [] },
+    { label: "更早", conversations: [] },
+  ];
+
+  for (const conv of conversations) {
+    const date = new Date(conv.last_message_at ?? conv.created_at);
+    if (date >= today) {
+      groups[0].conversations.push(conv);
+    } else if (date >= yesterday) {
+      groups[1].conversations.push(conv);
+    } else {
+      groups[2].conversations.push(conv);
+    }
+  }
+
+  return groups.filter((group) => group.conversations.length > 0);
+}
+
 export function Sidebar({
   operator,
   conversations,
@@ -74,15 +99,20 @@ export function Sidebar({
           <h2>会话</h2>
         </div>
         <div className="conversation-list">
-          {conversations.map((conversation) => (
-            <ConversationRow
-              key={conversation.id}
-              conversation={conversation}
-              active={conversation.id === activeConversationId}
-              disabled={disabled}
-              onSelect={onSelectConversation}
-              onDelete={onDeleteConversation}
-            />
+          {groupConversations(conversations).map((group) => (
+            <div key={group.label} className="conversation-group">
+              <h3 className="conversation-group-label">{group.label}</h3>
+              {group.conversations.map((conversation) => (
+                <ConversationRow
+                  key={conversation.id}
+                  conversation={conversation}
+                  active={conversation.id === activeConversationId}
+                  disabled={disabled}
+                  onSelect={onSelectConversation}
+                  onDelete={onDeleteConversation}
+                />
+              ))}
+            </div>
           ))}
           {conversationsLoading && (
             <div className="conversation-loading">

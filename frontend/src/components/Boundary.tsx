@@ -38,6 +38,17 @@ export function BoundaryStatusCard({ boundary }: { boundary: BoundaryClassificat
   );
 }
 
+export function BoundaryStatusBar({ boundary }: { boundary: BoundaryClassification }) {
+  const meta = boundaryMeta(boundary);
+  return (
+    <div className={`boundary-status-bar ${meta.className}`}>
+      {meta.icon}
+      <strong>{meta.label}</strong>
+      {boundary.display_message && <span>{boundary.display_message}</span>}
+    </div>
+  );
+}
+
 export function boundaryMeta(boundary: BoundaryClassification): BoundaryMeta {
   if (boundary.classification === "human_handoff_required") {
     return {

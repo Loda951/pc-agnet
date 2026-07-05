@@ -107,6 +107,7 @@ export type ChatMessage = {
   productCount?: number;
   orderId?: number;
   suggestedActions?: SuggestedAction[];
+  products?: ProductCard[];
 };
 
 export type AfterSalesTicket = {
@@ -117,6 +118,28 @@ export type AfterSalesTicket = {
   reason: string;
   status: string;
   created_at: string;
+};
+
+export type HandoffRequestType = "refund" | "return" | "repair" | "order_change" | "other";
+
+export type HandoffRequestStatus = "pending" | "acknowledged" | "resolved";
+
+export type HandoffRequestAccepted = {
+  request_id: number;
+  status: HandoffRequestStatus;
+  message: string;
+};
+
+export type HandoffRequest = {
+  id: number;
+  session_id: number;
+  order_id?: number | null;
+  request_type: HandoffRequestType;
+  reason: string;
+  boundary_category: string;
+  status: HandoffRequestStatus;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ResponseStatus =
@@ -247,5 +270,8 @@ export type HandoffNotice = {
   source: string;
   reason: string;
   orderId?: number;
+  requestId?: number;
+  status?: HandoffRequestStatus;
+  message?: string;
   updatedAt: string;
 };

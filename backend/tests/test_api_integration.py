@@ -87,24 +87,47 @@ async def test_orders_latest_returns_seeded_order(
 
 
 @pytest.mark.asyncio
-async def test_after_sales_endpoint_returns_handoff_boundary(
+async def test_after_sales_endpoint_records_handoff_request(
     api_client: AsyncClient,
     auth_headers: dict[str, str],
 ) -> None:
+    chat_response = await api_client.post(
+        "/api/chat",
+        json={"message": "我要申请退货"},
+        headers=auth_headers,
+    )
+    assert chat_response.status_code == 200
+    conversation_id = chat_response.json()["conversation_id"]
+
     response = await api_client.post(
         "/api/after-sales",
         json={
+            "session_id": conversation_id,
             "order_id": 202607020001,
-            "order_item_id": 1,
-            "ticket_type": "return",
+            "request_type": "return",
             "reason": "商品不符合预期",
         },
         headers=auth_headers,
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 202
     payload = response.json()
-    assert payload["detail"]["classification"] == "human_handoff_required"
+    assert payload["request_id"]
+    assert payload["status"] == "pending"
+    assert "不会自动办理业务操作" in payload["message"]
+
+    query_response = await api_client.get(
+        f"/api/after-sales/handoff-requests/{payload['request_id']}",
+        headers=auth_headers,
+    )
+    assert query_response.status_code == 200
+    query_payload = query_response.json()
+    assert query_payload["id"] == payload["request_id"]
+    assert query_payload["session_id"] == conversation_id
+    assert query_payload["order_id"] == 202607020001
+    assert query_payload["request_type"] == "return"
+    assert query_payload["boundary_category"] == "human_handoff_required"
+    assert query_payload["status"] == "pending"
 
 
 def _parse_sse(body: str) -> list[dict]:
