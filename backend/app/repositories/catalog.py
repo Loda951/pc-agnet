@@ -27,7 +27,14 @@ CATEGORY_ALIASES = {
     "headset": "耳机",
     "耳机": "耳机",
     "monitor": "显示器",
+    "monitors": "显示器",
     "显示器": "显示器",
+    "speaker": "音箱",
+    "speakers": "音箱",
+    "音箱": "音箱",
+    "webcam": "摄像头",
+    "webcams": "摄像头",
+    "摄像头": "摄像头",
 }
 
 QUERY_STOP_WORDS = {
@@ -50,6 +57,9 @@ QUERY_STOP_WORDS = {
     "鼠标",
     "键盘",
     "耳机",
+    "显示器",
+    "音箱",
+    "摄像头",
     "外设",
     "pc",
     "rgb",

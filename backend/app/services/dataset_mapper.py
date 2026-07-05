@@ -17,6 +17,7 @@ CATEGORY_NAME_MAP = {
     "webcam": "摄像头",
     "webcams": "摄像头",
     "speakers": "音箱",
+    "speaker": "音箱",
 }
 
 KNOWN_BRANDS = [
@@ -40,6 +41,18 @@ KNOWN_BRANDS = [
     "Syba",
     "ROG",
     "HP",
+    "AOC",
+    "AVerMedia",
+    "Akko",
+    "Bose",
+    "Creative",
+    "Dell",
+    "Edifier",
+    "Elgato",
+    "JBL",
+    "Keychron",
+    "LG",
+    "Pulsar",
 ]
 
 FILTER_ATTRIBUTES = {
@@ -48,18 +61,25 @@ FILTER_ATTRIBUTES = {
     "connection_type",
     "enclosure_type",
     "frequency_response",
+    "field_of_view",
+    "frame_rate",
     "hand_orientation",
     "max_dpi",
     "microphone",
     "panel_type",
+    "power_w",
     "refresh_rate",
+    "response_time_ms",
     "resolution",
+    "size_inch",
     "style",
     "switches",
     "tenkeyless",
     "tracking_method",
     "type",
     "wireless",
+    "channels",
+    "weight_g",
 }
 
 SPEC_ATTRIBUTES = {
@@ -68,17 +88,24 @@ SPEC_ATTRIBUTES = {
     "connection_type",
     "enclosure_type",
     "frequency_response",
+    "field_of_view",
+    "frame_rate",
     "hand_orientation",
     "max_dpi",
     "microphone",
     "refresh_rate",
+    "response_time_ms",
     "resolution",
+    "size_inch",
     "style",
     "switches",
     "tenkeyless",
     "tracking_method",
     "type",
     "wireless",
+    "channels",
+    "power_w",
+    "weight_g",
 }
 
 ATTRIBUTE_KEY_ALIASES = {
@@ -96,6 +123,7 @@ class ImportedProduct:
     sku_title: str
     price_cny: Decimal
     stock: int
+    sales_count: int = 0
     specs: dict[str, str] = field(default_factory=dict)
     attributes: dict[str, str] = field(default_factory=dict)
 
