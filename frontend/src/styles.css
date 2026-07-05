@@ -798,6 +798,12 @@ select:focus-visible {
   line-height: 1.4;
 }
 
+.boundary-status-bar > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+}
+
 .boundary-status-bar.auto {
   background: var(--green-weak);
   color: var(--green);
@@ -818,12 +824,16 @@ select:focus-visible {
 
 .boundary-status-bar strong {
   font-weight: 600;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .boundary-status-bar span {
+  min-width: 0;
   font-weight: 400;
   color: var(--text-secondary);
-  margin-left: var(--space-1);
+  margin-left: 0;
+  overflow-wrap: anywhere;
 }
 
 /* --- Messages ------------------------------------------------------------- */
@@ -1112,11 +1122,16 @@ select:focus-visible {
 .section-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   margin-bottom: var(--space-2);
+  min-height: 24px;
 }
 
 .section-title svg {
+  width: 24px;
+  height: 24px;
+  box-sizing: border-box;
+  flex: 0 0 24px;
   color: var(--copper);
   background: var(--copper-weak);
   padding: 4px;

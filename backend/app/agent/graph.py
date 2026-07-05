@@ -554,6 +554,17 @@ class AgentRuntime:
                 "需要转人工客服处理。"
             )
 
+        if state["intent"] == "purchase_guidance":
+            return _append_evidence(
+                "下单流程可以按这几步走：\n"
+                "1. 先在商品推荐或商品详情里确认 SKU、价格、库存和关键规格。\n"
+                "2. 到商城商品页选择对应规格，填写或确认收货信息。\n"
+                "3. 提交订单后按页面提示完成支付，再到订单页查看状态和物流。\n"
+                "我不能在聊天里替你提交订单或完成支付；如果遇到支付异常、订单修改或"
+                "其他需要人工确认的问题，我可以帮你整理信息并转人工处理。",
+                evidence,
+            )
+
         if evidence:
             return "\n".join(["我按知识库信息先回答：", *_evidence_lines(evidence)])
 
@@ -575,6 +586,11 @@ class AgentRuntime:
             ]
         if state["intent"] == "order_status" and state.get("order"):
             return [{"label": "转人工处理售后", "payload": {"orderId": state["order"].id}}]
+        if state["intent"] == "purchase_guidance":
+            return [
+                {"label": "继续选购外设", "payload": {"message": "推荐 300 元以内无线鼠标"}},
+                {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},
+            ]
         return []
 
     async def _maybe_update_memory(self, repo: ConversationRepository, state: AgentState) -> None:
