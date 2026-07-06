@@ -1,3 +1,4 @@
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -176,6 +177,30 @@ class MemoryService:
             "reason": message,
         }
 
+    def extract_long_term_facts(self, message: str) -> list[dict[str, Any]]:
+        facts: list[dict[str, Any]] = []
+        lowered = message.lower()
+
+        if "无线" in message:
+            facts.append(_memory_fact("connection_preference", "偏好无线设备", 0.8))
+        elif "有线" in message:
+            facts.append(_memory_fact("connection_preference", "偏好有线设备", 0.75))
+
+        budget = _extract_budget_preference(message)
+        if budget:
+            facts.append(_memory_fact("budget_preference", budget, 0.7))
+
+        if "fps" in lowered or "游戏" in message:
+            facts.append(_memory_fact("usage_preference", "偏好游戏场景", 0.75))
+        elif "办公" in message:
+            facts.append(_memory_fact("usage_preference", "偏好办公场景", 0.7))
+
+        brand = _extract_brand_preference(message)
+        if brand:
+            facts.append(_memory_fact("brand_preference", f"偏好 {brand} 品牌", 0.65))
+
+        return facts
+
     def _is_product_followup(self, message: str, working_memory: dict[str, Any]) -> bool:
         return bool(working_memory.get("current_product_search")) and any(
             term in message for term in PRODUCT_FOLLOWUP_TERMS
@@ -221,3 +246,42 @@ def _infer_handoff_request_type(message: str) -> str:
     if any(term in message for term in ["取消订单", "改地址", "改收货", "修改订单"]):
         return "order_change"
     return "other"
+
+
+def _memory_fact(key: str, value: str, confidence: float) -> dict[str, Any]:
+    return {
+        "scope": "user",
+        "fact_type": "preference",
+        "key": key,
+        "value": value,
+        "confidence": confidence,
+    }
+
+
+def _extract_budget_preference(message: str) -> str | None:
+    match = re.search(
+        r"预算\s*(\d+(?:\.\d+)?)\s*(?:元|块)?|(\d+(?:\.\d+)?)\s*(?:元|块)?以内",
+        message,
+    )
+    if match is None:
+        return None
+    amount = match.group(1) or match.group(2)
+    if amount is None:
+        return None
+    return f"偏好 {amount} 元以内预算"
+
+
+def _extract_brand_preference(message: str) -> str | None:
+    brand_aliases = {
+        "罗技": "罗技",
+        "logitech": "Logitech",
+        "雷蛇": "雷蛇",
+        "razer": "Razer",
+        "steelseries": "SteelSeries",
+        "赛睿": "赛睿",
+    }
+    lowered = message.lower()
+    for keyword, brand in brand_aliases.items():
+        if keyword in lowered or keyword in message:
+            return brand
+    return None

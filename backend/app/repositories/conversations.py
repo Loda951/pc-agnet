@@ -1,6 +1,6 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentRun, Conversation, MemoryFact, Message, ToolCall
@@ -245,30 +245,84 @@ class ConversationRepository:
         return True
 
     async def list_memory(self, user_id: int, limit: int = 10) -> list[MemoryFact]:
+        now = utc_now_naive()
         stmt = (
             select(MemoryFact)
-            .where(MemoryFact.user_id == user_id)
+            .where(
+                MemoryFact.user_id == user_id,
+                MemoryFact.disabled_at.is_(None),
+                or_(MemoryFact.expires_at.is_(None), MemoryFact.expires_at > now),
+            )
             .order_by(MemoryFact.updated_at.desc())
             .limit(limit)
         )
-        return list((await self.session.execute(stmt)).scalars().all())
+        memories = list((await self.session.execute(stmt)).scalars().all())
+        for memory in memories:
+            memory.last_used_at = now
+        return memories
 
     async def upsert_memory(
-        self, user_id: int, key: str, value: str, confidence: float = 0.7
+        self,
+        user_id: int,
+        key: str,
+        value: str,
+        confidence: float = 0.7,
+        scope: str = "user",
+        fact_type: str = "preference",
+        source_message_id: int | None = None,
+        expires_in_days: int | None = None,
     ) -> None:
+        now = utc_now_naive()
+        expires_at = now + timedelta(days=expires_in_days) if expires_in_days else None
         existing = (
             await self.session.execute(
-                select(MemoryFact).where(MemoryFact.user_id == user_id, MemoryFact.key == key)
+                select(MemoryFact).where(
+                    MemoryFact.user_id == user_id,
+                    MemoryFact.scope == scope,
+                    MemoryFact.fact_type == fact_type,
+                    MemoryFact.key == key,
+                )
             )
         ).scalar_one_or_none()
         if existing:
             existing.value = value
             existing.confidence = confidence
-            existing.updated_at = utc_now_naive()
+            existing.source_message_id = source_message_id or existing.source_message_id
+            existing.expires_at = expires_at
+            existing.disabled_at = None
+            existing.last_used_at = now
+            existing.updated_at = now
         else:
             self.session.add(
-                MemoryFact(user_id=user_id, key=key, value=value, confidence=confidence)
+                MemoryFact(
+                    user_id=user_id,
+                    scope=scope,
+                    fact_type=fact_type,
+                    key=key,
+                    value=value,
+                    confidence=confidence,
+                    source_message_id=source_message_id,
+                    expires_at=expires_at,
+                    last_used_at=now,
+                )
             )
+
+    async def disable_memory(self, user_id: int, memory_id: int) -> bool:
+        memory = (
+            await self.session.execute(
+                select(MemoryFact).where(
+                    MemoryFact.id == memory_id,
+                    MemoryFact.user_id == user_id,
+                    MemoryFact.disabled_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if memory is None:
+            return False
+        now = utc_now_naive()
+        memory.disabled_at = now
+        memory.updated_at = now
+        return True
 
 
 def _clip(value: str, limit: int = 80) -> str:

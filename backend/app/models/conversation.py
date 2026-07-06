@@ -57,10 +57,15 @@ class MemoryFact(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    fact_type: Mapped[str] = mapped_column(String(64), nullable=False, default="preference")
     key: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(default=0.7, server_default="0.7")
     source_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime | None]
+    last_used_at: Mapped[datetime | None]
+    disabled_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 

@@ -145,10 +145,11 @@ class AgentRuntime:
         conversation = await repo.get_or_create(state["user_id"], state.get("conversation_id"))
         history = await repo.list_recent_messages(conversation.id, SESSION_HISTORY_LIMIT)
         working_memory = await repo.get_working_memory(conversation.id)
-        await repo.add_message(conversation.id, "user", state["message"])
+        user_message = await repo.add_message(conversation.id, "user", state["message"])
         run = await repo.start_run(conversation.id)
         memory = await repo.list_memory(state["user_id"])
         state["conversation_id"] = conversation.id
+        state["user_message_id"] = user_message.id
         state["run_id"] = run.id
         state["history"] = [
             {"role": item.role, "content": item.content}
@@ -157,7 +158,14 @@ class AgentRuntime:
         ]
         state["working_memory"] = self.memory_service.normalize_working_memory(working_memory)
         state["memory"] = [
-            {"key": item.key, "value": item.value, "confidence": item.confidence} for item in memory
+            {
+                "scope": item.scope,
+                "fact_type": item.fact_type,
+                "key": item.key,
+                "value": item.value,
+                "confidence": item.confidence,
+            }
+            for item in memory
         ]
         return state
 
@@ -658,11 +666,16 @@ class AgentRuntime:
         return []
 
     async def _maybe_update_memory(self, repo: ConversationRepository, state: AgentState) -> None:
-        message = state["message"]
-        if "无线" in message:
-            await repo.upsert_memory(state["user_id"], "connection_preference", "偏好无线设备", 0.8)
-        if "fps" in message.lower() or "游戏" in message:
-            await repo.upsert_memory(state["user_id"], "usage_preference", "偏好游戏场景", 0.75)
+        for fact in self.memory_service.extract_long_term_facts(state["message"]):
+            await repo.upsert_memory(
+                state["user_id"],
+                fact["key"],
+                fact["value"],
+                fact["confidence"],
+                scope=fact["scope"],
+                fact_type=fact["fact_type"],
+                source_message_id=state.get("user_message_id"),
+            )
 
     async def _mark_stream_failed(
         self, state: AgentState, error_type: str, message: str

@@ -203,7 +203,7 @@ priority: P0
 1. P0：真实鉴权与权限隔离。`docs/feature/收敛 read-only 边界与人工接管策略.md` 已把订单 query `user_id` 标为遗留风险，必须先补。
 2. P0：人工接管从“提示”升级为“可追踪队列”。当前 `human_handoff_required` 只改变回答和前端状态，尚未形成客服可处理记录。
 3. P0：前端 SSE 真流式输出与状态体验。基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
-4. P1：工作记忆与个性化记忆分层。Session 内最近消息注入已完成基础版，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；当前仍缺复杂对比型承接和长期记忆分层。
+4. P1：工作记忆与个性化记忆分层。Session 内最近消息注入已完成基础版，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；长期用户记忆 M1 已补治理字段、禁用/过期过滤和安全偏好抽取，详见 `docs/feature/长期用户记忆 M1.md`；当前仍缺前端记忆管理和复杂对比型承接。
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
 7. P1：推荐、对比、兼容性继续增强。真实数据导入基础完成，但搜索排序仍是轻量规则，缺少离线评测集、对比结构化输出和指代承接。
@@ -235,7 +235,7 @@ priority: P0
 ## P1：工作记忆与长期个性化记忆分层
 
 - 所属维度：多用户鉴权与记忆系统。
-- 状态：基础 session history 注入已完成，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；长期记忆分层仍未完成。
+- 状态：基础 session history 注入已完成，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；长期用户记忆 M1 已完成，详见 `docs/feature/长期用户记忆 M1.md`；前端记忆管理仍未完成。
 - 简明描述：需要引入工作记忆。现有长期偏好记忆只能表达“偏好无线设备”这类稳定事实，无法可靠解决“这款”“上一单”“刚才那个无线款”等多轮指代问题。
 - 需要实现的功能点：新增会话级 `working_memory` 结构或表，按 `conversation_id + user_id` 保存最近商品候选、当前筛选条件、最近订单 ID、未解决槽位、人工接管状态、最近 evidence ID 和短摘要；长期 `MemoryFact` 增加 `scope`、`fact_type`、`source_message_id`、`expires_at`、`last_used_at`、`disabled_at` 等字段，区分偏好、禁忌、设备生态和临时意图；实现 `MemoryService` 作为深模块，接口负责读取工作记忆、合并长期记忆、更新摘要和写入新事实；敏感数据如手机号、地址、完整物流单号不写入长期记忆；前端可展示“当前会话上下文”和“已记住偏好”的可撤销列表；测试通过 Agent 外部接口验证指代消解，不测试内部记忆实现细节。
 
