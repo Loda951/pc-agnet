@@ -135,6 +135,38 @@ class ConversationRepository:
         await self.session.flush()
         return message
 
+    async def list_recent_messages(self, conversation_id: int, limit: int = 12) -> list[Message]:
+        messages = (
+            (
+                await self.session.execute(
+                    select(Message)
+                    .where(
+                        Message.conversation_id == conversation_id,
+                        Message.role.in_(["user", "assistant"]),
+                    )
+                    .order_by(Message.created_at.desc(), Message.id.desc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(reversed(messages))
+
+    async def get_working_memory(self, conversation_id: int) -> dict:
+        conversation = await self.session.get(Conversation, conversation_id)
+        if conversation is None or conversation.working_memory_json is None:
+            return {}
+        return dict(conversation.working_memory_json)
+
+    async def update_working_memory(
+        self, conversation_id: int, working_memory: dict
+    ) -> None:
+        conversation = await self.session.get(Conversation, conversation_id)
+        if conversation:
+            conversation.working_memory_json = working_memory
+            conversation.updated_at = utc_now_naive()
+
     async def start_run(self, conversation_id: int, intent: str | None = None) -> AgentRun:
         run = AgentRun(conversation_id=conversation_id, status="running", intent=intent)
         self.session.add(run)

@@ -13,6 +13,7 @@ class Conversation(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
     title: Mapped[str] = mapped_column(String(128), nullable=False, default="新会话")
+    working_memory_json: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
