@@ -50,7 +50,17 @@ async def test_handoff_answer_uses_boundary_message_without_auto_workflow() -> N
     result = await runtime._generate(state)
 
     assert result["answer"] == boundary.display_message
-    assert result["suggested_actions"] == [{"label": "转人工客服", "payload": {"handoff": True}}]
+    assert result["suggested_actions"] == [
+        {
+            "label": "转人工客服",
+            "payload": {
+                "handoff": True,
+                "orderId": None,
+                "requestType": "other",
+                "reason": "帮我创建售后工单",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.models import AgentRun
 from app.repositories.catalog import CatalogRepository
 from app.repositories.conversations import ConversationRepository
 from app.repositories.orders import OrderRepository
+from app.schemas.catalog import ProductSearchRequest
 from app.schemas.chat import (
     BoundaryClassification,
     ChatRequest,
@@ -30,6 +31,9 @@ from app.schemas.chat import (
     SuggestedAction,
 )
 from app.services.knowledge_rag import ChromaKnowledgeService
+from app.services.memory import MemoryService
+
+SESSION_HISTORY_LIMIT = 12
 
 
 class AgentRuntime:
@@ -43,6 +47,7 @@ class AgentRuntime:
         self.settings = settings
         self.llm = build_chat_model(settings)
         self.knowledge_service = knowledge_service or ChromaKnowledgeService(session, settings)
+        self.memory_service = MemoryService()
 
     async def run(self, request: ChatRequest, user_id: int) -> ChatResponse:
         graph = self._build_graph()
@@ -138,13 +143,29 @@ class AgentRuntime:
     async def _load_context(self, state: AgentState) -> AgentState:
         repo = ConversationRepository(self.session)
         conversation = await repo.get_or_create(state["user_id"], state.get("conversation_id"))
-        await repo.add_message(conversation.id, "user", state["message"])
+        history = await repo.list_recent_messages(conversation.id, SESSION_HISTORY_LIMIT)
+        working_memory = await repo.get_working_memory(conversation.id)
+        user_message = await repo.add_message(conversation.id, "user", state["message"])
         run = await repo.start_run(conversation.id)
         memory = await repo.list_memory(state["user_id"])
         state["conversation_id"] = conversation.id
+        state["user_message_id"] = user_message.id
         state["run_id"] = run.id
+        state["history"] = [
+            {"role": item.role, "content": item.content}
+            for item in history
+            if item.role in {"user", "assistant"}
+        ]
+        state["working_memory"] = self.memory_service.normalize_working_memory(working_memory)
         state["memory"] = [
-            {"key": item.key, "value": item.value, "confidence": item.confidence} for item in memory
+            {
+                "scope": item.scope,
+                "fact_type": item.fact_type,
+                "key": item.key,
+                "value": item.value,
+                "confidence": item.confidence,
+            }
+            for item in memory
         ]
         return state
 
@@ -165,14 +186,31 @@ class AgentRuntime:
         return "auto" if boundary == "in_scope_auto" else "blocked"
 
     async def _route_intent(self, state: AgentState) -> AgentState:
-        intent = classify_intent(state["message"])
+        intent = self.memory_service.resolve_intent(
+            state["message"],
+            classify_intent(state["message"]),
+            state.get("working_memory", {}),
+        )
         parsed: dict[str, Any] = {}
         if intent == "product_recommendation":
-            parsed["product_search"] = build_product_search(state["message"]).model_dump(
-                mode="json"
+            search = self.memory_service.resolve_product_search(
+                state["message"],
+                build_product_search(state["message"]),
+                state.get("working_memory", {}),
             )
+            parsed["product_search"] = search.model_dump(mode="json")
+            referenced_product = self.memory_service.resolve_referenced_product(
+                state["message"],
+                state.get("working_memory", {}),
+            )
+            if referenced_product:
+                parsed["referenced_product"] = referenced_product
         elif intent == "order_status":
-            parsed["order_id"] = extract_order_id(state["message"])
+            parsed["order_id"] = self.memory_service.resolve_order_id(
+                state["message"],
+                extract_order_id(state["message"]),
+                state.get("working_memory", {}),
+            )
         state["intent"] = intent
         state["parsed"] = parsed
         state["evidence"] = []
@@ -181,7 +219,7 @@ class AgentRuntime:
     async def _retrieve(self, state: AgentState) -> AgentState:
         repo = ConversationRepository(self.session)
         if state["intent"] == "product_recommendation":
-            search = build_product_search(state["message"])
+            search = _product_search_from_state(state)
             products = await CatalogRepository(self.session).search_products(search)
             state["products"] = products
             await repo.add_tool_call(
@@ -213,7 +251,7 @@ class AgentRuntime:
     async def _retrieve_stream(self, state: AgentState) -> AsyncIterator[dict[str, Any]]:
         repo = ConversationRepository(self.session)
         if state["intent"] == "product_recommendation":
-            search = build_product_search(state["message"])
+            search = _product_search_from_state(state)
             input_json = search.model_dump(mode="json")
             yield _stream_event(
                 "tool_call",
@@ -280,13 +318,16 @@ class AgentRuntime:
 
     async def _retrieve_knowledge(self, state: AgentState) -> AgentState:
         repo = ConversationRepository(self.session)
+        query = self.memory_service.resolve_knowledge_query(
+            state["message"], state.get("working_memory", {})
+        )
         try:
-            evidence = await self.knowledge_service.retrieve(state["message"])
+            evidence = await self.knowledge_service.retrieve(query)
             state["evidence"] = evidence
             await repo.add_tool_call(
                 state["run_id"],
                 "knowledge.retrieve",
-                {"query": state["message"], "limit": 3},
+                {"query": query, "limit": 3},
                 {
                     "count": len(evidence),
                     "evidence": [item.model_dump(mode="json") for item in evidence],
@@ -306,7 +347,10 @@ class AgentRuntime:
         self, state: AgentState
     ) -> AsyncIterator[dict[str, Any]]:
         repo = ConversationRepository(self.session)
-        input_json = {"query": state["message"], "limit": 3}
+        query = self.memory_service.resolve_knowledge_query(
+            state["message"], state.get("working_memory", {})
+        )
+        input_json = {"query": query, "limit": 3}
         yield _stream_event(
             "tool_call",
             state,
@@ -315,7 +359,7 @@ class AgentRuntime:
             input=input_json,
         )
         try:
-            evidence = await self.knowledge_service.retrieve(state["message"])
+            evidence = await self.knowledge_service.retrieve(query)
             state["evidence"] = evidence
             output_json = {
                 "count": len(evidence),
@@ -379,6 +423,12 @@ class AgentRuntime:
         )
         if state["boundary"]["classification"] == "in_scope_auto":
             await self._maybe_update_memory(repo, state)
+        next_working_memory = self.memory_service.update_after_turn(
+            state.get("working_memory", {}),
+            state,
+        )
+        state["working_memory"] = next_working_memory
+        await repo.update_working_memory(state["conversation_id"], next_working_memory)
         run = await self.session.get(AgentRun, state["run_id"])
         if run:
             await repo.finish_run(run, state["intent"], _json_safe_state(state))
@@ -504,6 +554,21 @@ class AgentRuntime:
     def _generate_fallback(self, state: AgentState) -> str:
         evidence = _normalize_evidence(state.get("evidence", []))
         if state["intent"] == "product_recommendation":
+            referenced_product = state.get("parsed", {}).get("referenced_product")
+            if referenced_product:
+                specs = (
+                    "，".join(
+                        f"{key}: {value}"
+                        for key, value in referenced_product.get("specs", {}).items()
+                    )
+                    or "规格未标注"
+                )
+                return _append_evidence(
+                    f"你说的是 {referenced_product['title']}："
+                    f"¥{referenced_product['price']}，库存 {referenced_product['stock']}，"
+                    f"{specs}。如果要继续对比，我可以拿它和上一组里的其他候选逐项比较。",
+                    evidence,
+                )
             products = state.get("products", [])
             if not products:
                 return (
@@ -576,7 +641,14 @@ class AgentRuntime:
     def _suggest_actions(self, state: AgentState) -> list[dict[str, Any]]:
         boundary = state["boundary"]["classification"]
         if boundary == "human_handoff_required":
-            return [{"label": "转人工客服", "payload": {"handoff": True}}]
+            payload: dict[str, Any] = {"handoff": True}
+            payload.update(
+                self.memory_service.build_handoff_draft(
+                    state["message"],
+                    state.get("working_memory", {}),
+                )
+            )
+            return [{"label": "转人工客服", "payload": payload}]
         if boundary == "out_of_scope":
             return [{"label": "咨询外设推荐", "payload": {"message": "推荐 300 元以内无线鼠标"}}]
         if state["intent"] == "product_recommendation" and state.get("products"):
@@ -594,11 +666,16 @@ class AgentRuntime:
         return []
 
     async def _maybe_update_memory(self, repo: ConversationRepository, state: AgentState) -> None:
-        message = state["message"]
-        if "无线" in message:
-            await repo.upsert_memory(state["user_id"], "connection_preference", "偏好无线设备", 0.8)
-        if "fps" in message.lower() or "游戏" in message:
-            await repo.upsert_memory(state["user_id"], "usage_preference", "偏好游戏场景", 0.75)
+        for fact in self.memory_service.extract_long_term_facts(state["message"]):
+            await repo.upsert_memory(
+                state["user_id"],
+                fact["key"],
+                fact["value"],
+                fact["confidence"],
+                scope=fact["scope"],
+                fact_type=fact["fact_type"],
+                source_message_id=state.get("user_message_id"),
+            )
 
     async def _mark_stream_failed(
         self, state: AgentState, error_type: str, message: str
@@ -629,19 +706,37 @@ class AgentRuntime:
         )
 
 
-def _llm_messages(state: AgentState) -> list[SystemMessage | HumanMessage]:
+def _llm_messages(state: AgentState) -> list[SystemMessage | HumanMessage | AIMessage]:
     context = {
         "intent": state["intent"],
         "boundary": state["boundary"],
+        "parsed": state.get("parsed", {}),
         "memory": state.get("memory", []),
+        "working_memory": state.get("working_memory", {}),
         "evidence": _dump_evidence(state.get("evidence", [])),
         "products": [p.model_dump(mode="json") for p in state.get("products", [])],
         "order": state["order"].model_dump(mode="json") if state.get("order") else None,
     }
-    return [
-        SystemMessage(content=f"{SYSTEM_PROMPT}\n\n{BOUNDARY_PROTOCOL_PROMPT}"),
-        HumanMessage(content=f"用户问题：{state['message']}\n检索上下文：{context}"),
+    messages: list[SystemMessage | HumanMessage | AIMessage] = [
+        SystemMessage(content=f"{SYSTEM_PROMPT}\n\n{BOUNDARY_PROTOCOL_PROMPT}")
     ]
+    for item in state.get("history", []):
+        content = item.get("content", "")
+        if not content:
+            continue
+        if item.get("role") == "user":
+            messages.append(HumanMessage(content=content))
+        elif item.get("role") == "assistant":
+            messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=f"用户问题：{state['message']}\n检索上下文：{context}"))
+    return messages
+
+
+def _product_search_from_state(state: AgentState) -> ProductSearchRequest:
+    product_search = state.get("parsed", {}).get("product_search")
+    if product_search:
+        return ProductSearchRequest.model_validate(product_search)
+    return build_product_search(state["message"])
 
 
 def _json_safe_state(state: AgentState) -> dict[str, Any]:

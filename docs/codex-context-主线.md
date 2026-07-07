@@ -40,7 +40,7 @@ priority: P0
 - 已完成：商品推荐、最近订单查询、售后意图回复可通过 DeepSeek 生成中文回答。
 - 已完成：会话、消息、agent run、工具调用和简单长期记忆持久化。
 - 已完成：知识库 RAG 基础闭环，`knowledge_document` 可同步到 ChromaDB，售后政策、FAQ、店铺规则和外设知识回答可返回 evidence。
-- 部分完成：多轮上下文依赖 `conversation_id` 和有限偏好记忆，没有完整指代消解。
+- 部分完成：多轮上下文已可按 `conversation_id` 注入最近 `user` / `assistant` 会话历史，并通过 working memory 承接商品筛选、基础商品候选指代、订单和政策查询；仍缺复杂对比型指代和长期记忆分层。
 - 已完成：`design.md` 要求的 `in_scope_auto` / `human_handoff_required` / `out_of_scope` 三态边界分类基础版本。
 
 ### 数据与种子
@@ -111,7 +111,7 @@ priority: P0
 - 鉴权基础版已完成：登录、刷新、登出、当前用户依赖和订单/会话/记忆/售后记录隔离已落地；后续仍需生产级身份源、密码重置、账号管理和审计能力。
 - RAG 生产化债务：当前使用本地 deterministic hash embedding 支撑 demo 和测试，后续可接入生产级 embedding provider，并改造为增量同步。
 - Evidence 范围债务：当前 evidence 主要覆盖知识文档；商品、订单、物流事实尚未统一纳入 evidence schema。
-- 多轮能力有限：当前只保存会话和简单偏好记忆，缺少稳健指代消解、上一款/这个商品承接、多子任务拆分。
+- 多轮能力有限：当前已保存会话消息并在 LLM 上下文注入最近会话历史，也有简单偏好记忆和 working memory；仍缺复杂对比型指代、多子任务拆分和长期记忆分层。
 - 数据质量有限：真实外设导入路径已打通，但本地环境仍需按需执行导入脚本；搜索排序还缺离线评测集。
 - 测试覆盖不足：已补 API 集成、边界分类和 RAG 回归测试；仍缺真实鉴权、权限隔离和多轮指代消解测试。
 - 错误处理较薄：LLM 超时、DeepSeek 错误、数据库异常、外部服务降级尚未形成统一错误码和用户可读策略。
@@ -131,7 +131,7 @@ priority: P0
 - 订单状态、订单内容、物流查询：已实现 demo 路径，能读取最新订单和指定订单。
 - 售后政策与流程说明：基础实现，demo 知识文档已接入 RAG；办理类售后请求仍按边界分类转人工。
 - FAQ 与店铺知识问答：基础实现，demo 文档可通过 ChromaDB 检索并返回 evidence。
-- 多轮上下文承接：部分实现，支持 conversation_id 和偏好记忆；缺少完整指代消解。
+- 多轮上下文承接：部分实现，支持 conversation_id、最近 user/assistant 历史注入和偏好记忆；缺少完整指代消解。
 - 信息不足时澄清：部分实现，fallback 和 LLM 可能追问，但没有显式澄清状态和规则。
 - 三态边界分类：基础实现，当前为规则分类。
 
@@ -173,26 +173,14 @@ priority: P0
 ### P0：接入知识库 RAG 与 evidence 输出
 
 - 状态：基础版本已完成，详见 `docs/feature/接入知识库 RAG 与 evidence 输出.md`。
-- 目标：把 `knowledge_document` 写入 ChromaDB，新增检索节点，让售后政策、FAQ、店铺规则和外设知识回答带可追溯依据。
-- 对核心价值的影响：显著提升事实可信度，补齐 `design.md` 中政策/FAQ/知识问答和 evidence 质量要求。
-- 技术复杂度评估：中等偏高；需要 embeddings/provider 决策、Chroma collection 管理、检索结果 schema、prompt 注入和回归测试。
-- 与现有架构的衔接方式：在 LangGraph 的 `retrieve` 与 `generate` 之间加入 `retrieve_knowledge` 节点，复用 PostgreSQL `knowledge_document` 作为元数据源，Chroma 保存向量索引。
 
 ### P1：导入真实商品数据并强化推荐/对比/兼容性
 
 - 状态：基础版本已完成，详见 `docs/feature/导入真实商品数据并强化推荐与集成测试.md`。
-- 目标：从 `docyx/pc-part-dataset` 导入 mouse、keyboard、headphones 等真实数据，增强筛选、排序、对比和兼容性解释。
-- 对核心价值的影响：直接改善商品推荐质量，减少 demo 数据过少导致的空结果。
-- 技术复杂度评估：中等；mapper 已有基础，但需要数据清洗、分类属性规范、搜索排序和验收样例。
-- 与现有架构的衔接方式：已扩展 `dataset_mapper.py`、`import_pc_part_dataset.py` 和 `CatalogRepository`，暂未新增属性标准化表。
 
 ### P1：补齐集成测试与可回归验收集
 
 - 状态：基础版本已完成，详见 `docs/feature/导入真实商品数据并强化推荐与集成测试.md`。
-- 目标：覆盖 `/api/chat`、`/api/orders`、`/api/after-sales`、边界分类、RAG 检索和关键 prompt 行为。
-- 对核心价值的影响：降低后续改 Agent 和 schema 时的回归风险。
-- 技术复杂度评估：中等；需要测试数据库策略、LLM mock、固定 seed fixture 和 API client。
-- 与现有架构的衔接方式：已在 `backend/tests/` 新增 FastAPI async client 测试，LLM 通过空 key/fake service 隔离，PostgreSQL 通过事务 fixture 回滚。
 
 ### P2：前端工作台产品化
 
@@ -200,11 +188,6 @@ priority: P0
 - 对核心价值的影响：提升验收和演示质量，但依赖后端边界、RAG、数据质量先稳定。
 - 技术复杂度评估：中等；主要是状态管理、交互设计和 API 契约调整。
 - 与现有架构的衔接方式：在 `frontend/src/App.tsx` 拆分组件，引入更明确的响应状态和 evidence/boundary 字段展示。
-
-### 最优先推荐
-
-- 第一优先：前端工作台产品化。理由是后端边界、RAG、真实商品导入和核心 API 回归网已具备基础，下一步需要把 evidence、人工接管、错误重试和多轮上下文做成可演示体验。
-- 第二优先：鉴权与权限隔离。理由是订单和售后仍依赖 demo 用户，进入更真实场景前需要避免越权查询和敏感信息泄露。
 
 ## 第二阶段主线指引：从单用户 demo 到多用户可信工作台
 
@@ -220,7 +203,7 @@ priority: P0
 1. P0：真实鉴权与权限隔离。`docs/feature/收敛 read-only 边界与人工接管策略.md` 已把订单 query `user_id` 标为遗留风险，必须先补。
 2. P0：人工接管从“提示”升级为“可追踪队列”。当前 `human_handoff_required` 只改变回答和前端状态，尚未形成客服可处理记录。
 3. P0：前端 SSE 真流式输出与状态体验。基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
-4. P1：工作记忆与个性化记忆分层。当前只有简单 `MemoryFact`，缺少上一款商品、当前筛选条件、最近订单等会话级工作记忆。
+4. P1：工作记忆与个性化记忆分层。Session 内最近消息注入已完成基础版，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；长期用户记忆 M1 已补治理字段、禁用/过期过滤和安全偏好抽取，详见 `docs/feature/长期用户记忆 M1.md`；当前仍缺前端记忆管理和复杂对比型承接。
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
 7. P1：推荐、对比、兼容性继续增强。真实数据导入基础完成，但搜索排序仍是轻量规则，缺少离线评测集、对比结构化输出和指代承接。
@@ -252,6 +235,7 @@ priority: P0
 ## P1：工作记忆与长期个性化记忆分层
 
 - 所属维度：多用户鉴权与记忆系统。
+- 状态：基础 session history 注入已完成，详见 `docs/feature/Agent session 内对话记忆.md`；working memory 已覆盖商品筛选、基础商品候选指代、订单、政策查询和人工接管草稿，详见 `docs/feature/Working Memory 商品订单政策承接.md`；长期用户记忆 M1 已完成，详见 `docs/feature/长期用户记忆 M1.md`；前端记忆管理仍未完成。
 - 简明描述：需要引入工作记忆。现有长期偏好记忆只能表达“偏好无线设备”这类稳定事实，无法可靠解决“这款”“上一单”“刚才那个无线款”等多轮指代问题。
 - 需要实现的功能点：新增会话级 `working_memory` 结构或表，按 `conversation_id + user_id` 保存最近商品候选、当前筛选条件、最近订单 ID、未解决槽位、人工接管状态、最近 evidence ID 和短摘要；长期 `MemoryFact` 增加 `scope`、`fact_type`、`source_message_id`、`expires_at`、`last_used_at`、`disabled_at` 等字段，区分偏好、禁忌、设备生态和临时意图；实现 `MemoryService` 作为深模块，接口负责读取工作记忆、合并长期记忆、更新摘要和写入新事实；敏感数据如手机号、地址、完整物流单号不写入长期记忆；前端可展示“当前会话上下文”和“已记住偏好”的可撤销列表；测试通过 Agent 外部接口验证指代消解，不测试内部记忆实现细节。
 
