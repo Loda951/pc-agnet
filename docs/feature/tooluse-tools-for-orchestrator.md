@@ -533,4 +533,10 @@ All checks passed
 - 如果 compare plan 识别出多个对比对象，例如 `Logitech G502` 和 `Razer Viper`，tool 会按对象分别召回候选。
 - 这样可以避免一次整体查询导致结果被单一品牌或单一对象占满。
 - 如果主流程已经拿到明确 `sku_ids`，仍优先走 direct SKU 对比，不再做自然语言召回。
+## 补充：默认 LLM Planner 行为
+
+- `catalog.search` 和 `catalog.compare` 运行时默认启用真实 `LLMCatalogQueryPlanner`。
+- 需要在仓库根目录 `.env` 配置 `LLM_API_KEY`，以及 `LLM_PROVIDER` / `LLM_MODEL`。
+- 如果没有 `LLM_API_KEY`，或显式设置 `CATALOG_LLM_PLANNER_ENABLED=false`，会自动回退到 `RuleBasedCatalogQueryPlanner`，主流程调用方式不变。
+- LLM 只返回 JSON query plan，不直接生成或执行 SQL；tool 会先做 guard 校验，再用 SQLAlchemy 查 PostgreSQL。
 
