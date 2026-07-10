@@ -2,14 +2,15 @@ import json
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from app.services.knowledge_rag import LocalHashEmbeddingProvider
 from app.tools.schemas import DocumentSearchHit, DocumentSearchInput, DocumentSearchOutput
 
 POLICY_DOCUMENT_TYPES = {"policy", "store_rule", "faq"}
@@ -17,9 +18,25 @@ KNOWLEDGE_DOCUMENT_TYPES = {"brand", "peripheral_knowledge", "faq", "store_rule"
 DEFAULT_KNOWLEDGE_DOCUMENT_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "knowledge_documents.json"
 )
+DEFAULT_KNOWLEDGE_VECTOR_INDEX_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "knowledge_vector_index.json"
+)
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+BGE_QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
+VECTOR_INDEX_VERSION = 1
 RRF_K = 10
 CHUNK_SIZE = 420
 CHUNK_OVERLAP = 80
+
+
+class EmbeddingProvider(Protocol):
+    model_name: str
+
+    def embed_query(self, text: str) -> list[float]:
+        ...
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        ...
 
 
 class LocalKnowledgeDocument(BaseModel):
@@ -34,6 +51,24 @@ class LocalKnowledgeDocument(BaseModel):
         return self.metadata
 
 
+class KnowledgeVectorIndexChunk(BaseModel):
+    document_id: int
+    chunk_id: str
+    text: str
+    embedding: list[float]
+
+
+class KnowledgeVectorIndex(BaseModel):
+    version: int
+    embedding_provider: Literal["sentence_transformers"]
+    embedding_model: str
+    documents_hash: str
+    chunk_size: int
+    chunk_overlap: int
+    query_instruction: str
+    chunks: list[KnowledgeVectorIndexChunk] = Field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class RankedDocument:
     document: LocalKnowledgeDocument
@@ -42,6 +77,7 @@ class RankedDocument:
     vector_score: float = 0.0
     bm25_rank: int | None = None
     vector_rank: int | None = None
+    vector_chunk_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,16 +87,53 @@ class LocalKnowledgeChunk:
     text: str
 
 
+class SentenceTransformerEmbeddingProvider:
+    def __init__(
+        self,
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
+        query_instruction: str = BGE_QUERY_INSTRUCTION,
+    ):
+        self.model_name = model_name
+        self.query_instruction = query_instruction
+        self._model = None
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._encode([f"{self.query_instruction}{text}"])[0]
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return self._encode(texts)
+
+    def _encode(self, texts: Sequence[str]) -> list[list[float]]:
+        model = self._get_model()
+        embeddings = model.encode(
+            list(texts),
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return [[float(value) for value in embedding] for embedding in embeddings]
+
+    def _get_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+
 class KnowledgeRetrievalToolService:
     def __init__(
         self,
         documents: list[LocalKnowledgeDocument] | None = None,
         document_path: Path = DEFAULT_KNOWLEDGE_DOCUMENT_PATH,
-        embedding_provider: LocalHashEmbeddingProvider | None = None,
+        vector_index_path: Path = DEFAULT_KNOWLEDGE_VECTOR_INDEX_PATH,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_index: KnowledgeVectorIndex | None = None,
     ):
         self._documents = documents
         self.document_path = document_path
-        self.embedding_provider = embedding_provider or LocalHashEmbeddingProvider()
+        self.vector_index_path = vector_index_path
+        self.embedding_provider = embedding_provider or SentenceTransformerEmbeddingProvider()
+        self._vector_index = vector_index
 
     async def search_policy(self, request: DocumentSearchInput) -> DocumentSearchOutput:
         return await self._search(request, POLICY_DOCUMENT_TYPES)
@@ -80,11 +153,16 @@ class KnowledgeRetrievalToolService:
         candidates = [
             document for document in documents if document.document_type in allowed_types
         ]
+        vector_index = self._vector_index or _load_vector_index(
+            self.vector_index_path,
+            self.document_path,
+        )
         hits = _rank_documents(
             request.query,
             candidates,
             request.retrieval_mode,
             self.embedding_provider,
+            vector_index,
         )[: request.limit]
         return DocumentSearchOutput(
             result_type="documents" if hits else "empty",
@@ -97,7 +175,8 @@ def _rank_documents(
     query: str,
     documents: list[LocalKnowledgeDocument],
     retrieval_mode: str,
-    embedding_provider: LocalHashEmbeddingProvider,
+    embedding_provider: EmbeddingProvider,
+    vector_index: KnowledgeVectorIndex | None,
 ) -> list[DocumentSearchHit]:
     if not documents:
         return []
@@ -107,7 +186,7 @@ def _rank_documents(
         return []
 
     bm25_ranked = _rank_by_bm25(query_tokens, documents)
-    vector_ranked = _rank_by_vector(query, documents, embedding_provider)
+    vector_ranked = _rank_by_vector(query, documents, embedding_provider, vector_index)
     if retrieval_mode == "bm25":
         ranked = bm25_ranked
     elif retrieval_mode == "vector":
@@ -161,21 +240,27 @@ def _rank_by_bm25(
 def _rank_by_vector(
     query: str,
     documents: list[LocalKnowledgeDocument],
-    embedding_provider: LocalHashEmbeddingProvider,
+    embedding_provider: EmbeddingProvider,
+    vector_index: KnowledgeVectorIndex | None,
 ) -> list[RankedDocument]:
-    query_embedding = embedding_provider.embed_query(query)
-    chunks = [chunk for document in documents for chunk in _document_chunks(document)]
-    chunk_embeddings = embedding_provider.embed_documents([chunk.text for chunk in chunks])
+    if vector_index is None:
+        return []
+    if vector_index.embedding_model != embedding_provider.model_name:
+        return []
 
-    best_by_document_id: dict[int, float] = {}
-    for chunk, embedding in zip(chunks, chunk_embeddings, strict=True):
-        score = _cosine_similarity(query_embedding, embedding)
+    query_embedding = embedding_provider.embed_query(query)
+    allowed_document_ids = {document.id for document in documents}
+
+    best_by_document_id: dict[int, tuple[float, str]] = {}
+    for chunk in vector_index.chunks:
+        if chunk.document_id not in allowed_document_ids:
+            continue
+        score = _cosine_similarity(query_embedding, chunk.embedding)
         if score <= 0:
             continue
-        best_by_document_id[chunk.document.id] = max(
-            score,
-            best_by_document_id.get(chunk.document.id, 0.0),
-        )
+        current = best_by_document_id.get(chunk.document_id)
+        if current is None or score > current[0]:
+            best_by_document_id[chunk.document_id] = (score, chunk.chunk_id)
 
     documents_by_id = {document.id: document for document in documents}
     ranked = [
@@ -183,8 +268,9 @@ def _rank_by_vector(
             document=documents_by_id[document_id],
             score=round(score, 4),
             vector_score=round(score, 4),
+            vector_chunk_id=chunk_id,
         )
-        for document_id, score in best_by_document_id.items()
+        for document_id, (score, chunk_id) in best_by_document_id.items()
     ]
     ranked.sort(key=lambda item: (-item.score, item.document.id))
     return [
@@ -193,6 +279,7 @@ def _rank_by_vector(
             score=item.score,
             vector_score=item.vector_score,
             vector_rank=rank,
+            vector_chunk_id=item.vector_chunk_id,
         )
         for rank, item in enumerate(ranked, start=1)
     ]
@@ -217,6 +304,7 @@ def _rank_by_rrf(
             vector_score=item.vector_score,
             bm25_rank=existing.bm25_rank,
             vector_rank=item.vector_rank,
+            vector_chunk_id=item.vector_chunk_id,
         )
 
     fused: list[RankedDocument] = []
@@ -234,6 +322,7 @@ def _rank_by_rrf(
                 vector_score=item.vector_score,
                 bm25_rank=item.bm25_rank,
                 vector_rank=item.vector_rank,
+                vector_chunk_id=item.vector_chunk_id,
             )
         )
     fused.sort(key=lambda item: (-item.score, item.document.id))
@@ -270,6 +359,7 @@ def _hit_metadata(item: RankedDocument) -> dict:
         "rrf_score": item.score,
         "bm25_rank": item.bm25_rank,
         "vector_rank": item.vector_rank,
+        "vector_chunk_id": item.vector_chunk_id,
     }
     return metadata
 
@@ -282,10 +372,65 @@ def _load_local_documents(document_path: Path) -> list[LocalKnowledgeDocument]:
     ]
 
 
+@lru_cache(maxsize=8)
+def _load_vector_index(
+    index_path: Path,
+    document_path: Path,
+) -> KnowledgeVectorIndex | None:
+    if not index_path.exists():
+        return None
+    index = KnowledgeVectorIndex.model_validate_json(index_path.read_text(encoding="utf-8"))
+    if index.version != VECTOR_INDEX_VERSION:
+        return None
+    if index.documents_hash != _documents_hash(document_path):
+        return None
+    return index
+
+
+def build_knowledge_vector_index(
+    document_path: Path = DEFAULT_KNOWLEDGE_DOCUMENT_PATH,
+    index_path: Path = DEFAULT_KNOWLEDGE_VECTOR_INDEX_PATH,
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+) -> KnowledgeVectorIndex:
+    documents = _load_local_documents(document_path)
+    provider = SentenceTransformerEmbeddingProvider(embedding_model)
+    chunks = [chunk for document in documents for chunk in _document_chunks(document)]
+    embeddings = provider.embed_documents([chunk.text for chunk in chunks])
+    index = KnowledgeVectorIndex(
+        version=VECTOR_INDEX_VERSION,
+        embedding_provider="sentence_transformers",
+        embedding_model=embedding_model,
+        documents_hash=_documents_hash(document_path),
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        query_instruction=BGE_QUERY_INSTRUCTION,
+        chunks=[
+            KnowledgeVectorIndexChunk(
+                document_id=chunk.document.id,
+                chunk_id=chunk.chunk_id,
+                text=chunk.text,
+                embedding=embedding,
+            )
+            for chunk, embedding in zip(chunks, embeddings, strict=True)
+        ],
+    )
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps(index.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    _load_vector_index.cache_clear()
+    return index
+
+
 def _document_text(document: LocalKnowledgeDocument) -> str:
     metadata = document.metadata_json or {}
     metadata_text = " ".join(str(value) for value in metadata.values())
     return " ".join([document.title, document.document_type, metadata_text, document.content])
+
+
+def _documents_hash(document_path: Path) -> str:
+    return sha256(document_path.read_bytes()).hexdigest()
 
 
 def _document_chunks(document: LocalKnowledgeDocument) -> list[LocalKnowledgeChunk]:

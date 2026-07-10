@@ -24,6 +24,7 @@ frontend/vite.config.d.ts
 data/
 !backend/data/
 !backend/data/knowledge_documents.json
+!backend/data/knowledge_vector_index.json
 chroma/
 postgres-data/
 redis-data/

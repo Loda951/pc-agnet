@@ -9,7 +9,8 @@
 - 当前不提供 MCP，不负责 LangGraph 主流程节点改造，不负责 SSE tool_call 事件。
 - 商品和订单 tools 读取 PostgreSQL。
 - 政策和知识 tools 读取本地 JSON 文档，并使用 BM25 / vector / hybrid 检索。
-- 向量检索当前使用项目已有的本地 hash embedding，在进程内临时切 chunk 和计算向量；不写 Chroma，不生成向量文件，不依赖外部 embedding API key。
+- 向量检索使用本地真实 embedding 模型 `BAAI/bge-small-zh-v1.5`，通过 `sentence-transformers` 在本机生成向量。
+- 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
 
 ## ToolRegistry
 
@@ -334,7 +335,8 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
           "vector_score": 0.76,
           "rrf_score": 0.18,
           "bm25_rank": 1,
-          "vector_rank": 1
+          "vector_rank": 1,
+          "vector_chunk_id": "1:0"
         }
       }
     }
@@ -346,7 +348,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 检索模式：
 
 - `bm25`：只走 BM25。
-- `vector`：只走本地向量检索。工具会把本地 JSON 文档切成 chunk，使用 `LocalHashEmbeddingProvider` 计算 query 和 chunk 向量，并按 cosine similarity 聚合到文档级结果。
+- `vector`：只走本地向量检索。工具读取 `backend/data/knowledge_vector_index.json` 中的 chunk embedding，使用 `BAAI/bge-small-zh-v1.5` 对 query 生成向量，并按 cosine similarity 聚合到文档级结果。
 - `hybrid`：BM25 + vector，两路结果用 RRF 融合。
 
 边界：
@@ -406,6 +408,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 ```text
 backend/data/knowledge_documents.json
+backend/data/knowledge_vector_index.json
 ```
 
 当前包含 5 篇：
@@ -431,8 +434,17 @@ backend/data/knowledge_documents.json
 注意：
 
 - 本地文档加载使用缓存；修改 JSON 后建议重启后端。
-- 文档数量很小，当前不切 chunk。
-- 后续如文档显著变长，再考虑分段、embedding 或 Chroma。
+- 修改 `knowledge_documents.json` 后，需要重新构建向量索引。
+- 向量索引构建命令：
+
+```bash
+cd backend
+python -m scripts.build_knowledge_vector_index
+```
+
+- 默认 embedding 模型：`BAAI/bge-small-zh-v1.5`。
+- 第一次构建索引会下载模型权重；之后会使用本地缓存。
+- 当前不使用 Chroma；如果后续文档规模明显增大，再考虑切换到 Chroma 或其他向量库。
 
 ## 主流程调用建议
 
@@ -448,7 +460,7 @@ backend/data/knowledge_documents.json
 
 - `catalog.search` 可以连接 PostgreSQL 并返回商品。
 - `order.lookup` 可以连接 PostgreSQL 并返回订单候选。
-- `policy.search` / `knowledge.search` 可以直接检索本地 JSON。
+- `policy.search` / `knowledge.search` 可以检索本地 JSON 和本地向量索引。
 - 后端验证命令：
 
 ```bash
