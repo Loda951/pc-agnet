@@ -143,8 +143,8 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 边界：
 
-- 当前已使用受控 `ProductQueryPlan` 作为中间层，默认 planner 是规则版。
-- 已提供 `LLMCatalogQueryPlanner` 可注入实现；它调用 LLM 生成同结构 JSON，但默认不启用，避免没有 LLM key 时影响本地运行。
+- 当前已使用受控 `ProductQueryPlan` 作为中间层；默认 planner 会在有 key 时走真实 LLM，无 key 时回退规则版。
+- 已提供 `LLMCatalogQueryPlanner`；它调用 LLM 生成同结构 JSON，运行时默认启用，失败时自动 fallback 到规则 planner。
 - Tool 不执行 LLM 直接生成的 SQL；Python 会先校验 QueryPlan，再用 SQLAlchemy 查询 PostgreSQL。
 - planner 异常或输出非法字段时，会 fallback 到规则 planner，并在 `query_plan.fallback_reason` 中返回原因。
 - 超出商品表能力的问题会返回 `result_type = "empty"`、`ranking_strategy = "unsupported_query"`，并在 `query_plan.unsupported_reason` 中说明原因。
@@ -208,7 +208,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 - Tool 只返回事实依据，不做最终购买承诺。
 - 当前自然语言路径会生成 `CatalogComparePlan`，识别候选对象、品牌、类目、对比字段和使用场景。
-- 已提供 LLM compare planner 可注入实现；默认仍可 fallback 到规则 planner。
+- 已提供 LLM compare planner；运行时默认启用，失败时仍可 fallback 到规则 planner。
 - 对比字段会经过白名单校验，只允许基础字段和商品规格白名单字段。
 - 无结果时返回 `result_type = "empty"`。
 
@@ -516,10 +516,10 @@ All checks passed
 
 默认行为：
 
-- 默认不启用真实 LLM planner，避免本地测试和没有 key 的环境调用外部 API。
-- 如需启用真实 LLM planner，在 `.env` 设置 `CATALOG_LLM_PLANNER_ENABLED=true`，并配置 `LLM_API_KEY`、`LLM_PROVIDER`、`LLM_MODEL`。
+- 默认启用真实 LLM planner；只要 .env 配置了 LLM_API_KEY，商品 tools 会优先走真实 LLM。
+- 如需临时关闭真实 LLM planner，可在 `.env` 设置 `CATALOG_LLM_PLANNER_ENABLED=false`，代码会退回 rule-based planner。
 - 启用后，`build_tool_registry(session)` 会自动为商品 tools 注入 `LLMCatalogQueryPlanner`。
-- 如果未启用、没有 key、或 LLM planner 初始化失败，则自动使用 `RuleBasedCatalogQueryPlanner`。
+- 如果没有 key、显式关闭开关、或 LLM planner 初始化失败，则自动使用 `RuleBasedCatalogQueryPlanner`。
 
 稳定性策略：
 

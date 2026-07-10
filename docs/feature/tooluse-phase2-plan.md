@@ -58,7 +58,7 @@
 - 已实现 `catalog.search` 的 plan -> SQLAlchemy 查询链路。
 - 已实现 `catalog.compare` 的 plan -> 候选召回 -> 对比字段输出链路。
 - 已实现 compare 多对象分别召回，避免候选被单一品牌占满。
-- 已通过 `CATALOG_LLM_PLANNER_ENABLED` 将真实 LLM planner 接入 `ToolRegistry`，默认关闭、按环境变量启用。
+- 已通过 `CATALOG_LLM_PLANNER_ENABLED` 将真实 LLM planner 接入 `ToolRegistry`，默认启用，可按环境变量关闭。
 - 已补充 fake planner / fake chat model 测试，测试不依赖真实 LLM key。
 
 ## 启用真实 LLM Planner
