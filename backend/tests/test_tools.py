@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,7 @@ from app.tools.knowledge import (
     KnowledgeVectorIndex,
     KnowledgeVectorIndexChunk,
 )
-from app.tools.registry import build_tool_registry
+from app.tools.registry import build_catalog_planner, build_tool_registry
 from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
 
 
@@ -213,6 +214,38 @@ async def test_llm_catalog_planner_applies_explicit_overrides() -> None:
     assert plan.category == "mouse"
     assert plan.brands == ["Logitech"]
     assert plan.filters == {"connection_type": "wireless"}
+
+
+def test_build_catalog_planner_is_opt_in() -> None:
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=False)  # type: ignore[arg-type]
+    )
+
+    assert planner is None
+
+
+def test_build_catalog_planner_uses_llm_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = FakeChatModel('{"category":"mouse"}')
+    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: chat)
+
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]
+    )
+
+    assert isinstance(planner, LLMCatalogQueryPlanner)
+    assert planner.chat_model is chat
+
+
+def test_build_catalog_planner_skips_when_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: None)
+
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]
+    )
+
+    assert planner is None
 
 
 @pytest.mark.asyncio

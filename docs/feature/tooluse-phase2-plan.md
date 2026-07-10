@@ -47,3 +47,36 @@
 10. 可选：商品中文编码问题
    - 当前商品中文字段在部分终端输出中有 mojibake。
    - 如中文查询效果重要，后续修数据导入编码或重导数据。
+
+## 当前完成状态
+
+- 已定义 `ProductQueryPlan`，用于 `catalog.search`。
+- 已定义 `CatalogComparePlan`，用于 `catalog.compare`。
+- 已实现 `RuleBasedCatalogQueryPlanner` 和 `LLMCatalogQueryPlanner`。
+- 已实现 Query Guard，校验 category、filter、sort、limit、comparison_fields 等白名单。
+- 已实现 planner 失败 fallback 到 rule-based planner，并在 `fallback_reason` 记录原因。
+- 已实现 `catalog.search` 的 plan -> SQLAlchemy 查询链路。
+- 已实现 `catalog.compare` 的 plan -> 候选召回 -> 对比字段输出链路。
+- 已实现 compare 多对象分别召回，避免候选被单一品牌占满。
+- 已通过 `CATALOG_LLM_PLANNER_ENABLED` 将真实 LLM planner 接入 `ToolRegistry`，默认关闭、按环境变量启用。
+- 已补充 fake planner / fake chat model 测试，测试不依赖真实 LLM key。
+
+## 启用真实 LLM Planner
+
+在仓库根目录 `.env` 中配置：
+
+```env
+LLM_PROVIDER=deepseek
+LLM_API_KEY=your-key
+LLM_MODEL=deepseek-chat
+CATALOG_LLM_PLANNER_ENABLED=true
+```
+
+启用后主流程仍调用同一个入口：
+
+```python
+registry = build_tool_registry(session)
+```
+
+如果 key 缺失或开关关闭，registry 会继续使用 rule-based planner。
+

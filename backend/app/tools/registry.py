@@ -4,7 +4,9 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.tools.catalog import CatalogToolService
+from app.core.config import Settings, get_settings
+from app.core.llm import build_chat_model
+from app.tools.catalog import CatalogQueryPlanner, CatalogToolService, LLMCatalogQueryPlanner
 from app.tools.knowledge import KnowledgeRetrievalToolService
 from app.tools.orders import OrderToolService
 from app.tools.schemas import (
@@ -76,9 +78,28 @@ class ToolRegistry:
         )
 
 
-def build_tool_registry(session: AsyncSession) -> ToolRegistry:
+def build_catalog_planner(settings: Settings | None = None) -> CatalogQueryPlanner | None:
+    settings = settings or get_settings()
+    if not settings.catalog_llm_planner_enabled:
+        return None
+
+    chat_model = build_chat_model(settings)
+    if chat_model is None:
+        return None
+
+    return LLMCatalogQueryPlanner(chat_model)
+
+
+def build_tool_registry(
+    session: AsyncSession,
+    catalog_planner: CatalogQueryPlanner | None = None,
+    settings: Settings | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
-    catalog = CatalogToolService(session)
+    catalog = CatalogToolService(
+        session,
+        planner=catalog_planner or build_catalog_planner(settings),
+    )
     orders = OrderToolService(session)
     knowledge = KnowledgeRetrievalToolService()
 

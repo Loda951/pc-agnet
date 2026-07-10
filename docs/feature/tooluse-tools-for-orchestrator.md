@@ -497,3 +497,40 @@ cd backend
 8 passed
 All checks passed
 ```
+
+## 阶段二商品 Planner 接入状态
+
+`catalog.search` 和 `catalog.compare` 现在都走受控 query plan，而不是让 LLM 直接生成 SQL。
+
+执行链路：
+
+```text
+自然语言输入
+-> CatalogQueryPlanner
+-> ProductQueryPlan / CatalogComparePlan JSON
+-> Query Guard 白名单校验
+-> ProductSearchRequest
+-> SQLAlchemy 查询 PostgreSQL
+-> 结构化 tool output
+```
+
+默认行为：
+
+- 默认不启用真实 LLM planner，避免本地测试和没有 key 的环境调用外部 API。
+- 如需启用真实 LLM planner，在 `.env` 设置 `CATALOG_LLM_PLANNER_ENABLED=true`，并配置 `LLM_API_KEY`、`LLM_PROVIDER`、`LLM_MODEL`。
+- 启用后，`build_tool_registry(session)` 会自动为商品 tools 注入 `LLMCatalogQueryPlanner`。
+- 如果未启用、没有 key、或 LLM planner 初始化失败，则自动使用 `RuleBasedCatalogQueryPlanner`。
+
+稳定性策略：
+
+- LLM 只允许返回 JSON plan，不允许返回 SQL。
+- `ProductQueryPlan` / `CatalogComparePlan` 会校验 category、filter、sort、limit、comparison_fields 等白名单字段。
+- planner 输出非法 JSON、非法字段、过度约束或异常时，tool fallback 到 rule-based planner。
+- fallback 原因会写入 `query_plan.fallback_reason`，主流程可用于调试，但不建议直接展示给用户。
+
+`catalog.compare` 召回策略：
+
+- 如果 compare plan 识别出多个对比对象，例如 `Logitech G502` 和 `Razer Viper`，tool 会按对象分别召回候选。
+- 这样可以避免一次整体查询导致结果被单一品牌或单一对象占满。
+- 如果主流程已经拿到明确 `sku_ids`，仍优先走 direct SKU 对比，不再做自然语言召回。
+
