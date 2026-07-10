@@ -1,16 +1,24 @@
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.tools.catalog import validate_catalog_sql
+from app.tools.catalog import (
+    CatalogComparePlan,
+    CatalogToolService,
+    LLMCatalogQueryPlanner,
+    ProductQueryPlan,
+    validate_catalog_sql,
+    validate_product_query_plan,
+)
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
     KnowledgeVectorIndex,
     KnowledgeVectorIndexChunk,
 )
-from app.tools.registry import build_tool_registry
-from app.tools.schemas import DocumentSearchInput
+from app.tools.registry import build_catalog_planner, build_tool_registry
+from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
 
 
 class FakeEmbeddingProvider:
@@ -61,6 +69,52 @@ def _knowledge_service() -> KnowledgeRetrievalToolService:
     )
 
 
+class FakeCatalogPlanner:
+    async def plan_search(self, request):
+        return ProductQueryPlan(
+            query=request.query,
+            category="mouse",
+            brands=["Razer"],
+            filters={"connection_type": "wireless"},
+            keywords=["Viper"],
+            limit=request.limit,
+            planner="fake",
+        )
+
+    async def plan_compare(self, request):
+        return CatalogComparePlan(
+            query=request.query,
+            category="mouse",
+            items=["G502", "Viper"],
+            comparison_fields=["price", "stock", "max_dpi", "weight_g", "connection_type"],
+            limit=request.limit,
+            planner="fake",
+        )
+
+
+class BrokenCatalogPlanner:
+    async def plan_search(self, request):
+        raise ValueError("planner unavailable")
+
+    async def plan_compare(self, request):
+        raise ValueError("planner unavailable")
+
+
+class FakeChatResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class FakeChatModel:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        return FakeChatResponse(self.content)
+
+
 @pytest.mark.asyncio
 async def test_tool_registry_exposes_expected_business_tools(
     db_session_factory: Callable[[], AsyncSession],
@@ -96,6 +150,153 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
 
 
 @pytest.mark.asyncio
+async def test_catalog_search_uses_query_plan_and_guard(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=FakeCatalogPlanner()).search(
+            CatalogSearchInput(query="Find a wireless Razer mouse", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "fake"
+    assert result.query_plan["brands"] == ["Razer"]
+    assert result.products[0].brand == "Razer"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_parses_guarded_json() -> None:
+    chat = FakeChatModel(
+        """
+        {
+          "category": "mouse",
+          "brands": ["Logitech"],
+          "max_price": 300,
+          "filters": {"wireless": "wireless"},
+          "keywords": ["fps"],
+          "sort": "recommend",
+          "supported": true,
+          "unsupported_reason": null
+        }
+        """
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query="FPS mouse under 300", limit=3))
+
+    assert plan.planner == "llm"
+    assert plan.query == "FPS mouse under 300"
+    assert plan.category == "mouse"
+    assert plan.brands == ["Logitech"]
+    assert plan.max_price == 300
+    assert plan.filters == {"wireless": "wireless"}
+    assert chat.calls
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_applies_explicit_overrides() -> None:
+    chat = FakeChatModel(
+        '{"category":"keyboard","brands":["Razer"],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(
+            query="wireless gear",
+            category="mouse",
+            brand="Logitech",
+            filters={"connection_type": "wireless"},
+            limit=3,
+        )
+    )
+
+    assert plan.category == "mouse"
+    assert plan.brands == ["Logitech"]
+    assert plan.filters == {"connection_type": "wireless"}
+
+
+def test_build_catalog_planner_is_opt_in() -> None:
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=False)  # type: ignore[arg-type]
+    )
+
+    assert planner is None
+
+
+def test_build_catalog_planner_uses_llm_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = FakeChatModel('{"category":"mouse"}')
+    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: chat)
+
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]
+    )
+
+    assert isinstance(planner, LLMCatalogQueryPlanner)
+    assert planner.chat_model is chat
+
+
+def test_build_catalog_planner_skips_when_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: None)
+
+    planner = build_catalog_planner(
+        SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]
+    )
+
+    assert planner is None
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_falls_back_for_category_invalid_llm_filter(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":[],"filters":{"type":"FPS"},'
+        '"keywords":["wireless","FPS","mouse"],"sort":"recommend",'
+        '"supported":true,"unsupported_reason":null}'
+    )
+    async with db_session_factory() as session:
+        result = await CatalogToolService(
+            session,
+            planner=LLMCatalogQueryPlanner(chat),
+        ).search(CatalogSearchInput(query="Recommend a wireless FPS mouse under 300", limit=3))
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "rule_based_fallback"
+    assert "unsupported filters for mouse" in result.query_plan["fallback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_falls_back_when_planner_fails(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=BrokenCatalogPlanner()).search(
+            CatalogSearchInput(query="Codex wireless mouse", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "rule_based_fallback"
+    assert "planner unavailable" in result.query_plan["fallback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_returns_unsupported_query(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query="Which mouse has the fastest month over month growth?")
+        )
+
+    assert result.result_type == "empty"
+    assert result.ranking_strategy == "unsupported_query"
+    assert result.query_plan["supported"] is False
+
+
+@pytest.mark.asyncio
 async def test_catalog_compare_resolves_natural_language_candidates(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
@@ -111,6 +312,58 @@ async def test_catalog_compare_resolves_natural_language_candidates(
     assert "Logitech Codex G502 Hero Black" in titles
     assert "Razer Codex Viper V3 Pro White" in titles
     assert result.output["comparison_fields"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_compare_uses_compare_plan_fields(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=FakeCatalogPlanner()).compare(
+            CatalogCompareInput(query="Compare G502 and Viper for FPS", limit=5)
+        )
+
+    assert result.result_type == "comparison"
+    assert result.query_plan["compare_plan"]["planner"] == "fake"
+    assert result.comparison_fields == [
+        "price",
+        "stock",
+        "max_dpi",
+        "weight_g",
+        "connection_type",
+    ]
+    assert result.products
+    brands = {product.brand for product in result.products}
+    assert {"Logitech", "Razer"} <= brands
+    assert sum(1 for product in result.products if product.brand == "Logitech") >= 1
+    assert sum(1 for product in result.products if product.brand == "Razer") >= 1
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_compare_planner_parses_guarded_json() -> None:
+    chat = FakeChatModel(
+        """
+        {
+          "category": "mouse",
+          "items": ["G502", "Viper"],
+          "brands": ["Logitech", "Razer"],
+          "comparison_fields": ["price", "stock", "max_dpi", "weight_g"],
+          "scenario": "FPS",
+          "supported": true,
+          "unsupported_reason": null
+        }
+        """
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_compare(
+        CatalogCompareInput(query="Compare G502 and Viper for FPS", limit=5)
+    )
+
+    assert plan.planner == "llm"
+    assert plan.items == ["G502", "Viper"]
+    assert plan.brands == ["Logitech", "Razer"]
+    assert plan.comparison_fields == ["price", "stock", "max_dpi", "weight_g"]
 
 
 @pytest.mark.asyncio
@@ -216,3 +469,21 @@ def test_catalog_sql_guard_rejects_unsafe_sql() -> None:
 
     with pytest.raises(ValueError):
         validate_catalog_sql("SELECT sku.id FROM sku")
+
+
+def test_product_query_guard_rejects_unsupported_fields() -> None:
+    with pytest.raises(ValueError):
+        validate_product_query_plan(
+            ProductQueryPlan(
+                query="find products",
+                filters={"credit_card": "anything"},
+            )
+        )
+
+    with pytest.raises(ValueError):
+        validate_product_query_plan(
+            ProductQueryPlan(
+                query="find products",
+                category="order",
+            )
+        )

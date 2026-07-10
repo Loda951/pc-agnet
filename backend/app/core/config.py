@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
     llm_base_url: str = ""
+    catalog_llm_planner_enabled: bool = True
 
     auth_token_secret: str = "local-dev-auth-token-secret-change-me"
     auth_access_token_minutes: int = 30
