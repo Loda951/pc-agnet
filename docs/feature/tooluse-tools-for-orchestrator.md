@@ -143,7 +143,8 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 边界：
 
-- 当前已使用受控 `ProductQueryPlan` 作为中间层，默认 planner 是规则版；后续 LLM planner 只需要输出同结构 JSON。
+- 当前已使用受控 `ProductQueryPlan` 作为中间层，默认 planner 是规则版。
+- 已提供 `LLMCatalogQueryPlanner` 可注入实现；它调用 LLM 生成同结构 JSON，但默认不启用，避免没有 LLM key 时影响本地运行。
 - Tool 不执行 LLM 直接生成的 SQL；Python 会先校验 QueryPlan，再用 SQLAlchemy 查询 PostgreSQL。
 - planner 异常或输出非法字段时，会 fallback 到规则 planner，并在 `query_plan.fallback_reason` 中返回原因。
 - 超出商品表能力的问题会返回 `result_type = "empty"`、`ranking_strategy = "unsupported_query"`，并在 `query_plan.unsupported_reason` 中说明原因。

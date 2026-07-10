@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.catalog import (
     CatalogToolService,
+    LLMCatalogQueryPlanner,
     ProductQueryPlan,
     validate_catalog_sql,
     validate_product_query_plan,
@@ -96,6 +97,21 @@ class BrokenCatalogPlanner:
         raise ValueError("planner unavailable")
 
 
+class FakeChatResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class FakeChatModel:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        return FakeChatResponse(self.content)
+
+
 @pytest.mark.asyncio
 async def test_tool_registry_exposes_expected_business_tools(
     db_session_factory: Callable[[], AsyncSession],
@@ -143,6 +159,58 @@ async def test_catalog_search_uses_query_plan_and_guard(
     assert result.query_plan["planner"] == "fake"
     assert result.query_plan["brands"] == ["Razer"]
     assert result.products[0].brand == "Razer"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_parses_guarded_json() -> None:
+    chat = FakeChatModel(
+        """
+        {
+          "category": "mouse",
+          "brands": ["Logitech"],
+          "max_price": 300,
+          "filters": {"wireless": "wireless"},
+          "keywords": ["fps"],
+          "sort": "recommend",
+          "supported": true,
+          "unsupported_reason": null
+        }
+        """
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query="FPS mouse under 300", limit=3))
+
+    assert plan.planner == "llm"
+    assert plan.query == "FPS mouse under 300"
+    assert plan.category == "mouse"
+    assert plan.brands == ["Logitech"]
+    assert plan.max_price == 300
+    assert plan.filters == {"wireless": "wireless"}
+    assert chat.calls
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_applies_explicit_overrides() -> None:
+    chat = FakeChatModel(
+        '{"category":"keyboard","brands":["Razer"],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(
+            query="wireless gear",
+            category="mouse",
+            brand="Logitech",
+            filters={"connection_type": "wireless"},
+            limit=3,
+        )
+    )
+
+    assert plan.category == "mouse"
+    assert plan.brands == ["Logitech"]
+    assert plan.filters == {"connection_type": "wireless"}
 
 
 @pytest.mark.asyncio

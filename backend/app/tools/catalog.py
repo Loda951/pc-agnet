@@ -1,7 +1,9 @@
+import json
 import re
 from decimal import Decimal
 from typing import Literal, Protocol
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +141,67 @@ class RuleBasedCatalogQueryPlanner:
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
         )
+
+
+class LLMCatalogQueryPlanner:
+    """LLM planner that returns a guarded ProductQueryPlan JSON, not raw SQL."""
+
+    def __init__(self, chat_model):
+        self.chat_model = chat_model
+
+    async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
+        return await self._plan(
+            task="search",
+            query=request.query,
+            limit=request.limit,
+            overrides={
+                "category": request.category,
+                "brands": [request.brand] if request.brand else [],
+                "min_price": request.min_price,
+                "max_price": request.max_price,
+                "filters": request.filters,
+            },
+        )
+
+    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
+        return await self._plan(
+            task="compare",
+            query=request.query,
+            limit=request.limit,
+            overrides={},
+        )
+
+    async def _plan(
+        self,
+        task: str,
+        query: str,
+        limit: int,
+        overrides: dict,
+    ) -> ProductQueryPlan:
+        response = await self.chat_model.ainvoke(
+            [
+                SystemMessage(content=_catalog_planner_system_prompt()),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "task": task,
+                            "query": query,
+                            "limit": limit,
+                            "explicit_overrides": _json_safe(overrides),
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            ]
+        )
+        raw_text = _message_content_to_text(response.content)
+        plan_data = _extract_json_object(raw_text)
+        plan_data["query"] = query
+        plan_data["limit"] = limit
+        plan = ProductQueryPlan.model_validate(plan_data)
+        plan.planner = "llm"
+        _apply_explicit_overrides(plan, overrides)
+        return plan
 
 
 class CatalogToolService:
@@ -355,6 +418,86 @@ def _unsupported_reason(query: str) -> str | None:
         if pattern in lowered:
             return reason
     return None
+
+
+def _catalog_planner_system_prompt() -> str:
+    return """
+You are a catalog query planner for a PC peripherals ecommerce support agent.
+Return exactly one JSON object. Do not return markdown.
+
+You must not write SQL. You only fill ProductQueryPlan fields.
+
+Allowed JSON fields:
+- category: one of mouse, keyboard, headset, monitor, speaker, webcam, or null
+- brands: array of brand names, max 8
+- min_price: number or null
+- max_price: number or null
+- filters: object with allowed keys only
+- keywords: array of short product intent keywords, max 12
+- sort: one of recommend, sales, price_asc, price_desc, stock
+- supported: boolean
+- unsupported_reason: string or null
+
+Allowed filters:
+backlit, channels, color, connection_type, enclosure_type, field_of_view,
+frame_rate, frequency_response, hand_orientation, max_dpi, microphone,
+panel_type, power_w, refresh_rate, resolution, response_time_ms, size_inch,
+style, switches, tenkeyless, tracking_method, type, weight_g, wireless.
+
+Set supported=false when the user asks for analytics not available in the
+catalog tables, such as time-series growth, revenue, profit, or user purchase
+statistics. Otherwise set supported=true.
+""".strip()
+
+
+def _extract_json_object(text: str) -> dict:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+        if not match:
+            raise ValueError("LLM planner did not return a JSON object") from None
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM planner JSON must be an object")
+    return parsed
+
+
+def _message_content_to_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
+    if overrides.get("category"):
+        plan.category = overrides["category"]
+    if overrides.get("brands"):
+        plan.brands = overrides["brands"]
+    if overrides.get("min_price") is not None:
+        plan.min_price = overrides["min_price"]
+    if overrides.get("max_price") is not None:
+        plan.max_price = overrides["max_price"]
+    if overrides.get("filters"):
+        plan.filters = {**plan.filters, **overrides["filters"]}
+
+
+def _json_safe(data: dict) -> dict:
+    return json.loads(json.dumps(data, default=str))
 
 
 def _to_comparison_item(product: ProductCard) -> ProductComparisonItem:
