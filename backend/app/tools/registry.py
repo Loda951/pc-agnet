@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.catalog import CatalogToolService
-from app.tools.knowledge import KnowledgeKeywordToolService
+from app.tools.knowledge import KnowledgeRetrievalToolService
 from app.tools.orders import OrderToolService
 from app.tools.schemas import (
     CatalogCompareInput,
@@ -80,7 +80,7 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
     registry = ToolRegistry()
     catalog = CatalogToolService(session)
     orders = OrderToolService(session)
-    knowledge = KnowledgeKeywordToolService()
+    knowledge = KnowledgeRetrievalToolService()
 
     registry.register(
         "catalog.search",

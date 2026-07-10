@@ -8,7 +8,8 @@
 - 主流程负责意图识别、选择 tool、调用顺序、结果融合和最终自然语言回答。
 - 当前不提供 MCP，不负责 LangGraph 主流程节点改造，不负责 SSE tool_call 事件。
 - 商品和订单 tools 读取 PostgreSQL。
-- 政策和知识 tools 读取本地 JSON 文档，并使用 BM25 / keyword / hybrid 检索。
+- 政策和知识 tools 读取本地 JSON 文档，并使用 BM25 / vector / hybrid 检索。
+- 向量检索当前使用项目已有的本地 hash embedding，在进程内临时切 chunk 和计算向量；不写 Chroma，不生成向量文件，不依赖外部 embedding API key。
 
 ## ToolRegistry
 
@@ -311,7 +312,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 - `query`：必填，用户政策问题。
 - `document_type`：可选，如果主流程明确要限定文档类型，可以传 `policy`, `store_rule`, `faq`。
 - `limit`：默认 `3`，范围 `1..10`。
-- `retrieval_mode`：默认 `hybrid`，可选 `bm25`, `keyword`, `hybrid`。
+- `retrieval_mode`：默认 `hybrid`，可选 `bm25`, `vector`, `hybrid`。
 
 输出：
 
@@ -330,10 +331,10 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
         "scenario": "after_sales",
         "retrieval_debug": {
           "bm25_score": 1.23,
-          "keyword_score": 8.0,
+          "vector_score": 0.76,
           "rrf_score": 0.18,
           "bm25_rank": 1,
-          "keyword_rank": 1
+          "vector_rank": 1
         }
       }
     }
@@ -345,8 +346,8 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 检索模式：
 
 - `bm25`：只走 BM25。
-- `keyword`：只走关键词/短语命中。
-- `hybrid`：BM25 + keyword，两路结果用 RRF 融合。
+- `vector`：只走本地向量检索。工具会把本地 JSON 文档切成 chunk，使用 `LocalHashEmbeddingProvider` 计算 query 和 chunk 向量，并按 cosine similarity 聚合到文档级结果。
+- `hybrid`：BM25 + vector，两路结果用 RRF 融合。
 
 边界：
 
