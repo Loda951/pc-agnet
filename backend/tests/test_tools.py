@@ -36,7 +36,7 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
     assert result.ok
     assert result.output is not None
     assert result.output["result_type"] == "products"
-    assert result.output["ranking_strategy"] == "match_score_stock_price"
+    assert result.output["ranking_strategy"] == "match_score_sales_stock_price"
     assert result.output["products"][0]["title"] == "Razer Codex Viper V3 Pro White"
     assert "Wireless" in result.output["products"][0]["specs"]["connection_type"]
 

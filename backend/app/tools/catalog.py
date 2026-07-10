@@ -77,7 +77,7 @@ class CatalogToolService:
         return CatalogSearchOutput(
             result_type="products" if products else "empty",
             products=products[: request.limit],
-            ranking_strategy="match_score_stock_price",
+            ranking_strategy="match_score_sales_stock_price",
             query_plan=_dump_product_search(plan),
         )
 
@@ -145,6 +145,7 @@ class CatalogToolService:
                 category=category.name,
                 price=sku.price,
                 stock=sku.stock,
+                sales_count=spu.sales_count,
                 specs={str(key): str(value) for key, value in (sku.specs_json or {}).items()}
                 | attributes.get(sku.id, {}),
                 image_url=sku.image_url,
