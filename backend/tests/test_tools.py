@@ -214,6 +214,26 @@ async def test_llm_catalog_planner_applies_explicit_overrides() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catalog_search_falls_back_for_category_invalid_llm_filter(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":[],"filters":{"type":"FPS"},'
+        '"keywords":["wireless","FPS","mouse"],"sort":"recommend",'
+        '"supported":true,"unsupported_reason":null}'
+    )
+    async with db_session_factory() as session:
+        result = await CatalogToolService(
+            session,
+            planner=LLMCatalogQueryPlanner(chat),
+        ).search(CatalogSearchInput(query="Recommend a wireless FPS mouse under 300", limit=3))
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "rule_based_fallback"
+    assert "unsupported filters for mouse" in result.query_plan["fallback_reason"]
+
+
+@pytest.mark.asyncio
 async def test_catalog_search_falls_back_when_planner_fails(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:

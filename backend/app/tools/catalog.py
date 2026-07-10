@@ -65,6 +65,68 @@ ALLOWED_FILTERS = {
     "weight_g",
     "wireless",
 }
+CATEGORY_FILTERS = {
+    "mouse": {
+        "color",
+        "connection_type",
+        "hand_orientation",
+        "max_dpi",
+        "tracking_method",
+        "weight_g",
+        "wireless",
+    },
+    "keyboard": {
+        "backlit",
+        "color",
+        "connection_type",
+        "style",
+        "switches",
+        "tenkeyless",
+        "wireless",
+    },
+    "headset": {
+        "color",
+        "connection_type",
+        "enclosure_type",
+        "frequency_response",
+        "microphone",
+        "type",
+        "wireless",
+    },
+    "headphone": {
+        "color",
+        "connection_type",
+        "enclosure_type",
+        "frequency_response",
+        "microphone",
+        "type",
+        "wireless",
+    },
+    "monitor": {
+        "color",
+        "panel_type",
+        "refresh_rate",
+        "resolution",
+        "response_time_ms",
+        "size_inch",
+    },
+    "speaker": {
+        "channels",
+        "color",
+        "connection_type",
+        "power_w",
+        "type",
+        "wireless",
+    },
+    "webcam": {
+        "color",
+        "connection_type",
+        "field_of_view",
+        "frame_rate",
+        "microphone",
+        "resolution",
+    },
+}
 ALLOWED_SORTS = {"recommend", "sales", "price_asc", "price_desc", "stock"}
 UNSUPPORTED_QUERY_PATTERNS = {
     "growth": "current catalog data has no time-series sales history",
@@ -368,6 +430,17 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if unknown_filters:
         raise ValueError(f"unsupported catalog filters: {', '.join(sorted(unknown_filters))}")
 
+    normalized_category = _canonical_category(plan.category)
+    if normalized_category and normalized_category in CATEGORY_FILTERS:
+        disallowed_for_category = {
+            key for key in plan.filters if key.lower() not in CATEGORY_FILTERS[normalized_category]
+        }
+        if disallowed_for_category:
+            raise ValueError(
+                "unsupported filters for "
+                f"{normalized_category}: {', '.join(sorted(disallowed_for_category))}"
+            )
+
     if plan.sort not in ALLOWED_SORTS:
         raise ValueError(f"unsupported catalog sort: {plan.sort}")
 
@@ -390,7 +463,13 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
 
 
 def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
-    query_parts = [plan.query, *plan.keywords]
+    if plan.planner.startswith("rule_based"):
+        query_parts = [plan.query, *plan.keywords]
+    else:
+        # Natural language is already represented by structured fields. Using the
+        # full user utterance as a SQL prefilter over titles/brands can over-constrain
+        # catalog search, especially for intent words such as FPS or "recommend".
+        query_parts = [*plan.brands, *_product_keywords(plan)]
     return ProductSearchRequest(
         query=" ".join(part for part in query_parts if part),
         category=plan.category,
@@ -418,6 +497,50 @@ def _unsupported_reason(query: str) -> str | None:
         if pattern in lowered:
             return reason
     return None
+
+
+def _canonical_category(category: str | None) -> str | None:
+    if not category:
+        return None
+    lowered = category.lower()
+    for canonical, mapped in {
+        "mouse": {"mouse", "mice"},
+        "keyboard": {"keyboard", "keyboards"},
+        "headset": {"headset", "headphone", "headphones"},
+        "monitor": {"monitor", "monitors"},
+        "speaker": {"speaker", "speakers"},
+        "webcam": {"webcam", "webcams"},
+    }.items():
+        if lowered in mapped:
+            return canonical
+    for english, alias in CATEGORY_ALIASES.items():
+        if lowered == str(alias).lower():
+            return _canonical_category(english)
+    return lowered
+
+
+def _product_keywords(plan: ProductQueryPlan) -> list[str]:
+    ignored = {
+        "recommend",
+        "recommendation",
+        "wireless",
+        "wired",
+        "fps",
+        "gaming",
+        "office",
+        "mouse",
+        "keyboard",
+        "headset",
+        "headphone",
+        "monitor",
+        "speaker",
+        "webcam",
+    }
+    return [
+        keyword
+        for keyword in plan.keywords
+        if keyword.lower() not in ignored and _canonical_category(keyword) not in CATEGORY_FILTERS
+    ]
 
 
 def _catalog_planner_system_prompt() -> str:
