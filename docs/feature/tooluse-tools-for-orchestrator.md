@@ -113,7 +113,23 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
     }
   ],
   "ranking_strategy": "match_score_sales_stock_price",
-  "query_plan": {}
+  "query_plan": {
+    "query": "Logitech wireless mouse under 300",
+    "category": "mouse",
+    "brands": ["Logitech"],
+    "min_price": null,
+    "max_price": 300,
+    "filters": {
+      "wireless": "wireless"
+    },
+    "keywords": [],
+    "sort": "recommend",
+    "limit": 3,
+    "supported": true,
+    "unsupported_reason": null,
+    "planner": "rule_based",
+    "fallback_reason": null
+  }
 }
 ```
 
@@ -127,7 +143,10 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 边界：
 
-- 当前不是最终版 LLM/NL2SQL，而是规则查询计划 + SQLAlchemy 查询。
+- 当前已使用受控 `ProductQueryPlan` 作为中间层，默认 planner 是规则版；后续 LLM planner 只需要输出同结构 JSON。
+- Tool 不执行 LLM 直接生成的 SQL；Python 会先校验 QueryPlan，再用 SQLAlchemy 查询 PostgreSQL。
+- planner 异常或输出非法字段时，会 fallback 到规则 planner，并在 `query_plan.fallback_reason` 中返回原因。
+- 超出商品表能力的问题会返回 `result_type = "empty"`、`ranking_strategy = "unsupported_query"`，并在 `query_plan.unsupported_reason` 中说明原因。
 - 不直接承诺商品一定可买，最终库存以下单页为准。
 - 无结果时返回 `result_type = "empty"`。
 

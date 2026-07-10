@@ -3,14 +3,19 @@ from collections.abc import Callable
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.tools.catalog import validate_catalog_sql
+from app.tools.catalog import (
+    CatalogToolService,
+    ProductQueryPlan,
+    validate_catalog_sql,
+    validate_product_query_plan,
+)
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
     KnowledgeVectorIndex,
     KnowledgeVectorIndexChunk,
 )
 from app.tools.registry import build_tool_registry
-from app.tools.schemas import DocumentSearchInput
+from app.tools.schemas import CatalogSearchInput, DocumentSearchInput
 
 
 class FakeEmbeddingProvider:
@@ -61,6 +66,36 @@ def _knowledge_service() -> KnowledgeRetrievalToolService:
     )
 
 
+class FakeCatalogPlanner:
+    async def plan_search(self, request):
+        return ProductQueryPlan(
+            query=request.query,
+            category="mouse",
+            brands=["Razer"],
+            filters={"connection_type": "wireless"},
+            keywords=["Viper"],
+            limit=request.limit,
+            planner="fake",
+        )
+
+    async def plan_compare(self, request):
+        return ProductQueryPlan(
+            query=request.query,
+            category="mouse",
+            keywords=["G502", "Viper"],
+            limit=request.limit,
+            planner="fake",
+        )
+
+
+class BrokenCatalogPlanner:
+    async def plan_search(self, request):
+        raise ValueError("planner unavailable")
+
+    async def plan_compare(self, request):
+        raise ValueError("planner unavailable")
+
+
 @pytest.mark.asyncio
 async def test_tool_registry_exposes_expected_business_tools(
     db_session_factory: Callable[[], AsyncSession],
@@ -93,6 +128,49 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
     assert result.output["ranking_strategy"] == "match_score_sales_stock_price"
     assert result.output["products"][0]["title"] == "Razer Codex Viper V3 Pro White"
     assert "Wireless" in result.output["products"][0]["specs"]["connection_type"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_uses_query_plan_and_guard(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=FakeCatalogPlanner()).search(
+            CatalogSearchInput(query="Find a wireless Razer mouse", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "fake"
+    assert result.query_plan["brands"] == ["Razer"]
+    assert result.products[0].brand == "Razer"
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_falls_back_when_planner_fails(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=BrokenCatalogPlanner()).search(
+            CatalogSearchInput(query="Codex wireless mouse", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "rule_based_fallback"
+    assert "planner unavailable" in result.query_plan["fallback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_returns_unsupported_query(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query="Which mouse has the fastest month over month growth?")
+        )
+
+    assert result.result_type == "empty"
+    assert result.ranking_strategy == "unsupported_query"
+    assert result.query_plan["supported"] is False
 
 
 @pytest.mark.asyncio
@@ -216,3 +294,21 @@ def test_catalog_sql_guard_rejects_unsafe_sql() -> None:
 
     with pytest.raises(ValueError):
         validate_catalog_sql("SELECT sku.id FROM sku")
+
+
+def test_product_query_guard_rejects_unsupported_fields() -> None:
+    with pytest.raises(ValueError):
+        validate_product_query_plan(
+            ProductQueryPlan(
+                query="find products",
+                filters={"credit_card": "anything"},
+            )
+        )
+
+    with pytest.raises(ValueError):
+        validate_product_query_plan(
+            ProductQueryPlan(
+                query="find products",
+                category="order",
+            )
+        )

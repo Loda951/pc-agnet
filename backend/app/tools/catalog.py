@@ -1,12 +1,14 @@
 import re
-from typing import Protocol
+from decimal import Decimal
+from typing import Literal, Protocol
 
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.intent import build_product_search
 from app.models import Brand, Category, Sku, Spu
-from app.repositories.catalog import CatalogRepository
+from app.repositories.catalog import CATEGORY_ALIASES, CatalogRepository
 from app.schemas.catalog import ProductCard, ProductSearchRequest
 from app.tools.schemas import (
     CatalogCompareInput,
@@ -25,39 +27,117 @@ CATALOG_ALLOWED_TABLES = {
     "attribute_key",
     "attribute_value",
 }
+ALLOWED_CATEGORIES = {
+    "mouse",
+    "keyboard",
+    "headset",
+    "headphone",
+    "monitor",
+    "speaker",
+    "webcam",
+    *CATEGORY_ALIASES.values(),
+}
+ALLOWED_FILTERS = {
+    "backlit",
+    "channels",
+    "color",
+    "connection_type",
+    "enclosure_type",
+    "field_of_view",
+    "frame_rate",
+    "frequency_response",
+    "hand_orientation",
+    "max_dpi",
+    "microphone",
+    "panel_type",
+    "power_w",
+    "refresh_rate",
+    "resolution",
+    "response_time_ms",
+    "size_inch",
+    "style",
+    "switches",
+    "tenkeyless",
+    "tracking_method",
+    "type",
+    "weight_g",
+    "wireless",
+}
+ALLOWED_SORTS = {"recommend", "sales", "price_asc", "price_desc", "stock"}
+UNSUPPORTED_QUERY_PATTERNS = {
+    "growth": "current catalog data has no time-series sales history",
+    "month over month": "current catalog data has no time-series sales history",
+    "revenue": "current catalog tool does not support revenue analytics",
+    "profit": "current catalog tool does not support profit analytics",
+    "用户": "catalog tool cannot query user purchase statistics",
+    "购买过": "catalog tool cannot query user purchase statistics",
+}
+
+
+class ProductQueryPlan(BaseModel):
+    query: str = Field(min_length=1)
+    category: str | None = None
+    brands: list[str] = Field(default_factory=list, max_length=8)
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    filters: dict[str, str] = Field(default_factory=dict)
+    keywords: list[str] = Field(default_factory=list, max_length=12)
+    sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
+    limit: int = Field(default=3, ge=1, le=20)
+    supported: bool = True
+    unsupported_reason: str | None = None
+    planner: str = "rule_based"
+    fallback_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_price_range(self) -> "ProductQueryPlan":
+        if (
+            self.min_price is not None
+            and self.max_price is not None
+            and self.min_price > self.max_price
+        ):
+            raise ValueError("min_price cannot be greater than max_price")
+        return self
 
 
 class CatalogQueryPlanner(Protocol):
-    async def plan_search(self, request: CatalogSearchInput) -> ProductSearchRequest:
+    async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         ...
 
-    async def plan_compare(self, request: CatalogCompareInput) -> ProductSearchRequest:
+    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
         ...
 
 
 class RuleBasedCatalogQueryPlanner:
     """Default offline planner. An LLM/NL2SQL planner can replace this interface later."""
 
-    async def plan_search(self, request: CatalogSearchInput) -> ProductSearchRequest:
+    async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         parsed = build_product_search(request.query)
         filters = {**parsed.filters, **request.filters}
-        return ProductSearchRequest(
+        unsupported_reason = _unsupported_reason(request.query)
+        return ProductQueryPlan(
             query=request.query,
             category=request.category or parsed.category,
+            brands=[request.brand] if request.brand else [],
             min_price=request.min_price if request.min_price is not None else parsed.min_price,
             max_price=request.max_price if request.max_price is not None else parsed.max_price,
             filters=filters,
             limit=request.limit,
+            supported=unsupported_reason is None,
+            unsupported_reason=unsupported_reason,
         )
 
-    async def plan_compare(self, request: CatalogCompareInput) -> ProductSearchRequest:
+    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
         parsed = build_product_search(request.query)
-        return ProductSearchRequest(
+        unsupported_reason = _unsupported_reason(request.query)
+        return ProductQueryPlan(
             query=request.query,
             category=parsed.category,
             max_price=parsed.max_price,
             filters=parsed.filters,
             limit=request.limit,
+            supported=unsupported_reason is None,
+            unsupported_reason=unsupported_reason,
         )
 
 
@@ -71,14 +151,23 @@ class CatalogToolService:
         self.planner = planner or RuleBasedCatalogQueryPlanner()
 
     async def search(self, request: CatalogSearchInput) -> CatalogSearchOutput:
-        plan = await self.planner.plan_search(request)
-        products = await CatalogRepository(self.session).search_products(plan)
-        products = _filter_brand(products, request.brand)
+        plan = await self._safe_plan_search(request)
+        if not plan.supported:
+            return CatalogSearchOutput(
+                result_type="empty",
+                products=[],
+                ranking_strategy="unsupported_query",
+                query_plan=plan.model_dump(mode="json"),
+            )
+
+        product_request = _plan_to_product_search(plan)
+        products = await CatalogRepository(self.session).search_products(product_request)
+        products = _filter_brands(products, plan.brands)
         return CatalogSearchOutput(
             result_type="products" if products else "empty",
             products=products[: request.limit],
             ranking_strategy="match_score_sales_stock_price",
-            query_plan=_dump_product_search(plan),
+            query_plan=plan.model_dump(mode="json"),
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
@@ -104,8 +193,13 @@ class CatalogToolService:
     async def _products_from_compare_query(
         self, request: CatalogCompareInput
     ) -> list[ProductCard]:
-        plan = await self.planner.plan_compare(request)
-        products = await CatalogRepository(self.session).search_products(plan)
+        plan = await self._safe_plan_compare(request)
+        if not plan.supported:
+            return []
+        products = await CatalogRepository(self.session).search_products(
+            _plan_to_product_search(plan)
+        )
+        products = _filter_brands(products, plan.brands)
         wanted_terms = _product_terms(request.query)
         if not wanted_terms:
             return products
@@ -154,6 +248,24 @@ class CatalogToolService:
         }
         return [by_id[sku_id] for sku_id in sku_ids if sku_id in by_id]
 
+    async def _safe_plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
+        try:
+            return validate_product_query_plan(await self.planner.plan_search(request))
+        except (ValidationError, ValueError, TypeError) as exc:
+            fallback = await RuleBasedCatalogQueryPlanner().plan_search(request)
+            fallback.planner = "rule_based_fallback"
+            fallback.fallback_reason = str(exc)
+            return validate_product_query_plan(fallback)
+
+    async def _safe_plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
+        try:
+            return validate_product_query_plan(await self.planner.plan_compare(request))
+        except (ValidationError, ValueError, TypeError) as exc:
+            fallback = await RuleBasedCatalogQueryPlanner().plan_compare(request)
+            fallback.planner = "rule_based_fallback"
+            fallback.fallback_reason = str(exc)
+            return validate_product_query_plan(fallback)
+
 
 def validate_catalog_sql(sql: str) -> None:
     """Guard for future LLM/NL2SQL planners before SQL reaches an executor."""
@@ -182,15 +294,67 @@ def validate_catalog_sql(sql: str) -> None:
         raise ValueError(f"catalog SQL references non-catalog tables: {', '.join(sorted(unknown))}")
 
 
-def _dump_product_search(request: ProductSearchRequest) -> dict:
-    return request.model_dump(mode="json")
+def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPlan:
+    if isinstance(plan, dict):
+        plan = ProductQueryPlan.model_validate(plan)
+
+    if plan.category and plan.category.lower() not in ALLOWED_CATEGORIES:
+        raise ValueError(f"unsupported category: {plan.category}")
+
+    unknown_filters = {key for key in plan.filters if key.lower() not in ALLOWED_FILTERS}
+    if unknown_filters:
+        raise ValueError(f"unsupported catalog filters: {', '.join(sorted(unknown_filters))}")
+
+    if plan.sort not in ALLOWED_SORTS:
+        raise ValueError(f"unsupported catalog sort: {plan.sort}")
+
+    if plan.limit < 1 or plan.limit > 20:
+        raise ValueError("catalog query limit must be between 1 and 20")
+
+    if plan.min_price is not None and plan.min_price < 0:
+        raise ValueError("min_price cannot be negative")
+    if plan.max_price is not None and plan.max_price < 0:
+        raise ValueError("max_price cannot be negative")
+
+    if reason := _unsupported_reason(plan.query):
+        plan.supported = False
+        plan.unsupported_reason = plan.unsupported_reason or reason
+
+    plan.filters = {key.lower(): str(value) for key, value in plan.filters.items()}
+    plan.brands = [brand.strip() for brand in plan.brands if brand.strip()]
+    plan.keywords = [keyword.strip() for keyword in plan.keywords if keyword.strip()]
+    return plan
 
 
-def _filter_brand(products: list[ProductCard], brand: str | None) -> list[ProductCard]:
-    if not brand:
+def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
+    query_parts = [plan.query, *plan.keywords]
+    return ProductSearchRequest(
+        query=" ".join(part for part in query_parts if part),
+        category=plan.category,
+        min_price=plan.min_price,
+        max_price=plan.max_price,
+        filters=plan.filters,
+        limit=plan.limit,
+    )
+
+
+def _filter_brands(products: list[ProductCard], brands: list[str]) -> list[ProductCard]:
+    if not brands:
         return products
-    brand_lower = brand.lower()
-    return [product for product in products if brand_lower in product.brand.lower()]
+    lowered = [brand.lower() for brand in brands]
+    return [
+        product
+        for product in products
+        if any(brand in product.brand.lower() for brand in lowered)
+    ]
+
+
+def _unsupported_reason(query: str) -> str | None:
+    lowered = query.lower()
+    for pattern, reason in UNSUPPORTED_QUERY_PATTERNS.items():
+        if pattern in lowered:
+            return reason
+    return None
 
 
 def _to_comparison_item(product: ProductCard) -> ProductComparisonItem:
