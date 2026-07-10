@@ -128,6 +128,7 @@ CATEGORY_FILTERS = {
     },
 }
 ALLOWED_SORTS = {"recommend", "sales", "price_asc", "price_desc", "stock"}
+BASE_COMPARISON_FIELDS = {"price", "stock", "brand", "category", "sales_count"}
 UNSUPPORTED_QUERY_PATTERNS = {
     "growth": "current catalog data has no time-series sales history",
     "month over month": "current catalog data has no time-series sales history",
@@ -164,11 +165,25 @@ class ProductQueryPlan(BaseModel):
         return self
 
 
+class CatalogComparePlan(BaseModel):
+    query: str = Field(min_length=1)
+    category: str | None = None
+    items: list[str] = Field(default_factory=list, max_length=8)
+    brands: list[str] = Field(default_factory=list, max_length=8)
+    comparison_fields: list[str] = Field(default_factory=list, max_length=16)
+    scenario: str | None = None
+    limit: int = Field(default=5, ge=2, le=10)
+    supported: bool = True
+    unsupported_reason: str | None = None
+    planner: str = "rule_based"
+    fallback_reason: str | None = None
+
+
 class CatalogQueryPlanner(Protocol):
     async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         ...
 
-    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
+    async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
         ...
 
 
@@ -191,14 +206,14 @@ class RuleBasedCatalogQueryPlanner:
             unsupported_reason=unsupported_reason,
         )
 
-    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
+    async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
         parsed = build_product_search(request.query)
         unsupported_reason = _unsupported_reason(request.query)
-        return ProductQueryPlan(
+        return CatalogComparePlan(
             query=request.query,
             category=parsed.category,
-            max_price=parsed.max_price,
-            filters=parsed.filters,
+            items=_product_terms(request.query),
+            comparison_fields=_comparison_fields_from_query(request.query),
             limit=request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
@@ -225,13 +240,28 @@ class LLMCatalogQueryPlanner:
             },
         )
 
-    async def plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
-        return await self._plan(
-            task="compare",
-            query=request.query,
-            limit=request.limit,
-            overrides={},
+    async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
+        response = await self.chat_model.ainvoke(
+            [
+                SystemMessage(content=_catalog_compare_planner_system_prompt()),
+                HumanMessage(
+                    content=json.dumps(
+                        {
+                            "task": "compare",
+                            "query": request.query,
+                            "limit": request.limit,
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            ]
         )
+        plan_data = _extract_json_object(_message_content_to_text(response.content))
+        plan_data["query"] = request.query
+        plan_data["limit"] = request.limit
+        plan = CatalogComparePlan.model_validate(plan_data)
+        plan.planner = "llm"
+        return plan
 
     async def _plan(
         self,
@@ -296,13 +326,17 @@ class CatalogToolService:
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
-        products = (
-            await self._products_by_sku_ids(request.sku_ids)
-            if request.sku_ids
-            else await self._products_from_compare_query(request)
-        )
+        compare_plan = None
+        if request.sku_ids:
+            products = await self._products_by_sku_ids(request.sku_ids)
+        else:
+            products, compare_plan = await self._products_from_compare_query(request)
         products = products[: request.limit]
-        fields = _comparison_fields(products)
+        fields = (
+            compare_plan.comparison_fields
+            if compare_plan and compare_plan.comparison_fields
+            else _comparison_fields(products)
+        )
         return CatalogCompareOutput(
             result_type="comparison" if products else "empty",
             products=[_to_comparison_item(product) for product in products],
@@ -312,22 +346,24 @@ class CatalogToolService:
                 "mode": "direct_sku_ids" if request.sku_ids else "natural_language",
                 "sku_ids": request.sku_ids,
                 "query": request.query,
+                "compare_plan": compare_plan.model_dump(mode="json") if compare_plan else None,
             },
         )
 
     async def _products_from_compare_query(
         self, request: CatalogCompareInput
-    ) -> list[ProductCard]:
+    ) -> tuple[list[ProductCard], CatalogComparePlan]:
         plan = await self._safe_plan_compare(request)
         if not plan.supported:
-            return []
+            return [], plan
+        search_plan = _compare_plan_to_product_query_plan(plan)
         products = await CatalogRepository(self.session).search_products(
-            _plan_to_product_search(plan)
+            _plan_to_product_search(search_plan)
         )
         products = _filter_brands(products, plan.brands)
-        wanted_terms = _product_terms(request.query)
+        wanted_terms = plan.items or _product_terms(request.query)
         if not wanted_terms:
-            return products
+            return products, plan
         ranked = sorted(
             products,
             key=lambda product: (
@@ -339,7 +375,7 @@ class CatalogToolService:
         matched = [
             product for product in ranked if _compare_term_score(product, wanted_terms) > 0
         ]
-        return matched or ranked
+        return matched or ranked, plan
 
     async def _products_by_sku_ids(self, sku_ids: list[int]) -> list[ProductCard]:
         if not sku_ids:
@@ -382,14 +418,14 @@ class CatalogToolService:
             fallback.fallback_reason = str(exc)
             return validate_product_query_plan(fallback)
 
-    async def _safe_plan_compare(self, request: CatalogCompareInput) -> ProductQueryPlan:
+    async def _safe_plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
         try:
-            return validate_product_query_plan(await self.planner.plan_compare(request))
+            return validate_catalog_compare_plan(await self.planner.plan_compare(request))
         except (ValidationError, ValueError, TypeError) as exc:
             fallback = await RuleBasedCatalogQueryPlanner().plan_compare(request)
             fallback.planner = "rule_based_fallback"
             fallback.fallback_reason = str(exc)
-            return validate_product_query_plan(fallback)
+            return validate_catalog_compare_plan(fallback)
 
 
 def validate_catalog_sql(sql: str) -> None:
@@ -462,6 +498,35 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     return plan
 
 
+def validate_catalog_compare_plan(plan: CatalogComparePlan | dict) -> CatalogComparePlan:
+    if isinstance(plan, dict):
+        plan = CatalogComparePlan.model_validate(plan)
+
+    if plan.category and plan.category.lower() not in ALLOWED_CATEGORIES:
+        raise ValueError(f"unsupported category: {plan.category}")
+
+    allowed_fields = BASE_COMPARISON_FIELDS | ALLOWED_FILTERS
+    unknown_fields = {
+        field for field in plan.comparison_fields if field.lower() not in allowed_fields
+    }
+    if unknown_fields:
+        raise ValueError(f"unsupported comparison fields: {', '.join(sorted(unknown_fields))}")
+
+    if plan.limit < 2 or plan.limit > 10:
+        raise ValueError("catalog compare limit must be between 2 and 10")
+
+    if reason := _unsupported_reason(plan.query):
+        plan.supported = False
+        plan.unsupported_reason = plan.unsupported_reason or reason
+
+    plan.items = [item.strip() for item in plan.items if item.strip()]
+    plan.brands = [brand.strip() for brand in plan.brands if brand.strip()]
+    plan.comparison_fields = _dedupe_keep_order(
+        [field.lower() for field in plan.comparison_fields if field.strip()]
+    )
+    return plan
+
+
 def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
     if plan.planner.startswith("rule_based"):
         query_parts = [plan.query, *plan.keywords]
@@ -477,6 +542,20 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         max_price=plan.max_price,
         filters=plan.filters,
         limit=plan.limit,
+    )
+
+
+def _compare_plan_to_product_query_plan(plan: CatalogComparePlan) -> ProductQueryPlan:
+    return ProductQueryPlan(
+        query=plan.query,
+        category=plan.category,
+        brands=plan.brands,
+        keywords=plan.items + ([plan.scenario] if plan.scenario else []),
+        limit=plan.limit,
+        supported=plan.supported,
+        unsupported_reason=plan.unsupported_reason,
+        planner=plan.planner,
+        fallback_reason=plan.fallback_reason,
     )
 
 
@@ -573,6 +652,35 @@ statistics. Otherwise set supported=true.
 """.strip()
 
 
+def _catalog_compare_planner_system_prompt() -> str:
+    return """
+You are a catalog comparison planner for a PC peripherals ecommerce support agent.
+Return exactly one JSON object. Do not return markdown. Do not write SQL.
+
+Allowed JSON fields:
+- category: one of mouse, keyboard, headset, monitor, speaker, webcam, or null
+- items: array of product names, model names, or distinguishing terms to compare
+- brands: array of brand names, max 8
+- comparison_fields: array of facts to compare
+- scenario: short usage scenario string or null
+- supported: boolean
+- unsupported_reason: string or null
+
+Allowed comparison fields:
+price, stock, brand, category, sales_count, backlit, channels, color,
+connection_type, enclosure_type, field_of_view, frame_rate, frequency_response,
+hand_orientation, max_dpi, microphone, panel_type, power_w, refresh_rate,
+resolution, response_time_ms, size_inch, style, switches, tenkeyless,
+tracking_method, type, weight_g, wireless.
+
+For FPS mouse comparisons, prefer fields: price, stock, sales_count,
+connection_type, max_dpi, weight_g, hand_orientation.
+
+Set supported=false when the user asks for analytics not available in catalog
+tables, such as time-series growth, revenue, profit, or user purchase statistics.
+""".strip()
+
+
 def _extract_json_object(text: str) -> dict:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -623,6 +731,38 @@ def _json_safe(data: dict) -> dict:
     return json.loads(json.dumps(data, default=str))
 
 
+def _comparison_fields_from_query(query: str) -> list[str]:
+    lowered = query.lower()
+    fields: list[str] = []
+    if any(term in lowered for term in {"dpi", "sensor"}):
+        fields.append("max_dpi")
+    if any(term in lowered for term in {"weight", "light", "轻"}):
+        fields.append("weight_g")
+    if any(term in lowered for term in {"wireless", "wired", "无线", "有线"}):
+        fields.extend(["connection_type", "wireless"])
+    if any(term in lowered for term in {"switch", "axis", "轴"}):
+        fields.append("switches")
+    if any(term in lowered for term in {"refresh", "hz", "刷新"}):
+        fields.append("refresh_rate")
+    if any(term in lowered for term in {"resolution", "2k", "4k", "分辨率"}):
+        fields.append("resolution")
+    if any(term in lowered for term in {"mic", "microphone", "麦克风"}):
+        fields.append("microphone")
+    if "fps" in lowered:
+        fields.extend(["price", "stock", "sales_count", "connection_type", "max_dpi", "weight_g"])
+    return _dedupe_keep_order(fields)
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen = set()
+    deduped: list[str] = []
+    for item in items:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
 def _to_comparison_item(product: ProductCard) -> ProductComparisonItem:
     return ProductComparisonItem(**product.model_dump(mode="python"))
 
@@ -643,10 +783,13 @@ def _comparison_fields(products: list[ProductCard]) -> list[str]:
 
 
 def _missing_fields(products: list[ProductCard], fields: list[str]) -> dict[int, list[str]]:
+    def is_missing(product: ProductCard, field: str) -> bool:
+        return field not in BASE_COMPARISON_FIELDS and field not in product.specs
+
     return {
-        product.sku_id: [field for field in fields if field not in product.specs]
+        product.sku_id: [field for field in fields if is_missing(product, field)]
         for product in products
-        if any(field not in product.specs for field in fields)
+        if any(is_missing(product, field) for field in fields)
     }
 
 

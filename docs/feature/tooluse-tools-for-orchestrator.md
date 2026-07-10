@@ -207,7 +207,9 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 边界：
 
 - Tool 只返回事实依据，不做最终购买承诺。
-- 当前对比对象识别是简单规则版，后续可增强为 LLM comparison planner。
+- 当前自然语言路径会生成 `CatalogComparePlan`，识别候选对象、品牌、类目、对比字段和使用场景。
+- 已提供 LLM compare planner 可注入实现；默认仍可 fallback 到规则 planner。
+- 对比字段会经过白名单校验，只允许基础字段和商品规格白名单字段。
 - 无结果时返回 `result_type = "empty"`。
 
 ## order.lookup

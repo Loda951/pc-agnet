@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.catalog import (
+    CatalogComparePlan,
     CatalogToolService,
     LLMCatalogQueryPlanner,
     ProductQueryPlan,
@@ -16,7 +17,7 @@ from app.tools.knowledge import (
     KnowledgeVectorIndexChunk,
 )
 from app.tools.registry import build_tool_registry
-from app.tools.schemas import CatalogSearchInput, DocumentSearchInput
+from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
 
 
 class FakeEmbeddingProvider:
@@ -80,10 +81,11 @@ class FakeCatalogPlanner:
         )
 
     async def plan_compare(self, request):
-        return ProductQueryPlan(
+        return CatalogComparePlan(
             query=request.query,
             category="mouse",
-            keywords=["G502", "Viper"],
+            items=["G502", "Viper"],
+            comparison_fields=["price", "stock", "max_dpi", "weight_g", "connection_type"],
             limit=request.limit,
             planner="fake",
         )
@@ -277,6 +279,54 @@ async def test_catalog_compare_resolves_natural_language_candidates(
     assert "Logitech Codex G502 Hero Black" in titles
     assert "Razer Codex Viper V3 Pro White" in titles
     assert result.output["comparison_fields"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_compare_uses_compare_plan_fields(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session, planner=FakeCatalogPlanner()).compare(
+            CatalogCompareInput(query="Compare G502 and Viper for FPS", limit=5)
+        )
+
+    assert result.result_type == "comparison"
+    assert result.query_plan["compare_plan"]["planner"] == "fake"
+    assert result.comparison_fields == [
+        "price",
+        "stock",
+        "max_dpi",
+        "weight_g",
+        "connection_type",
+    ]
+    assert result.products
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_compare_planner_parses_guarded_json() -> None:
+    chat = FakeChatModel(
+        """
+        {
+          "category": "mouse",
+          "items": ["G502", "Viper"],
+          "brands": ["Logitech", "Razer"],
+          "comparison_fields": ["price", "stock", "max_dpi", "weight_g"],
+          "scenario": "FPS",
+          "supported": true,
+          "unsupported_reason": null
+        }
+        """
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_compare(
+        CatalogCompareInput(query="Compare G502 and Viper for FPS", limit=5)
+    )
+
+    assert plan.planner == "llm"
+    assert plan.items == ["G502", "Viper"]
+    assert plan.brands == ["Logitech", "Razer"]
+    assert plan.comparison_fields == ["price", "stock", "max_dpi", "weight_g"]
 
 
 @pytest.mark.asyncio
