@@ -80,7 +80,7 @@ class CatalogRepository:
             .join(Brand, Spu.brand_id == Brand.id)
             .join(Category, Spu.category_id == Category.id)
             .where(Sku.status == 1, Spu.status == 1)
-            .order_by(Sku.stock.desc(), Sku.price.asc())
+            .order_by(Spu.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
             .limit(_candidate_limit(request.limit))
         )
         query_tokens = _query_tokens(request.query)
@@ -124,6 +124,7 @@ class CatalogRepository:
                 category=category.name,
                 price=Decimal(sku.price),
                 stock=sku.stock,
+                sales_count=spu.sales_count,
                 specs=specs,
                 image_url=sku.image_url,
             )
@@ -136,6 +137,7 @@ class CatalogRepository:
         ranked_products.sort(
             key=lambda item: (
                 -item[0],
+                -item[1].sales_count,
                 0 if item[1].stock > 0 else 1,
                 item[1].price,
                 item[1].title,

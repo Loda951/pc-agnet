@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import MemoryFact
+from app.models import AppUser, MemoryFact
 from app.repositories.conversations import ConversationRepository, utc_now_naive
 from app.services.memory import MemoryService
 
@@ -40,6 +40,14 @@ async def test_list_memory_filters_disabled_expired_and_other_users(
 ) -> None:
     now = utc_now_naive()
     async with db_session_factory() as session:
+        session.add(
+            AppUser(
+                id=2,
+                login_identifier="other-memory-user@example.com",
+                display_name="Other Memory User",
+                status="active",
+            )
+        )
         session.add_all(
             [
                 MemoryFact(
