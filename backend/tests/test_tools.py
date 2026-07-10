@@ -300,6 +300,10 @@ async def test_catalog_compare_uses_compare_plan_fields(
         "connection_type",
     ]
     assert result.products
+    brands = {product.brand for product in result.products}
+    assert {"Logitech", "Razer"} <= brands
+    assert sum(1 for product in result.products if product.brand == "Logitech") >= 1
+    assert sum(1 for product in result.products if product.brand == "Razer") >= 1
 
 
 @pytest.mark.asyncio

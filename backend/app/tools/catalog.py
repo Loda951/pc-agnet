@@ -356,11 +356,7 @@ class CatalogToolService:
         plan = await self._safe_plan_compare(request)
         if not plan.supported:
             return [], plan
-        search_plan = _compare_plan_to_product_query_plan(plan)
-        products = await CatalogRepository(self.session).search_products(
-            _plan_to_product_search(search_plan)
-        )
-        products = _filter_brands(products, plan.brands)
+        products = await self._compare_candidates_from_plan(plan)
         wanted_terms = plan.items or _product_terms(request.query)
         if not wanted_terms:
             return products, plan
@@ -376,6 +372,57 @@ class CatalogToolService:
             product for product in ranked if _compare_term_score(product, wanted_terms) > 0
         ]
         return matched or ranked, plan
+
+    async def _compare_candidates_from_plan(
+        self,
+        plan: CatalogComparePlan,
+    ) -> list[ProductCard]:
+        if not plan.items:
+            search_plan = _compare_plan_to_product_query_plan(plan)
+            products = await CatalogRepository(self.session).search_products(
+                _plan_to_product_search(search_plan)
+            )
+            return _filter_brands(products, plan.brands)
+
+        candidates: list[ProductCard] = []
+        seen_sku_ids: set[int] = set()
+        per_item_limit = max(1, min(3, (plan.limit + len(plan.items) - 1) // len(plan.items)))
+        for item in plan.items:
+            item_brands = _brands_for_item(item, plan.brands) or plan.brands
+            item_plan = ProductQueryPlan(
+                query=item,
+                category=plan.category,
+                brands=item_brands,
+                keywords=[item],
+                limit=per_item_limit,
+                supported=plan.supported,
+                unsupported_reason=plan.unsupported_reason,
+                planner=plan.planner,
+                fallback_reason=plan.fallback_reason,
+            )
+            products = await CatalogRepository(self.session).search_products(
+                _plan_to_product_search(item_plan)
+            )
+            products = _filter_brands(products, item_brands)
+            ranked = sorted(
+                products,
+                key=lambda product: (
+                    -_compare_term_score(product, [item]),
+                    -product.sales_count,
+                    0 if product.stock > 0 else 1,
+                    product.price,
+                    product.title,
+                ),
+            )
+            matched = [
+                product for product in ranked if _compare_term_score(product, [item]) > 0
+            ]
+            for product in (matched or ranked)[:per_item_limit]:
+                if product.sku_id in seen_sku_ids:
+                    continue
+                candidates.append(product)
+                seen_sku_ids.add(product.sku_id)
+        return candidates
 
     async def _products_by_sku_ids(self, sku_ids: list[int]) -> list[ProductCard]:
         if not sku_ids:
@@ -809,3 +856,8 @@ def _compare_term_score(product: ProductCard, terms: list[str]) -> int:
         ]
     ).lower()
     return sum(1 for term in terms if term in haystack)
+
+
+def _brands_for_item(item: str, brands: list[str]) -> list[str]:
+    item_lower = item.lower()
+    return [brand for brand in brands if brand.lower() in item_lower]
