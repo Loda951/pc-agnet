@@ -4,7 +4,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.catalog import validate_catalog_sql
+from app.tools.knowledge import KnowledgeKeywordToolService
 from app.tools.registry import build_tool_registry
+from app.tools.schemas import DocumentSearchInput
 
 
 @pytest.mark.asyncio
@@ -91,31 +93,46 @@ async def test_order_lookup_returns_candidates_or_single_order_with_user_isolati
 
 
 @pytest.mark.asyncio
-async def test_policy_and_knowledge_search_use_keyword_bm25(
-    db_session_factory: Callable[[], AsyncSession],
-) -> None:
-    async with db_session_factory() as session:
-        registry = build_tool_registry(session)
-        policy = await registry.execute("policy.search", {"query": "return", "limit": 3})
-        knowledge = await registry.execute(
-            "knowledge.search",
-            {"query": "peripheral_knowledge", "limit": 3},
-        )
+async def test_policy_and_knowledge_search_support_hybrid_retrieval() -> None:
+    service = KnowledgeKeywordToolService()
+    policy = await service.search_policy(DocumentSearchInput(query="return refund", limit=3))
+    knowledge = await service.search_knowledge(
+        DocumentSearchInput(query="Logitech Razer brand", limit=3)
+    )
 
-    assert policy.ok
-    assert policy.output is not None
-    assert policy.output["result_type"] == "documents"
-    assert policy.output["documents"][0]["document_type"] in {"policy", "store_rule", "faq"}
+    assert policy.result_type == "documents"
+    assert policy.search_strategy == "hybrid"
+    assert policy.documents[0].document_type in {"policy", "store_rule", "faq"}
+    assert "retrieval_debug" in policy.documents[0].metadata
 
-    assert knowledge.ok
-    assert knowledge.output is not None
-    assert knowledge.output["result_type"] == "documents"
-    assert knowledge.output["documents"][0]["document_type"] in {
+    assert knowledge.result_type == "documents"
+    assert knowledge.search_strategy == "hybrid"
+    assert knowledge.documents[0].document_type in {
         "brand",
         "peripheral_knowledge",
         "faq",
         "store_rule",
     }
+    assert any(document.document_type == "brand" for document in knowledge.documents)
+
+
+@pytest.mark.asyncio
+async def test_document_search_can_select_retrieval_mode() -> None:
+    service = KnowledgeKeywordToolService()
+    bm25 = await service.search_knowledge(
+        DocumentSearchInput(query="keyboard magnetic switch", retrieval_mode="bm25", limit=3)
+    )
+    keyword = await service.search_knowledge(
+        DocumentSearchInput(query="Wooting", retrieval_mode="keyword", limit=3)
+    )
+
+    assert bm25.search_strategy == "bm25"
+    assert bm25.result_type == "documents"
+    assert bm25.documents[0].score > 0
+
+    assert keyword.search_strategy == "keyword"
+    assert keyword.result_type == "documents"
+    assert keyword.documents[0].metadata["retrieval_debug"]["keyword_score"] > 0
 
 
 @pytest.mark.asyncio

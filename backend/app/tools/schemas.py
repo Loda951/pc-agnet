@@ -90,6 +90,7 @@ class DocumentSearchInput(BaseModel):
     query: str = Field(min_length=1)
     document_type: str | None = None
     limit: int = Field(default=3, ge=1, le=10)
+    retrieval_mode: Literal["bm25", "keyword", "hybrid"] = "hybrid"
 
 
 class DocumentSearchHit(BaseModel):
@@ -105,4 +106,4 @@ class DocumentSearchHit(BaseModel):
 class DocumentSearchOutput(BaseModel):
     result_type: Literal["documents", "empty"]
     documents: list[DocumentSearchHit] = Field(default_factory=list)
-    search_strategy: Literal["bm25_keyword"] = "bm25_keyword"
+    search_strategy: Literal["bm25", "keyword", "hybrid"] = "hybrid"

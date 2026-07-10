@@ -80,7 +80,7 @@ def build_tool_registry(session: AsyncSession) -> ToolRegistry:
     registry = ToolRegistry()
     catalog = CatalogToolService(session)
     orders = OrderToolService(session)
-    knowledge = KnowledgeKeywordToolService(session)
+    knowledge = KnowledgeKeywordToolService()
 
     registry.register(
         "catalog.search",
