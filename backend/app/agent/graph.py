@@ -470,52 +470,6 @@ class AgentRuntime:
         await self.session.commit()
         return state
 
-    async def _route_intent(self, state: AgentState) -> AgentState:
-        """Compatibility shim for older working-memory tests."""
-        message = state.get("message", "")
-        working_memory = state.get("working_memory", {}) or {}
-        parsed = dict(state.get("parsed", {}) or {})
-
-        recent_products = working_memory.get("recent_products") or []
-        if recent_products and _mentions_second_item(message) and len(recent_products) >= 2:
-            state["intent"] = "product_recommendation"
-            parsed["referenced_product"] = recent_products[1]
-            state["parsed"] = parsed
-            return state
-
-        current_search = working_memory.get("current_product_search")
-        if current_search:
-            search = dict(current_search)
-            filters = dict(search.get("filters", {}) or {})
-            if _mentions_wireless(message):
-                filters["connection_type"] = "Wireless"
-            search["filters"] = filters
-            parsed["product_search"] = search
-            state["intent"] = "product_recommendation"
-            state["parsed"] = parsed
-            return state
-
-        if working_memory.get("last_order_id") and _mentions_order(message):
-            state["intent"] = "order_status"
-            parsed["order_id"] = working_memory["last_order_id"]
-            state["parsed"] = parsed
-            return state
-
-        if working_memory.get("last_policy_query"):
-            state["intent"] = "after_sales"
-            state["parsed"] = parsed
-            return state
-
-        state["intent"] = classify_intent(message)
-        state["parsed"] = parsed
-        return state
-
-    def _suggest_actions(self, state: AgentState) -> list[dict[str, Any]]:
-        return _suggest_actions(state)
-
-    def _generate_fallback(self, state: AgentState) -> str:
-        return _fallback_answer(state)
-
     def _fallback_orchestrator_decision(self, state: AgentState) -> OrchestratorDecision:
         if state.get("tool_results"):
             return OrchestratorDecision(
@@ -643,37 +597,6 @@ def _orchestrator_messages(
     return messages
 
 
-def _llm_messages(
-    state: AgentState,
-) -> list[SystemMessage | HumanMessage | AIMessage | ToolMessage]:
-    messages = _orchestrator_messages(state, call_count=1)
-    working_memory = state.get("working_memory")
-    if working_memory and isinstance(messages[-1], HumanMessage):
-        messages[-1] = HumanMessage(
-            content=(
-                str(messages[-1].content)
-                + "\nworking_memory: "
-                + json.dumps(working_memory, ensure_ascii=False)
-            )
-        )
-    return messages
-
-
-
-def _mentions_wireless(message: str) -> bool:
-    lowered = message.lower()
-    return "wireless" in lowered or "\u65e0\u7ebf" in message
-
-
-def _mentions_order(message: str) -> bool:
-    lowered = message.lower()
-    return "order" in lowered or "\u8ba2\u5355" in message or "\u7269\u6d41" in message
-
-
-def _mentions_second_item(message: str) -> bool:
-    lowered = message.lower()
-    return "second" in lowered or "\u7b2c\u4e8c" in message or "\u7b2c2" in message
-
 def _tool_decision(name: str, arguments: dict[str, Any]) -> OrchestratorDecision:
     return OrchestratorDecision(
         type="tool_calls",
@@ -762,16 +685,6 @@ def _apply_tool_output(
 
 
 def _fallback_answer(state: AgentState) -> str:
-    referenced_product = state.get("parsed", {}).get("referenced_product")
-    if referenced_product:
-        specs = referenced_product.get("specs", {}) or {}
-        specs_text = "，".join(f"{key}: {value}" for key, value in list(specs.items())[:4])
-        suffix = f"，{specs_text}" if specs_text else ""
-        return (
-            f"{referenced_product.get('title')}：Â¥{referenced_product.get('price')}，"
-            f"库存 {referenced_product.get('stock')}{suffix}。"
-        )
-
     products = state.get("products", [])
     if products:
         lines = ["我根据商品目录找到了这些候选："]
@@ -844,10 +757,7 @@ def _is_identity_or_capability_question(message: str) -> bool:
 def _suggest_actions(state: AgentState) -> list[dict[str, Any]]:
     boundary = state["boundary"]["classification"]
     if boundary == "human_handoff_required":
-        payload = _handoff_payload(state["message"])
-        if payload.get("orderId") is None:
-            payload["orderId"] = (state.get("working_memory") or {}).get("last_order_id")
-        return [{"label": "\u8f6c\u4eba\u5de5\u5ba2\u670d", "payload": payload}]
+        return [{"label": "转人工客服", "payload": _handoff_payload(state["message"])}]
     if boundary == "out_of_scope":
         return [{"label": "咨询外设推荐", "payload": {"message": "推荐 300 元以内无线鼠标"}}]
     if state.get("products"):
