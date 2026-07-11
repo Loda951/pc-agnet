@@ -16,7 +16,7 @@ async def test_chat_recommends_real_dataset_wireless_mouse(
     assert response.status_code == 200
     payload = response.json()
     assert payload["boundary"]["classification"] == "in_scope_auto"
-    assert payload["intent"] == "product_recommendation"
+    assert payload["intent"] == "catalog_search"
     assert payload["products"][0]["title"] == "Razer Codex Viper V3 Pro White"
     assert "Wireless" in payload["products"][0]["specs"]["connection_type"]
     assert "兼容" in payload["answer"] or "适合" in payload["answer"]
@@ -36,7 +36,7 @@ async def test_chat_returns_rag_evidence_for_after_sales_policy(
     assert response.status_code == 200
     payload = response.json()
     assert payload["boundary"]["classification"] == "in_scope_auto"
-    assert payload["intent"] == "after_sales"
+    assert payload["intent"] == "policy_search"
     assert payload["evidence"][0]["title"] == "测试退货政策"
     assert "测试退货政策" in payload["answer"]
 

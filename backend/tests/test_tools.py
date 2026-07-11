@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.tools.catalog import (
     CatalogComparePlan,
     CatalogToolService,
@@ -19,6 +20,8 @@ from app.tools.knowledge import (
 )
 from app.tools.registry import build_catalog_planner, build_tool_registry
 from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
+
+TOOL_TEST_SETTINGS = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
 
 
 class FakeEmbeddingProvider:
@@ -120,7 +123,7 @@ async def test_tool_registry_exposes_expected_business_tools(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
     async with db_session_factory() as session:
-        registry = build_tool_registry(session)
+        registry = build_tool_registry(session, settings=TOOL_TEST_SETTINGS)
 
     assert registry.tool_names == [
         "catalog.compare",
@@ -136,7 +139,7 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
     async with db_session_factory() as session:
-        result = await build_tool_registry(session).execute(
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
             "catalog.search",
             {"query": "Codex wireless mouse", "limit": 3},
         )
@@ -301,7 +304,7 @@ async def test_catalog_compare_resolves_natural_language_candidates(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
     async with db_session_factory() as session:
-        result = await build_tool_registry(session).execute(
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
             "catalog.compare",
             {"query": "Compare Codex G502 and Viper for FPS", "limit": 5},
         )
@@ -371,7 +374,7 @@ async def test_order_lookup_returns_candidates_or_single_order_with_user_isolati
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
     async with db_session_factory() as session:
-        registry = build_tool_registry(session)
+        registry = build_tool_registry(session, settings=TOOL_TEST_SETTINGS)
         candidates = await registry.execute("order.lookup", {"user_id": 1, "limit": 5})
         single = await registry.execute(
             "order.lookup",
@@ -445,7 +448,7 @@ async def test_tool_registry_returns_stable_errors(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
     async with db_session_factory() as session:
-        registry = build_tool_registry(session)
+        registry = build_tool_registry(session, settings=TOOL_TEST_SETTINGS)
         unknown = await registry.execute("missing.tool", {})
         invalid = await registry.execute("catalog.search", {"limit": 3})
 

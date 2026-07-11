@@ -133,7 +133,6 @@ async def test_knowledge_service_filters_low_similarity_results() -> None:
 
 @pytest.mark.asyncio
 async def test_after_sales_fallback_answer_includes_knowledge_evidence() -> None:
-    boundary = classify_boundary("退货政策怎么走")
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     evidence = EvidenceItem(
         source_type="knowledge_document",
@@ -147,14 +146,20 @@ async def test_after_sales_fallback_answer_includes_knowledge_evidence() -> None
     state = {
         "message": "退货政策怎么走",
         "intent": "after_sales",
-        "boundary": boundary.model_dump(mode="json"),
+        "boundary": classify_boundary("退货政策怎么走").model_dump(mode="json"),
+        "decision": {
+            "type": "grounded_response",
+            "response": "",
+            "reason": "test",
+            "tool_calls": [],
+        },
         "parsed": {},
         "evidence": [evidence],
     }
 
-    result = await runtime._generate(state)
+    result = await runtime._finalize_response(state)
 
-    assert "售后政策依据" in result["answer"]
+    assert "知识库" in result["answer"]
     assert "七天无理由退货政策" in result["answer"]
     assert result["suggested_actions"] == []
 
