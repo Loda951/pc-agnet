@@ -1,3 +1,5 @@
+import asyncio
+import re
 from collections.abc import Callable
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ from app.tools.catalog import (
     validate_catalog_sql,
     validate_product_query_plan,
 )
+from app.tools.contracts import RegistryToolExecutor, StaticToolContractProvider
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
     KnowledgeVectorIndex,
@@ -132,6 +135,133 @@ async def test_tool_registry_exposes_expected_business_tools(
         "order.lookup",
         "policy.search",
     ]
+
+
+def test_tool_contracts_expose_llm_safe_metadata() -> None:
+    contracts = StaticToolContractProvider().list_contracts()
+    names = [contract.llm_name for contract in contracts]
+
+    assert names == [
+        "catalog_search",
+        "catalog_compare",
+        "order_lookup",
+        "policy_search",
+        "knowledge_search",
+    ]
+    assert len(set(names)) == len(names)
+    assert all(re.fullmatch(r"[a-zA-Z0-9_]+", name) for name in names)
+    assert all(contract.description for contract in contracts)
+    assert all(contract.read_only for contract in contracts)
+    assert not any(contract.parallel_safe for contract in contracts)
+
+    order_contract = StaticToolContractProvider().get_contract("order_lookup")
+    assert order_contract is not None
+    assert order_contract.requires_auth is True
+    assert order_contract.runtime_fields == ("user_id",)
+    assert order_contract.public_input_model.model_json_schema()["additionalProperties"] is False
+    assert "user_id" not in order_contract.public_input_model.model_json_schema()["properties"]
+
+
+def test_tool_contracts_export_public_llm_schemas_only() -> None:
+    contracts = StaticToolContractProvider().list_contracts()
+
+    for contract in contracts:
+        schema = contract.as_llm_tool()
+        assert schema["type"] == "function"
+        assert schema["function"]["name"] == contract.llm_name
+        assert schema["function"]["description"] == contract.description
+        parameters = schema["function"]["parameters"]
+        for runtime_field in contract.runtime_fields:
+            assert runtime_field not in parameters.get("properties", {})
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_executor_injects_runtime_and_rewrites_tool_name() -> None:
+    class CapturingRegistry:
+        def __init__(self):
+            self.input_data: dict | None = None
+
+        async def execute(self, name: str, input_data: dict):
+            self.input_data = input_data
+            return type(
+                "Result",
+                (),
+                {
+                    "tool_name": name,
+                    "ok": True,
+                    "output": {
+                        "result_type": "not_found",
+                        "order": None,
+                        "candidates": [],
+                    },
+                    "error": None,
+                },
+            )()
+
+    registry = CapturingRegistry()
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        registry=registry,  # type: ignore[arg-type]
+    )
+    contract = StaticToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
+
+    result = await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
+
+    assert result.ok
+    assert result.tool_name == "order_lookup"
+    assert registry.input_data == {"order_id": 42, "limit": 5, "user_id": 7}
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_executor_rejects_llm_supplied_runtime_field() -> None:
+    class NeverCalledRegistry:
+        async def execute(self, name: str, input_data: dict):  # pragma: no cover
+            raise AssertionError("registry should not be called")
+
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        registry=NeverCalledRegistry(),  # type: ignore[arg-type]
+    )
+    contract = StaticToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
+
+    result = await executor.execute(
+        contract,
+        {"order_id": 42, "user_id": 999},
+        {"user_id": 7},
+    )
+
+    assert not result.ok
+    assert result.tool_name == "order_lookup"
+    assert result.error is not None
+    assert result.error.code == "invalid_input"
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_executor_returns_timeout_error() -> None:
+    class SlowRegistry:
+        async def execute(self, name: str, input_data: dict):
+            await asyncio.sleep(0.05)
+            raise AssertionError("timeout should cancel before completion")
+
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        registry=SlowRegistry(),  # type: ignore[arg-type]
+    )
+    contract = StaticToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+    contract.timeout_seconds = 0.001
+
+    result = await executor.execute(contract, {"query": "wireless mouse"}, {"user_id": 7})
+
+    assert not result.ok
+    assert result.tool_name == "catalog_search"
+    assert result.error is not None
+    assert result.error.code == "timeout"
 
 
 @pytest.mark.asyncio
