@@ -37,7 +37,7 @@ def test_classifies_read_only_boundary(message: str, expected: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_handoff_answer_uses_boundary_message_without_auto_workflow() -> None:
+async def test_handoff_answer_uses_boundary_template() -> None:
     boundary = classify_boundary("帮我创建售后工单")
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     state = {
@@ -47,7 +47,7 @@ async def test_handoff_answer_uses_boundary_message_without_auto_workflow() -> N
         "parsed": {},
     }
 
-    result = await runtime._generate(state)
+    result = await runtime._render_handoff_template(state)
 
     assert result["answer"] == boundary.display_message
     assert result["suggested_actions"] == [
@@ -64,25 +64,18 @@ async def test_handoff_answer_uses_boundary_message_without_auto_workflow() -> N
 
 
 @pytest.mark.asyncio
-async def test_purchase_guidance_fallback_explains_read_only_order_flow() -> None:
-    boundary = classify_boundary("怎么下单购买键盘")
+async def test_purchase_guidance_direct_response_explains_read_only_order_flow() -> None:
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     state = {
         "message": "怎么下单购买键盘",
-        "intent": "purchase_guidance",
-        "boundary": boundary.model_dump(mode="json"),
-        "parsed": {},
-        "evidence": [],
+        "tool_results": [],
     }
 
-    result = await runtime._generate(state)
+    decision = runtime._fallback_orchestrator_decision(state)
 
-    assert result["answer"].startswith("下单流程可以按这几步走")
-    assert "我不能在聊天里替你提交订单或完成支付" in result["answer"]
-    assert result["suggested_actions"] == [
-        {"label": "继续选购外设", "payload": {"message": "推荐 300 元以内无线鼠标"}},
-        {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},
-    ]
+    assert decision.type == "direct_response"
+    assert decision.response.startswith("下单流程可以按这几步走")
+    assert "我不能在聊天中替你提交订单或完成支付" in decision.response
 
 
 @pytest.mark.asyncio

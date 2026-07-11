@@ -59,6 +59,16 @@ async def test_user_b_cannot_read_user_a_orders_conversations_memory_or_handoff_
                 password_hash=PasswordHasher.hash_password(user_b_password),
             )
         )
+        session.add(
+            MemoryFact(
+                user_id=1,
+                scope="user",
+                fact_type="preference",
+                key="test_isolation_preference",
+                value="wireless",
+                confidence=0.9,
+            )
+        )
         await session.commit()
         user_b_id = user_b.id
 

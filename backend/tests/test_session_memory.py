@@ -3,13 +3,13 @@ from typing import cast
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.graph import AgentRuntime, _llm_messages
+from app.agent.graph import AgentRuntime, _orchestrator_messages
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.repositories.conversations import ConversationRepository
 
 
-def test_llm_messages_include_session_history_before_current_context() -> None:
+def test_orchestrator_messages_include_session_history_before_current_request() -> None:
     state = cast(
         AgentState,
         {
@@ -40,15 +40,15 @@ def test_llm_messages_include_session_history_before_current_context() -> None:
         },
     )
 
-    messages = _llm_messages(state)
+    messages = _orchestrator_messages(state, call_count=1)
 
     assert isinstance(messages[1], HumanMessage)
     assert messages[1].content == state["history"][0]["content"]
     assert isinstance(messages[2], AIMessage)
     assert messages[2].content == state["history"][1]["content"]
     assert isinstance(messages[3], HumanMessage)
-    assert "用户问题：给我下这个一来一回标准的 json 格式" in messages[3].content
-    assert "检索上下文：" in messages[3].content
+    assert "给我下这个一来一回标准的 json 格式" in messages[3].content
+    assert '"current_orchestrator_call": 1' in messages[3].content
 
 
 @pytest.mark.asyncio
@@ -78,3 +78,40 @@ async def test_load_context_reads_existing_conversation_messages_as_session_hist
         {"role": "user", "content": "上一轮用户问题"},
         {"role": "assistant", "content": "上一轮助手回答"},
     ]
+    assert "working_memory" not in state
+    assert "memory" not in state
+
+
+@pytest.mark.asyncio
+async def test_load_context_only_reads_six_most_recent_messages(
+    db_session_factory,
+) -> None:
+    async with db_session_factory() as session:
+        repo = ConversationRepository(session)
+        conversation = await repo.get_or_create(1, None)
+        for index in range(7):
+            role = "user" if index % 2 == 0 else "assistant"
+            await repo.add_message(conversation.id, role, f"历史消息 {index}")
+        await session.commit()
+
+        runtime = AgentRuntime(session, Settings(llm_api_key=""))
+        state = await runtime._load_context(
+            cast(
+                AgentState,
+                {
+                    "user_id": 1,
+                    "conversation_id": conversation.id,
+                    "message": "当前用户输入",
+                },
+            )
+        )
+
+    assert state["history"] == [
+        {"role": "assistant", "content": "历史消息 1"},
+        {"role": "user", "content": "历史消息 2"},
+        {"role": "assistant", "content": "历史消息 3"},
+        {"role": "user", "content": "历史消息 4"},
+        {"role": "assistant", "content": "历史消息 5"},
+        {"role": "user", "content": "历史消息 6"},
+    ]
+    assert all(item["content"] != "当前用户输入" for item in state["history"])

@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.agent.graph import AgentRuntime
+from app.agent.tooling import RegistryToolExecutor, ToolContract
 from app.api.routers import chat as chat_router
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.main import app
 from app.schemas.chat import EvidenceItem
 from app.services.dataset_mapper import normalize_part_record
+from app.tools.schemas import ToolExecutionResult
 from scripts.seed_demo import (
     DEMO_LOGIN_IDENTIFIER,
     DEMO_PASSWORD,
@@ -110,7 +112,36 @@ class FakeKnowledgeService:
 
 class RuntimeWithFakeKnowledge(AgentRuntime):
     def __init__(self, session: AsyncSession, settings: Settings):
-        super().__init__(session, settings, knowledge_service=FakeKnowledgeService())
+        super().__init__(
+            session,
+            settings,
+            tool_executor=TestToolExecutor(session, settings),
+        )
+
+
+class TestToolExecutor:
+    def __init__(self, session: AsyncSession, settings: Settings):
+        self.registry_executor = RegistryToolExecutor(session, settings)
+        self.knowledge = FakeKnowledgeService()
+
+    async def execute(
+        self,
+        contract: ToolContract,
+        arguments: dict,
+        runtime_context: dict,
+    ) -> ToolExecutionResult:
+        if contract.name == "policy_search":
+            evidence = await self.knowledge.retrieve(str(arguments["query"]))
+            return ToolExecutionResult(
+                tool_name=contract.name,
+                ok=True,
+                output={
+                    "result_type": "documents" if evidence else "empty",
+                    "documents": [item.model_dump(mode="json") for item in evidence],
+                    "search_strategy": "test",
+                },
+            )
+        return await self.registry_executor.execute(contract, arguments, runtime_context)
 
 
 @pytest.fixture

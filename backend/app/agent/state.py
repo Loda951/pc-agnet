@@ -12,11 +12,16 @@ class AgentState(TypedDict, total=False):
     run_id: int
     message: str
     intent: str
+    decision: dict[str, Any]
+    orchestrator_call_count: int
+    tool_wave_count: int
+    tool_waves: list[dict[str, Any]]
+    tool_results: list[dict[str, Any]]
+    decision_header_streamed: bool
+    response_streamed: bool
     boundary: dict[str, Any]
     parsed: dict[str, Any]
     history: list[dict[str, str]]
-    memory: list[dict[str, Any]]
-    working_memory: dict[str, Any]
     evidence: list[EvidenceItem]
     products: list[ProductCard]
     order: OrderCard | None
