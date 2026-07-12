@@ -10,6 +10,8 @@ from app.schemas.order import OrderCard
 class ToolError(BaseModel):
     code: str
     message: str
+    retryable: bool = False
+    recommended_action: str = "stop"
 
 
 class ToolExecutionResult(BaseModel):

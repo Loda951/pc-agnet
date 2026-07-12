@@ -27,6 +27,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 - `catalog.search`
 - `catalog.compare`
+- `catalog.facets`
 - `order.lookup`
 - `policy.search`
 - `knowledge.search`
@@ -51,10 +52,23 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
   "output": null,
   "error": {
     "code": "unknown_tool",
-    "message": "unknown tool: missing.tool"
+    "message": "unknown tool",
+    "retryable": false,
+    "recommended_action": "stop"
   }
 }
 ```
+
+Stable error codes exposed to orchestrator:
+
+- `unknown_tool`: no retry, `recommended_action=stop`.
+- `invalid_input`: argument validation failed, retryable via `recommended_action=replan_arguments`.
+- `unauthorized`: missing authenticated runtime context, `recommended_action=request_authentication`.
+- `forbidden`: explicitly forbidden, no retry, `recommended_action=stop`.
+- `timeout`: tool execution timed out, retryable via `recommended_action=retry_once`.
+- `dependency_unavailable`: PostgreSQL, embedding, or local index dependency unavailable, `recommended_action=explain_temporary_unavailability`.
+- `execution_error`: unclassified internal failure, no Python exception class, connection string, local path, secret, or stack trace is exposed, `recommended_action=stop`.
+
 
 ## catalog.search
 
@@ -598,3 +612,27 @@ Registry name：`catalog.facets`
 - 如果用户要两个商品事实对比，使用 `catalog.compare`。
 - 不走 LLM，不生成 SQL；由 SQLAlchemy 查询 PostgreSQL 后聚合。
 
+## 交付同步信息：Contract / Registry / Handler 收口
+
+- 已将 `ToolContract + handler` 统一到 `BoundTool` / `ToolCatalog`，位置：`backend/app/tools/contracts.py`。
+- Provider 和 Executor 都从同一个 `ToolCatalog` 派生：`DefaultToolContractProvider` 导出 contract/schema，`RegistryToolExecutor` 解析并执行 `BoundTool`。
+- `llm_name` 和 `registry_name` 继续分属两个命名空间，例如 `catalog_search` 和 `catalog.search`；映射只在 `ToolContract` 中定义一次。
+- `ToolCatalog` 构建时会校验 `llm_name` 唯一、`registry_name` 唯一、handler 存在、handler 输入模型匹配、handler 输出模型匹配。
+- handler 成功输出会在 executor 边界通过 `contract.output_model` 二次校验；业务空结果、`not_found`、`unsupported_query` 都保持 `ok=true`，不和系统错误混同。
+- 依赖异常映射：SQLAlchemy 异常和本地文件/索引 `OSError` 映射为 `dependency_unavailable`；超时映射为 `timeout`；未知异常统一映射为 `execution_error`。
+- 当前没有 tool 验证为可并行执行，全部保持 `parallel_safe=False`；原因是 PostgreSQL tools 共享当前 SQLAlchemy `AsyncSession`。
+
+当前验收命令：
+
+```bash
+cd backend
+.venv/bin/pytest
+.venv/bin/ruff check .
+```
+
+当前验收结果：
+
+```text
+109 passed
+All checks passed
+```
