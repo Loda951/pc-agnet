@@ -612,17 +612,17 @@ Registry name：`catalog.facets`
 - 如果用户要两个商品事实对比，使用 `catalog.compare`。
 - 不走 LLM，不生成 SQL；由 SQLAlchemy 查询 PostgreSQL 后聚合。
 
-## Delivery Notes: Contract / Registry / Handler Convergence
+## 交付同步信息：Contract / Registry / Handler 收口
 
-- `ToolContract + handler` is now represented by a single source of truth: `BoundTool` and `ToolCatalog` in `backend/app/tools/contracts.py`.
-- `DefaultToolContractProvider` derives LLM-facing contracts and schemas from the same `ToolCatalog`; `RegistryToolExecutor` resolves and executes `BoundTool` from that same catalog.
-- `llm_name` and `registry_name` remain separate namespaces, for example `catalog_search` and `catalog.search`; the mapping is defined once on `ToolContract`.
-- `ToolCatalog` validates `llm_name` uniqueness, `registry_name` uniqueness, handler presence, handler input annotation alignment with `contract.internal_input_model`, and handler return annotation alignment with `contract.output_model` at construction time.
-- Handler success outputs are validated again with `contract.output_model` at the executor boundary. Business empty results, `not_found`, and `unsupported_query` remain `ok=true` business outputs and are not mixed with system failures.
-- Dependency mapping: SQLAlchemy failures and local file/index `OSError` map to `dependency_unavailable`; timeout maps to `timeout`; unknown exceptions map to `execution_error` with a safe external message.
-- No tool has been verified as parallel-safe in this iteration. All tools remain `parallel_safe=False` because PostgreSQL tools share the current SQLAlchemy `AsyncSession`.
+- 已将 `ToolContract + handler` 统一到 `BoundTool` / `ToolCatalog`，位置：`backend/app/tools/contracts.py`。
+- Provider 和 Executor 都从同一个 `ToolCatalog` 派生：`DefaultToolContractProvider` 导出 contract/schema，`RegistryToolExecutor` 解析并执行 `BoundTool`。
+- `llm_name` 和 `registry_name` 继续分属两个命名空间，例如 `catalog_search` 和 `catalog.search`；映射只在 `ToolContract` 中定义一次。
+- `ToolCatalog` 构建时会校验 `llm_name` 唯一、`registry_name` 唯一、handler 存在、handler 输入模型匹配、handler 输出模型匹配。
+- handler 成功输出会在 executor 边界通过 `contract.output_model` 二次校验；业务空结果、`not_found`、`unsupported_query` 都保持 `ok=true`，不和系统错误混同。
+- 依赖异常映射：SQLAlchemy 异常和本地文件/索引 `OSError` 映射为 `dependency_unavailable`；超时映射为 `timeout`；未知异常统一映射为 `execution_error`。
+- 当前没有 tool 验证为可并行执行，全部保持 `parallel_safe=False`；原因是 PostgreSQL tools 共享当前 SQLAlchemy `AsyncSession`。
 
-Current acceptance commands:
+当前验收命令：
 
 ```bash
 cd backend
@@ -630,7 +630,7 @@ cd backend
 .venv/bin/ruff check .
 ```
 
-Current acceptance result:
+当前验收结果：
 
 ```text
 109 passed
