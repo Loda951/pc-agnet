@@ -11,6 +11,7 @@ from app.tools.knowledge import KnowledgeRetrievalToolService
 from app.tools.orders import OrderToolService
 from app.tools.schemas import (
     CatalogCompareInput,
+    CatalogFacetInput,
     CatalogSearchInput,
     DocumentSearchInput,
     OrderLookupInput,
@@ -68,8 +69,8 @@ class ToolRegistry:
 
         try:
             output = await tool.handler(request)
-        except Exception as exc:  # pragma: no cover - defensive boundary for orchestration
-            return _error_result(name, type(exc).__name__, str(exc))
+        except Exception:  # pragma: no cover - defensive boundary for orchestration
+            return _error_result(name, "execution_error", "tool execution failed")
 
         return ToolExecutionResult(
             tool_name=name,
@@ -112,6 +113,12 @@ def build_tool_registry(
         "catalog.compare",
         CatalogCompareInput,
         catalog.compare,  # type: ignore[arg-type]
+    )
+
+    registry.register(
+        "catalog.facets",
+        CatalogFacetInput,
+        catalog.facets,  # type: ignore[arg-type]
     )
     registry.register(
         "order.lookup",

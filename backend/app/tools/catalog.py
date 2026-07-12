@@ -15,6 +15,9 @@ from app.schemas.catalog import ProductCard, ProductSearchRequest
 from app.tools.schemas import (
     CatalogCompareInput,
     CatalogCompareOutput,
+    CatalogFacetInput,
+    CatalogFacetItem,
+    CatalogFacetOutput,
     CatalogSearchInput,
     CatalogSearchOutput,
     ProductComparisonItem,
@@ -323,6 +326,39 @@ class CatalogToolService:
             products=products[: request.limit],
             ranking_strategy="match_score_sales_stock_price",
             query_plan=plan.model_dump(mode="json"),
+        )
+
+
+    async def facets(self, request: CatalogFacetInput) -> CatalogFacetOutput:
+        normalized = _normalize_facet_request(request)
+        items = await CatalogRepository(self.session).list_facets(
+            facet=normalized.facet,
+            category=normalized.category,
+            brand=normalized.brand,
+            spec_key=normalized.spec_key,
+            min_price=normalized.min_price,
+            max_price=normalized.max_price,
+            filters=normalized.filters,
+            limit=normalized.limit,
+        )
+        return CatalogFacetOutput(
+            result_type="facets" if items else "empty",
+            facet=normalized.facet,
+            items=[CatalogFacetItem(value=value, count=count) for value, count in items],
+            category=normalized.category,
+            brand=normalized.brand,
+            spec_key=normalized.spec_key,
+            query_plan={
+                "query": normalized.query,
+                "facet": normalized.facet,
+                "category": normalized.category,
+                "brand": normalized.brand,
+                "spec_key": normalized.spec_key,
+                "min_price": str(normalized.min_price) if normalized.min_price else None,
+                "max_price": str(normalized.max_price) if normalized.max_price else None,
+                "filters": normalized.filters,
+                "limit": normalized.limit,
+            },
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
@@ -861,3 +897,57 @@ def _compare_term_score(product: ProductCard, terms: list[str]) -> int:
 def _brands_for_item(item: str, brands: list[str]) -> list[str]:
     item_lower = item.lower()
     return [brand for brand in brands if brand.lower() in item_lower]
+
+
+def _normalize_facet_request(request: CatalogFacetInput) -> CatalogFacetInput:
+    data = request.model_dump(mode="python")
+    query = request.query.lower()
+    if request.facet == "brand" and _asks_for_categories(query):
+        data["facet"] = "category"
+    if not request.category:
+        if category := _infer_category_from_text(query):
+            data["category"] = category
+    if not request.spec_key:
+        if spec_key := _infer_spec_key_from_text(query):
+            data["spec_key"] = spec_key
+            if request.facet == "brand":
+                data["facet"] = "spec_value"
+    return CatalogFacetInput.model_validate(data)
+
+
+def _asks_for_categories(query: str) -> bool:
+    category_terms = {
+        "category",
+        "categories",
+        "type",
+        "types",
+        "品类",
+        "类目",
+        "类型",
+    }
+    return any(term in query for term in category_terms)
+
+
+def _infer_category_from_text(query: str) -> str | None:
+    for term in CATEGORY_FILTERS:
+        if term in query:
+            return term
+    for raw, mapped in CATEGORY_ALIASES.items():
+        if raw.lower() in query:
+            return mapped
+    return None
+
+
+def _infer_spec_key_from_text(query: str) -> str | None:
+    aliases = {
+        "refresh_rate": {"refresh", "hz", "刷新率"},
+        "resolution": {"resolution", "2k", "4k", "分辨率"},
+        "switches": {"switch", "switches", "轴", "轴体"},
+        "connection_type": {"wireless", "wired", "connection", "无线", "有线", "连接"},
+        "max_dpi": {"dpi"},
+        "color": {"color", "颜色"},
+    }
+    for key, terms in aliases.items():
+        if any(term in query for term in terms):
+            return key
+    return None

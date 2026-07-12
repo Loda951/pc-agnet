@@ -24,7 +24,7 @@ class FakeStreamingChatModel:
         self.chunks = chunks
 
     def bind_tools(self, tools: list[dict]):
-        assert len(tools) == 5
+        assert len(tools) == 6
         return self
 
     async def astream(self, messages):
