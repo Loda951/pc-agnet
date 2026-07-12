@@ -15,7 +15,7 @@ from app.tools.catalog import (
     validate_catalog_sql,
     validate_product_query_plan,
 )
-from app.tools.contracts import RegistryToolExecutor, StaticToolContractProvider
+from app.tools.contracts import DefaultToolContractProvider, RegistryToolExecutor
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
     KnowledgeVectorIndex,
@@ -138,7 +138,7 @@ async def test_tool_registry_exposes_expected_business_tools(
 
 
 def test_tool_contracts_expose_llm_safe_metadata() -> None:
-    contracts = StaticToolContractProvider().list_contracts()
+    contracts = DefaultToolContractProvider().list_contracts()
     names = [contract.llm_name for contract in contracts]
 
     assert names == [
@@ -154,7 +154,7 @@ def test_tool_contracts_expose_llm_safe_metadata() -> None:
     assert all(contract.read_only for contract in contracts)
     assert not any(contract.parallel_safe for contract in contracts)
 
-    order_contract = StaticToolContractProvider().get_contract("order_lookup")
+    order_contract = DefaultToolContractProvider().get_contract("order_lookup")
     assert order_contract is not None
     assert order_contract.requires_auth is True
     assert order_contract.runtime_fields == ("user_id",)
@@ -163,7 +163,7 @@ def test_tool_contracts_expose_llm_safe_metadata() -> None:
 
 
 def test_tool_contracts_export_public_llm_schemas_only() -> None:
-    contracts = StaticToolContractProvider().list_contracts()
+    contracts = DefaultToolContractProvider().list_contracts()
 
     for contract in contracts:
         schema = contract.as_llm_tool()
@@ -204,7 +204,7 @@ async def test_registry_tool_executor_injects_runtime_and_rewrites_tool_name() -
         TOOL_TEST_SETTINGS,
         registry=registry,  # type: ignore[arg-type]
     )
-    contract = StaticToolContractProvider().get_contract("order_lookup")
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
     assert contract is not None
 
     result = await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
@@ -225,7 +225,7 @@ async def test_registry_tool_executor_rejects_llm_supplied_runtime_field() -> No
         TOOL_TEST_SETTINGS,
         registry=NeverCalledRegistry(),  # type: ignore[arg-type]
     )
-    contract = StaticToolContractProvider().get_contract("order_lookup")
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
     assert contract is not None
 
     result = await executor.execute(
@@ -252,7 +252,7 @@ async def test_registry_tool_executor_returns_timeout_error() -> None:
         TOOL_TEST_SETTINGS,
         registry=SlowRegistry(),  # type: ignore[arg-type]
     )
-    contract = StaticToolContractProvider().get_contract("catalog_search")
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
     assert contract is not None
     contract.timeout_seconds = 0.001
 

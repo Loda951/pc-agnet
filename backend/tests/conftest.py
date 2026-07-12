@@ -8,13 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.agent.graph import AgentRuntime
-from app.agent.tooling import RegistryToolExecutor, ToolContract
 from app.api.routers import chat as chat_router
 from app.core.config import Settings, get_settings
 from app.core.database import get_session
 from app.main import app
 from app.schemas.chat import EvidenceItem
 from app.services.dataset_mapper import normalize_part_record
+from app.tools.contracts import RegistryToolExecutor, ToolContract
 from app.tools.schemas import ToolExecutionResult
 from scripts.seed_demo import (
     DEMO_LOGIN_IDENTIFIER,

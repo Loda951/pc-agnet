@@ -13,9 +13,9 @@ from app.agent.graph import (
     _tag_from_decision,
 )
 from app.agent.state import AgentState
-from app.agent.tooling import RegistryToolExecutor, StaticToolContractProvider
 from app.core.config import Settings
 from app.schemas.chat import ChatRequest
+from app.tools.contracts import DefaultToolContractProvider, RegistryToolExecutor
 from app.tools.schemas import ToolExecutionResult
 
 
@@ -344,7 +344,7 @@ async def test_order_user_id_is_injected_by_runtime() -> None:
         Settings(llm_api_key=""),
         registry=cast(object, registry),
     )
-    contract = StaticToolContractProvider().get_contract("order_lookup")
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
     assert contract is not None
 
     await executor.execute(contract, {"order_id": 42}, {"user_id": 7})

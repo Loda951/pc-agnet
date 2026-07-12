@@ -30,12 +30,6 @@ from app.agent.intent import (
 )
 from app.agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT, build_orchestrator_input
 from app.agent.state import AgentState
-from app.agent.tooling import (
-    RegistryToolExecutor,
-    StaticToolContractProvider,
-    ToolContractProvider,
-    ToolExecutor,
-)
 from app.core.config import Settings
 from app.core.llm import build_chat_model
 from app.models import AgentRun
@@ -49,6 +43,12 @@ from app.schemas.chat import (
     SuggestedAction,
 )
 from app.schemas.order import OrderCard
+from app.tools.contracts import (
+    DefaultToolContractProvider,
+    RegistryToolExecutor,
+    ToolContractProvider,
+    ToolExecutor,
+)
 from app.tools.schemas import ToolError, ToolExecutionResult
 
 SESSION_HISTORY_LIMIT = 6
@@ -68,7 +68,7 @@ class AgentRuntime:
     ):
         self.session = session
         self.settings = settings
-        self.contract_provider = contract_provider or StaticToolContractProvider()
+        self.contract_provider = contract_provider or DefaultToolContractProvider()
         self.tool_executor = tool_executor or RegistryToolExecutor(session, settings)
         self.llm = chat_model if chat_model is not None else build_chat_model(settings)
         self.orchestrator = (
