@@ -22,8 +22,13 @@ from app.agent.prompts import (
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.schemas.chat import ChatRequest
-from app.tools.contracts import DefaultToolContractProvider, RegistryToolExecutor
-from app.tools.schemas import ToolExecutionResult
+from app.tools.contracts import (
+    BoundTool,
+    DefaultToolContractProvider,
+    RegistryToolExecutor,
+    ToolCatalog,
+)
+from app.tools.schemas import OrderLookupOutput
 
 
 class FakeStreamingChatModel:
@@ -446,27 +451,22 @@ def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
 
 @pytest.mark.asyncio
 async def test_order_user_id_is_injected_by_runtime() -> None:
-    class CapturingRegistry:
-        def __init__(self):
-            self.input_data: dict | None = None
-
-        async def execute(self, name: str, input_data: dict) -> ToolExecutionResult:
-            self.input_data = input_data
-            return ToolExecutionResult(
-                tool_name=name,
-                ok=True,
-                output={"result_type": "not_found", "order": None, "candidates": []},
-            )
-
-    registry = CapturingRegistry()
-    executor = RegistryToolExecutor(
-        cast(object, None),
-        Settings(llm_api_key=""),
-        registry=cast(object, registry),
-    )
+    captured_input: dict | None = None
     contract = DefaultToolContractProvider().get_contract("order_lookup")
     assert contract is not None
 
-    await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
+    async def handler(request) -> OrderLookupOutput:
+        nonlocal captured_input
+        captured_input = request.model_dump(mode="json", exclude_none=True)
+        return OrderLookupOutput(result_type="not_found")
 
-    assert registry.input_data == {"order_id": 42, "limit": 5, "user_id": 7}
+    executor = RegistryToolExecutor(
+        cast(object, None),
+        Settings(llm_api_key=""),
+        catalog=ToolCatalog([BoundTool(contract, handler)]),
+    )
+
+    result = await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
+
+    assert result.ok is True
+    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5}

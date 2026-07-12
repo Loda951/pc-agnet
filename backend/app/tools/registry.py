@@ -4,20 +4,10 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
-from app.core.llm import build_chat_model
-from app.tools.catalog import CatalogQueryPlanner, CatalogToolService, LLMCatalogQueryPlanner
-from app.tools.knowledge import KnowledgeRetrievalToolService
-from app.tools.orders import OrderToolService
-from app.tools.schemas import (
-    CatalogCompareInput,
-    CatalogFacetInput,
-    CatalogSearchInput,
-    DocumentSearchInput,
-    OrderLookupInput,
-    ToolError,
-    ToolExecutionResult,
-)
+from app.core.config import Settings
+from app.tools.catalog import CatalogQueryPlanner
+from app.tools.contracts import build_tool_catalog
+from app.tools.schemas import ToolError, ToolExecutionResult
 
 
 class ToolRegistryError(ValueError):
@@ -57,20 +47,24 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         return sorted(self._tools)
 
+    @property
+    def registered_tools(self) -> dict[str, RegisteredTool]:
+        return dict(self._tools)
+
     async def execute(self, name: str, input_data: dict[str, Any]) -> ToolExecutionResult:
         tool = self._tools.get(name)
         if tool is None:
-            return _error_result(name, "unknown_tool", f"unknown tool: {name}")
+            return _error_result(name, "unknown_tool")
 
         try:
             request = tool.input_model.model_validate(input_data)
         except ValidationError as exc:
-            return _error_result(name, "invalid_input", exc.errors())
+            return _error_result(name, "invalid_input", str(exc))
 
         try:
             output = await tool.handler(request)
         except Exception:  # pragma: no cover - defensive boundary for orchestration
-            return _error_result(name, "execution_error", "tool execution failed")
+            return _error_result(name, "execution_error")
 
         return ToolExecutionResult(
             tool_name=name,
@@ -79,68 +73,52 @@ class ToolRegistry:
         )
 
 
-def build_catalog_planner(settings: Settings | None = None) -> CatalogQueryPlanner | None:
-    settings = settings or get_settings()
-    if not settings.catalog_llm_planner_enabled:
-        return None
-
-    chat_model = build_chat_model(settings)
-    if chat_model is None:
-        return None
-
-    return LLMCatalogQueryPlanner(chat_model)
-
-
 def build_tool_registry(
     session: AsyncSession,
     catalog_planner: CatalogQueryPlanner | None = None,
     settings: Settings | None = None,
 ) -> ToolRegistry:
-    registry = ToolRegistry()
-    catalog = CatalogToolService(
+    from app.core.config import get_settings
+
+    settings = settings or get_settings()
+    tool_catalog = build_tool_catalog(
         session,
-        planner=catalog_planner or build_catalog_planner(settings),
+        settings=settings,
+        catalog_planner=catalog_planner,
     )
-    orders = OrderToolService(session)
-    knowledge = KnowledgeRetrievalToolService()
-
-    registry.register(
-        "catalog.search",
-        CatalogSearchInput,
-        catalog.search,  # type: ignore[arg-type]
-    )
-    registry.register(
-        "catalog.compare",
-        CatalogCompareInput,
-        catalog.compare,  # type: ignore[arg-type]
-    )
-
-    registry.register(
-        "catalog.facets",
-        CatalogFacetInput,
-        catalog.facets,  # type: ignore[arg-type]
-    )
-    registry.register(
-        "order.lookup",
-        OrderLookupInput,
-        orders.lookup,  # type: ignore[arg-type]
-    )
-    registry.register(
-        "policy.search",
-        DocumentSearchInput,
-        knowledge.search_policy,  # type: ignore[arg-type]
-    )
-    registry.register(
-        "knowledge.search",
-        DocumentSearchInput,
-        knowledge.search_knowledge,  # type: ignore[arg-type]
-    )
+    registry = ToolRegistry()
+    for bound_tool in tool_catalog.list_bound_tools():
+        registry.register(
+            bound_tool.contract.registry_name,
+            bound_tool.contract.internal_input_model,
+            bound_tool.handler,
+        )
     return registry
 
 
-def _error_result(name: str, code: str, message: Any) -> ToolExecutionResult:
+def _error_result(name: str, code: str, message: Any | None = None) -> ToolExecutionResult:
+    error_messages = {
+        "unknown_tool": "unknown tool",
+        "invalid_input": "tool input is invalid",
+        "timeout": "tool execution timed out",
+        "dependency_unavailable": "tool dependency is temporarily unavailable",
+        "execution_error": "tool execution failed",
+    }
+    retryable = code in {"invalid_input", "timeout", "dependency_unavailable"}
+    actions = {
+        "unknown_tool": "stop",
+        "invalid_input": "replan_arguments",
+        "timeout": "retry_once",
+        "dependency_unavailable": "explain_temporary_unavailability",
+        "execution_error": "stop",
+    }
     return ToolExecutionResult(
         tool_name=name,
         ok=False,
-        error=ToolError(code=code, message=str(message)),
+        error=ToolError(
+            code=code,
+            message=str(message or error_messages.get(code, "tool execution failed")),
+            retryable=retryable,
+            recommended_action=actions.get(code, "stop"),
+        ),
     )

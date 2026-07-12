@@ -15,13 +15,19 @@ from app.tools.catalog import (
     validate_catalog_sql,
     validate_product_query_plan,
 )
-from app.tools.contracts import DefaultToolContractProvider, RegistryToolExecutor
+from app.tools.contracts import (
+    BoundTool,
+    DefaultToolContractProvider,
+    RegistryToolExecutor,
+    ToolCatalog,
+    build_catalog_planner,
+)
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
     KnowledgeVectorIndex,
     KnowledgeVectorIndexChunk,
 )
-from app.tools.registry import build_catalog_planner, build_tool_registry
+from app.tools.registry import build_tool_registry
 from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
 
 TOOL_TEST_SETTINGS = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
@@ -198,17 +204,15 @@ def test_all_public_input_models_forbid_unknown_fields() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_rejects_unknown_fields_without_calling_handler() -> None:
-    class NeverCalledRegistry:
-        async def execute(self, name: str, input_data: dict):  # pragma: no cover
-            raise AssertionError("registry should not be called")
-
-    executor = RegistryToolExecutor(
-        None,  # type: ignore[arg-type]
-        TOOL_TEST_SETTINGS,
-        registry=NeverCalledRegistry(),  # type: ignore[arg-type]
-    )
+    async def never_called_handler(request):  # pragma: no cover
+        raise AssertionError("handler should not be called")
 
     for contract in DefaultToolContractProvider().list_contracts():
+        executor = RegistryToolExecutor(
+            None,  # type: ignore[arg-type]
+            TOOL_TEST_SETTINGS,
+            catalog=ToolCatalog([BoundTool(contract, never_called_handler)]),
+        )
         args = {"unexpected_field": "must fail"}
         if "query" in contract.public_input_model.model_json_schema().get("properties", {}):
             args["query"] = "test"
@@ -216,60 +220,48 @@ async def test_registry_rejects_unknown_fields_without_calling_handler() -> None
         assert not result.ok
         assert result.error is not None
         assert result.error.code == "invalid_input"
+        assert result.error.retryable is True
+        assert result.error.recommended_action == "replan_arguments"
 
 
 @pytest.mark.asyncio
 async def test_registry_tool_executor_injects_runtime_and_rewrites_tool_name() -> None:
-    class CapturingRegistry:
-        def __init__(self):
-            self.input_data: dict | None = None
+    captured_input = None
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
 
-        async def execute(self, name: str, input_data: dict):
-            self.input_data = input_data
-            return type(
-                "Result",
-                (),
-                {
-                    "tool_name": name,
-                    "ok": True,
-                    "output": {
-                        "result_type": "not_found",
-                        "order": None,
-                        "candidates": [],
-                    },
-                    "error": None,
-                },
-            )()
+    async def handler(request):
+        nonlocal captured_input
+        captured_input = request.model_dump(mode="json", exclude_none=True)
+        from app.tools.schemas import OrderLookupOutput
 
-    registry = CapturingRegistry()
+        return OrderLookupOutput(result_type="not_found")
+
     executor = RegistryToolExecutor(
         None,  # type: ignore[arg-type]
         TOOL_TEST_SETTINGS,
-        registry=registry,  # type: ignore[arg-type]
+        catalog=ToolCatalog([BoundTool(contract, handler)]),
     )
-    contract = DefaultToolContractProvider().get_contract("order_lookup")
-    assert contract is not None
 
     result = await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
 
     assert result.ok
     assert result.tool_name == "order_lookup"
-    assert registry.input_data == {"order_id": 42, "limit": 5, "user_id": 7}
+    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5}
 
 
 @pytest.mark.asyncio
 async def test_registry_tool_executor_rejects_llm_supplied_runtime_field() -> None:
-    class NeverCalledRegistry:
-        async def execute(self, name: str, input_data: dict):  # pragma: no cover
-            raise AssertionError("registry should not be called")
+    async def never_called_handler(request):  # pragma: no cover
+        raise AssertionError("handler should not be called")
 
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
     executor = RegistryToolExecutor(
         None,  # type: ignore[arg-type]
         TOOL_TEST_SETTINGS,
-        registry=NeverCalledRegistry(),  # type: ignore[arg-type]
+        catalog=ToolCatalog([BoundTool(contract, never_called_handler)]),
     )
-    contract = DefaultToolContractProvider().get_contract("order_lookup")
-    assert contract is not None
 
     result = await executor.execute(
         contract,
@@ -285,19 +277,19 @@ async def test_registry_tool_executor_rejects_llm_supplied_runtime_field() -> No
 
 @pytest.mark.asyncio
 async def test_registry_tool_executor_returns_timeout_error() -> None:
-    class SlowRegistry:
-        async def execute(self, name: str, input_data: dict):
-            await asyncio.sleep(0.05)
-            raise AssertionError("timeout should cancel before completion")
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+    contract.timeout_seconds = 0.001
+
+    async def slow_handler(request):
+        await asyncio.sleep(0.05)
+        raise AssertionError("timeout should cancel before completion")
 
     executor = RegistryToolExecutor(
         None,  # type: ignore[arg-type]
         TOOL_TEST_SETTINGS,
-        registry=SlowRegistry(),  # type: ignore[arg-type]
+        catalog=ToolCatalog([BoundTool(contract, slow_handler)]),
     )
-    contract = DefaultToolContractProvider().get_contract("catalog_search")
-    assert contract is not None
-    contract.timeout_seconds = 0.001
 
     result = await executor.execute(contract, {"query": "wireless mouse"}, {"user_id": 7})
 
@@ -305,6 +297,32 @@ async def test_registry_tool_executor_returns_timeout_error() -> None:
     assert result.tool_name == "catalog_search"
     assert result.error is not None
     assert result.error.code == "timeout"
+    assert result.error.retryable is True
+    assert result.error.recommended_action == "retry_once"
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_executor_returns_execution_error_for_unknown_exception() -> None:
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+
+    async def broken_handler(request):
+        raise RuntimeError("postgresql://secret@localhost/internal")
+
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        catalog=ToolCatalog([BoundTool(contract, broken_handler)]),
+    )
+
+    result = await executor.execute(contract, {"query": "wireless mouse"}, {"user_id": 7})
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code == "execution_error"
+    assert result.error.message == "tool execution failed"
+    assert result.error.retryable is False
+    assert result.error.recommended_action == "stop"
 
 
 @pytest.mark.asyncio
@@ -402,7 +420,7 @@ def test_build_catalog_planner_is_opt_in() -> None:
 
 def test_build_catalog_planner_uses_llm_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     chat = FakeChatModel('{"category":"mouse"}')
-    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: chat)
+    monkeypatch.setattr("app.tools.contracts.build_chat_model", lambda settings: chat)
 
     planner = build_catalog_planner(
         SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]
@@ -415,7 +433,7 @@ def test_build_catalog_planner_uses_llm_when_enabled(monkeypatch: pytest.MonkeyP
 def test_build_catalog_planner_skips_when_key_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("app.tools.registry.build_chat_model", lambda settings: None)
+    monkeypatch.setattr("app.tools.contracts.build_chat_model", lambda settings: None)
 
     planner = build_catalog_planner(
         SimpleNamespace(catalog_llm_planner_enabled=True)  # type: ignore[arg-type]

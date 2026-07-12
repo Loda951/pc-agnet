@@ -1,12 +1,16 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.tools.registry import ToolRegistry, build_tool_registry
+from app.core.llm import build_chat_model
+from app.tools.catalog import CatalogQueryPlanner, CatalogToolService, LLMCatalogQueryPlanner
+from app.tools.knowledge import KnowledgeRetrievalToolService
+from app.tools.orders import OrderToolService
 from app.tools.schemas import (
     CatalogCompareInput,
     CatalogCompareOutput,
@@ -53,7 +57,6 @@ class ToolContract(BaseModel):
 
     @property
     def name(self) -> str:
-        """Backward-compatible alias used by the current orchestrator adapter."""
         return self.llm_name
 
     def as_llm_tool(self) -> dict[str, Any]:
@@ -65,6 +68,41 @@ class ToolContract(BaseModel):
                 "parameters": self.public_input_model.model_json_schema(),
             },
         }
+
+
+ToolHandler = Callable[[BaseModel], Awaitable[BaseModel]]
+
+
+@dataclass(frozen=True)
+class BoundTool:
+    contract: ToolContract
+    handler: ToolHandler
+
+
+class ToolCatalog:
+    def __init__(self, bound_tools: Sequence[BoundTool]):
+        self._by_llm_name: dict[str, BoundTool] = {}
+        self._by_registry_name: dict[str, BoundTool] = {}
+        for bound_tool in bound_tools:
+            contract = bound_tool.contract
+            if contract.llm_name in self._by_llm_name:
+                raise ValueError(f"duplicate tool llm_name: {contract.llm_name}")
+            if contract.registry_name in self._by_registry_name:
+                raise ValueError(f"duplicate tool registry_name: {contract.registry_name}")
+            self._by_llm_name[contract.llm_name] = bound_tool
+            self._by_registry_name[contract.registry_name] = bound_tool
+
+    def list_bound_tools(self) -> Sequence[BoundTool]:
+        return tuple(self._by_llm_name.values())
+
+    def list_contracts(self) -> Sequence[ToolContract]:
+        return tuple(bound_tool.contract for bound_tool in self._by_llm_name.values())
+
+    def get_by_llm_name(self, llm_name: str) -> BoundTool | None:
+        return self._by_llm_name.get(llm_name)
+
+    def get_by_registry_name(self, registry_name: str) -> BoundTool | None:
+        return self._by_registry_name.get(registry_name)
 
 
 class ToolContractProvider(Protocol):
@@ -83,19 +121,17 @@ class ToolExecutor(Protocol):
 
 
 class DefaultToolContractProvider:
-    """Provide the authoritative built-in contracts owned by the tool module."""
+    """Provide built-in contracts from the authoritative tool definitions."""
 
-    def __init__(self, contracts: Sequence[ToolContract] | None = None):
-        configured = contracts or default_tool_contracts()
-        self._contracts = {contract.llm_name: contract for contract in configured}
-        if len(self._contracts) != len(configured):
-            raise ValueError("duplicate tool llm_name in contracts")
+    def __init__(self, catalog: ToolCatalog | None = None):
+        self.catalog = catalog or static_tool_catalog()
 
     def list_contracts(self) -> Sequence[ToolContract]:
-        return tuple(self._contracts.values())
+        return self.catalog.list_contracts()
 
     def get_contract(self, llm_name: str) -> ToolContract | None:
-        return self._contracts.get(llm_name)
+        bound_tool = self.catalog.get_by_llm_name(llm_name)
+        return bound_tool.contract if bound_tool else None
 
 
 class RegistryToolExecutor:
@@ -103,9 +139,9 @@ class RegistryToolExecutor:
         self,
         session: AsyncSession,
         settings: Settings,
-        registry: ToolRegistry | None = None,
+        catalog: ToolCatalog | None = None,
     ):
-        self.registry = registry or build_tool_registry(session, settings=settings)
+        self.catalog = catalog or build_tool_catalog(session, settings=settings)
 
     async def execute(
         self,
@@ -113,41 +149,10 @@ class RegistryToolExecutor:
         arguments: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> ToolExecutionResult:
-        try:
-            public_input = contract.public_input_model.model_validate(arguments)
-            internal_input = public_input.model_dump(mode="json", exclude_none=True)
-            runtime = ToolRuntimeContext.model_validate(runtime_context)
-            for field_name in contract.runtime_fields:
-                internal_input[field_name] = getattr(runtime, field_name)
-            validated_internal = contract.internal_input_model.model_validate(internal_input)
-        except ValidationError as exc:
-            return _error_result(contract.llm_name, "invalid_input", str(exc))
-        except AttributeError as exc:
-            return _error_result(contract.llm_name, "invalid_input", str(exc))
-
-        async def run_tool() -> ToolExecutionResult:
-            return await self.registry.execute(
-                contract.registry_name,
-                validated_internal.model_dump(mode="json", exclude_none=True),
-            )
-
-        try:
-            if contract.timeout_seconds is None:
-                result = await run_tool()
-            else:
-                result = await asyncio.wait_for(run_tool(), timeout=contract.timeout_seconds)
-        except TimeoutError:
-            return _error_result(contract.llm_name, "timeout", "tool execution timed out")
-        except Exception as exc:  # pragma: no cover - defensive boundary
-            return _error_result(contract.llm_name, "execution_error", str(exc))
-
-        result.tool_name = contract.llm_name
-        if result.ok and result.output is not None:
-            try:
-                contract.output_model.model_validate(result.output)
-            except ValidationError as exc:
-                return _error_result(contract.llm_name, "execution_error", str(exc))
-        return result
+        bound_tool = self.catalog.get_by_llm_name(contract.llm_name)
+        if bound_tool is None:
+            return _error_result(contract.llm_name, "unknown_tool")
+        return await execute_bound_tool(bound_tool, arguments, runtime_context)
 
 
 LLM_SAFE_TOOL_NAMES = (
@@ -160,7 +165,96 @@ LLM_SAFE_TOOL_NAMES = (
 )
 
 
-def default_tool_contracts() -> tuple[ToolContract, ...]:
+def static_tool_catalog() -> ToolCatalog:
+    async def _unbound_handler(_: BaseModel) -> BaseModel:  # pragma: no cover
+        raise RuntimeError("static tool catalog has no runtime handler")
+
+    return ToolCatalog([BoundTool(contract, _unbound_handler) for contract in _tool_contracts()])
+
+
+def build_tool_catalog(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    catalog_planner: CatalogQueryPlanner | None = None,
+) -> ToolCatalog:
+    catalog_service = CatalogToolService(
+        session,
+        planner=catalog_planner or build_catalog_planner(settings),
+    )
+    orders = OrderToolService(session)
+    knowledge = KnowledgeRetrievalToolService()
+    handlers: dict[str, ToolHandler] = {
+        "catalog_search": catalog_service.search,  # type: ignore[dict-item]
+        "catalog_compare": catalog_service.compare,  # type: ignore[dict-item]
+        "catalog_facets": catalog_service.facets,  # type: ignore[dict-item]
+        "order_lookup": orders.lookup,  # type: ignore[dict-item]
+        "policy_search": knowledge.search_policy,  # type: ignore[dict-item]
+        "knowledge_search": knowledge.search_knowledge,  # type: ignore[dict-item]
+    }
+    return ToolCatalog(
+        [BoundTool(contract, handlers[contract.llm_name]) for contract in _tool_contracts()]
+    )
+
+
+def build_catalog_planner(settings: Settings | None = None) -> CatalogQueryPlanner | None:
+    from app.core.config import get_settings
+
+    settings = settings or get_settings()
+    if not settings.catalog_llm_planner_enabled:
+        return None
+
+    chat_model = build_chat_model(settings)
+    if chat_model is None:
+        return None
+
+    return LLMCatalogQueryPlanner(chat_model)
+
+
+async def execute_bound_tool(
+    bound_tool: BoundTool,
+    arguments: dict[str, Any],
+    runtime_context: dict[str, Any],
+) -> ToolExecutionResult:
+    contract = bound_tool.contract
+    try:
+        public_input = contract.public_input_model.model_validate(arguments)
+        internal_input = public_input.model_dump(mode="json", exclude_none=True)
+        runtime = ToolRuntimeContext.model_validate(runtime_context)
+        for field_name in contract.runtime_fields:
+            internal_input[field_name] = getattr(runtime, field_name)
+        validated_internal = contract.internal_input_model.model_validate(internal_input)
+    except ValidationError as exc:
+        return _error_result(contract.llm_name, "invalid_input", str(exc))
+    except AttributeError as exc:
+        return _error_result(contract.llm_name, "invalid_input", str(exc))
+
+    async def run_tool() -> BaseModel:
+        return await bound_tool.handler(validated_internal)
+
+    try:
+        if contract.timeout_seconds is None:
+            output = await run_tool()
+        else:
+            output = await asyncio.wait_for(run_tool(), timeout=contract.timeout_seconds)
+    except TimeoutError:
+        return _error_result(contract.llm_name, "timeout")
+    except Exception:
+        return _error_result(contract.llm_name, "execution_error")
+
+    try:
+        validated_output = contract.output_model.model_validate(output.model_dump(mode="python"))
+    except ValidationError:
+        return _error_result(contract.llm_name, "execution_error")
+
+    return ToolExecutionResult(
+        tool_name=contract.llm_name,
+        ok=True,
+        output=validated_output.model_dump(mode="json"),
+    )
+
+
+def _tool_contracts() -> tuple[ToolContract, ...]:
     return (
         ToolContract(
             llm_name="catalog_search",
@@ -189,7 +283,6 @@ def default_tool_contracts() -> tuple[ToolContract, ...]:
             output_model=CatalogCompareOutput,
             timeout_seconds=18.0,
         ),
-
         ToolContract(
             llm_name="catalog_facets",
             registry_name="catalog.facets",
@@ -247,9 +340,37 @@ def default_tool_contracts() -> tuple[ToolContract, ...]:
     )
 
 
-def _error_result(name: str, code: str, message: Any) -> ToolExecutionResult:
+def default_tool_contracts() -> tuple[ToolContract, ...]:
+    return _tool_contracts()
+
+
+def _error_result(name: str, code: str, message: Any | None = None) -> ToolExecutionResult:
+    error_messages = {
+        "unknown_tool": "unknown tool",
+        "invalid_input": "tool input is invalid",
+        "unauthorized": "authentication is required",
+        "forbidden": "access is forbidden",
+        "timeout": "tool execution timed out",
+        "dependency_unavailable": "tool dependency is temporarily unavailable",
+        "execution_error": "tool execution failed",
+    }
+    retryable = code in {"invalid_input", "timeout", "dependency_unavailable"}
+    actions = {
+        "unknown_tool": "stop",
+        "invalid_input": "replan_arguments",
+        "unauthorized": "request_authentication",
+        "forbidden": "stop",
+        "timeout": "retry_once",
+        "dependency_unavailable": "explain_temporary_unavailability",
+        "execution_error": "stop",
+    }
     return ToolExecutionResult(
         tool_name=name,
         ok=False,
-        error=ToolError(code=code, message=str(message)),
+        error=ToolError(
+            code=code,
+            message=str(message or error_messages.get(code, "tool execution failed")),
+            retryable=retryable,
+            recommended_action=actions.get(code, "stop"),
+        ),
     )
