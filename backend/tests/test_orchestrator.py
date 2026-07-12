@@ -9,8 +9,15 @@ from app.agent.graph import (
     MAX_ORCHESTRATOR_CALLS,
     MAX_TOOL_WAVES,
     AgentRuntime,
+    _fallback_answer,
     _orchestrator_messages,
     _tag_from_decision,
+)
+from app.agent.prompts import (
+    FACT_SOURCE_POLICY,
+    ORCHESTRATOR_SYSTEM_PROMPT,
+    ROUTING_EXAMPLES,
+    TOOL_SELECTION_RULES,
 )
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -31,6 +38,39 @@ class FakeStreamingChatModel:
         assert messages
         for chunk in self.chunks:
             yield chunk
+
+
+def test_orchestrator_prompt_separates_fact_sources_without_repeating_schemas() -> None:
+    structured = FACT_SOURCE_POLICY["structured_business_facts"]
+    documents = FACT_SOURCE_POLICY["document_evidence"]
+
+    assert structured["tools"] == [
+        "catalog_search",
+        "catalog_compare",
+        "catalog_facets",
+        "order_lookup",
+    ]
+    assert documents["tools"] == ["policy_search", "knowledge_search"]
+    assert "字段级事实" in structured["use_for"]
+    assert "文档证据" in documents["authority"]
+    assert "parameters" not in ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_orchestrator_prompt_covers_high_confusion_tool_boundaries() -> None:
+    rules = "\n".join(TOOL_SELECTION_RULES)
+    examples = {item["request"]: item["decision"] for item in ROUTING_EXAMPLES}
+
+    assert "具体 SKU" in rules
+    assert "一般性的配送" in rules
+    assert examples["你们有哪些鼠标品牌"] == ["catalog_facets"]
+    assert examples["Logitech 是什么品牌"] == ["knowledge_search"]
+    assert examples["Logitech 有哪些鼠标"] == ["catalog_search"]
+    assert examples["我的订单发货了吗"] == ["order_lookup"]
+    assert examples["商城一般多久发货"] == ["policy_search"]
+    assert examples["这单发货了吗，收到后不合适能退吗"] == [
+        "order_lookup",
+        "policy_search",
+    ]
 
 
 def test_native_tool_calls_are_normalized_as_one_wave() -> None:
@@ -60,6 +100,86 @@ def test_native_tool_calls_are_normalized_as_one_wave() -> None:
         "policy_search",
     ]
     assert _tag_from_decision(decision, None) == "catalog_search + policy_search"
+
+
+def test_catalog_facets_tag_is_preserved_across_tool_waves() -> None:
+    facets = decision_from_ai_message(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "facets-call",
+                    "name": "catalog_facets",
+                    "args": {"query": "有哪些鼠标品牌", "facet": "brand"},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        has_tool_results=False,
+    )
+    search = decision_from_ai_message(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "search-call",
+                    "name": "catalog_search",
+                    "args": {"query": "Logitech 鼠标"},
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        has_tool_results=True,
+    )
+
+    tag = _tag_from_decision(facets, None)
+
+    assert _tag_from_decision(search, tag) == "catalog_facets + catalog_search"
+
+
+def test_fallback_orchestrator_routes_catalog_facets_questions() -> None:
+    runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
+
+    decision = runtime._fallback_orchestrator_decision(
+        cast(AgentState, {"message": "你们有哪些鼠标品牌？", "tool_results": []})
+    )
+
+    assert decision.type == "tool_calls"
+    assert decision.tool_calls[0].name == "catalog_facets"
+    assert decision.tool_calls[0].arguments == {
+        "query": "你们有哪些鼠标品牌？",
+        "facet": "brand",
+        "limit": 20,
+    }
+
+
+def test_fallback_answer_renders_catalog_facets_result() -> None:
+    state = cast(
+        AgentState,
+        {
+            "tool_results": [
+                {
+                    "name": "catalog_facets",
+                    "execution": {
+                        "ok": True,
+                        "output": {
+                            "result_type": "facets",
+                            "facet": "brand",
+                            "items": [
+                                {"value": "Logitech", "count": 12},
+                                {"value": "Razer", "count": 8},
+                            ],
+                        },
+                    },
+                }
+            ]
+        },
+    )
+
+    answer = _fallback_answer(state)
+
+    assert "Logitech（12 条 SKU 记录）" in answer
+    assert "Razer（8 条 SKU 记录）" in answer
 
 
 def test_terminal_json_is_parsed_without_tool_call() -> None:

@@ -44,6 +44,7 @@ from app.schemas.chat import (
 )
 from app.schemas.order import OrderCard
 from app.tools.contracts import (
+    LLM_SAFE_TOOL_NAMES,
     DefaultToolContractProvider,
     RegistryToolExecutor,
     ToolContractProvider,
@@ -493,6 +494,9 @@ class AgentRuntime:
                 reason="identity_or_capability_question",
             )
 
+        if facet_arguments := _fallback_catalog_facets_arguments(state["message"]):
+            return _tool_decision("catalog_facets", facet_arguments)
+
         intent = classify_intent(state["message"])
         if intent == "product_recommendation":
             search = build_product_search(state["message"])
@@ -644,21 +648,12 @@ def _tag_from_decision(
         previous_tool_names = (
             current_tag.split(" + ")
             if current_tag and all(
-                self_name in _LLM_TOOL_NAMES for self_name in current_tag.split(" + ")
+                self_name in LLM_SAFE_TOOL_NAMES for self_name in current_tag.split(" + ")
             )
             else []
         )
         return " + ".join(dict.fromkeys([*previous_tool_names, *tool_names]))
     return current_tag or "general"
-
-
-_LLM_TOOL_NAMES = {
-    "catalog_search",
-    "catalog_compare",
-    "order_lookup",
-    "policy_search",
-    "knowledge_search",
-}
 
 
 def _apply_tool_output(
@@ -726,6 +721,10 @@ def _fallback_answer(state: AgentState) -> str:
         lines.append("依据：" + "、".join(item.title for item in evidence))
         return "\n".join(lines)
 
+    facet_output = _latest_successful_tool_output(state, "catalog_facets")
+    if facet_output is not None:
+        return _catalog_facets_fallback_answer(facet_output)
+
     failed_results = [
         result
         for result in state.get("tool_results", [])
@@ -734,6 +733,62 @@ def _fallback_answer(state: AgentState) -> str:
     if failed_results:
         return "业务信息查询暂时失败，请稍后重试或补充更具体的信息。"
     return "我暂时没有找到足够的信息，请补充具体商品、订单号或想咨询的政策。"
+
+
+def _fallback_catalog_facets_arguments(message: str) -> dict[str, Any] | None:
+    compact = message.lower().replace(" ", "")
+    list_markers = ("哪些", "有什么", "有啥", "都有什么", "都有哪些", "可选", "提供")
+    asks_for_list = any(marker in compact for marker in list_markers)
+    if not asks_for_list:
+        return None
+
+    if any(term in compact for term in ("品牌", "牌子")):
+        return {"query": message, "facet": "brand", "limit": 20}
+    if any(term in compact for term in ("品类", "类目", "商品类型", "外设类型")):
+        return {"query": message, "facet": "category", "limit": 20}
+    if any(
+        term in compact
+        for term in ("轴体", "刷新率", "分辨率", "连接方式", "dpi", "颜色")
+    ):
+        return {"query": message, "facet": "spec_value", "limit": 20}
+    return None
+
+
+def _latest_successful_tool_output(
+    state: AgentState,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    for result in reversed(state.get("tool_results", [])):
+        execution = result.get("execution", {})
+        if result.get("name") == tool_name and execution.get("ok"):
+            output = execution.get("output")
+            if isinstance(output, dict):
+                return output
+    return None
+
+
+def _catalog_facets_fallback_answer(output: dict[str, Any]) -> str:
+    facet_labels = {
+        "brand": "品牌",
+        "category": "类目",
+        "spec_key": "规格字段",
+        "spec_value": "规格选项",
+    }
+    label = facet_labels.get(str(output.get("facet")), "目录选项")
+    items = output.get("items")
+    if not isinstance(items, list) or not items:
+        return f"当前目录中没有找到符合条件的{label}。"
+
+    rendered: list[str] = []
+    for item in items[:10]:
+        if not isinstance(item, dict) or not item.get("value"):
+            continue
+        count = item.get("count")
+        suffix = f"（{count} 条 SKU 记录）" if isinstance(count, int) else ""
+        rendered.append(f"{item['value']}{suffix}")
+    if not rendered:
+        return f"当前目录中没有找到符合条件的{label}。"
+    return f"当前目录中可查到的{label}包括：" + "、".join(rendered) + "。"
 
 
 def _purchase_guidance_answer() -> str:
