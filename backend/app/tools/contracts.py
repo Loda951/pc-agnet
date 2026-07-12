@@ -1,9 +1,11 @@
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -84,6 +86,7 @@ class ToolCatalog:
         self._by_llm_name: dict[str, BoundTool] = {}
         self._by_registry_name: dict[str, BoundTool] = {}
         for bound_tool in bound_tools:
+            self._validate_bound_tool(bound_tool)
             contract = bound_tool.contract
             if contract.llm_name in self._by_llm_name:
                 raise ValueError(f"duplicate tool llm_name: {contract.llm_name}")
@@ -91,6 +94,44 @@ class ToolCatalog:
                 raise ValueError(f"duplicate tool registry_name: {contract.registry_name}")
             self._by_llm_name[contract.llm_name] = bound_tool
             self._by_registry_name[contract.registry_name] = bound_tool
+
+    @staticmethod
+    def _validate_bound_tool(bound_tool: BoundTool) -> None:
+        contract = bound_tool.contract
+        handler = bound_tool.handler
+        if not callable(handler):
+            raise ValueError(f"missing handler for tool: {contract.llm_name}")
+
+        signature = inspect.signature(handler)
+        positional_params = [
+            param
+            for param in signature.parameters.values()
+            if param.kind in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            }
+        ]
+        required_positional = [
+            param for param in positional_params if param.default is inspect.Parameter.empty
+        ]
+        has_var_positional = any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL
+            for param in signature.parameters.values()
+        )
+        if len(required_positional) != 1 and not has_var_positional:
+            raise ValueError(f"handler for {contract.llm_name} must accept exactly one request")
+
+        hints = get_type_hints(handler)
+        request_annotation = hints.get(required_positional[0].name) if required_positional else None
+        if (
+            request_annotation is not None
+            and request_annotation is not contract.internal_input_model
+        ):
+            raise ValueError(f"handler input model mismatch for tool: {contract.llm_name}")
+
+        return_annotation = hints.get("return")
+        if return_annotation is not None and return_annotation is not contract.output_model:
+            raise ValueError(f"handler output model mismatch for tool: {contract.llm_name}")
 
     def list_bound_tools(self) -> Sequence[BoundTool]:
         return tuple(self._by_llm_name.values())
@@ -166,10 +207,19 @@ LLM_SAFE_TOOL_NAMES = (
 
 
 def static_tool_catalog() -> ToolCatalog:
-    async def _unbound_handler(_: BaseModel) -> BaseModel:  # pragma: no cover
-        raise RuntimeError("static tool catalog has no runtime handler")
+    def make_unbound_handler(contract: ToolContract) -> ToolHandler:
+        async def _unbound_handler(_: BaseModel) -> BaseModel:  # pragma: no cover
+            raise RuntimeError("static tool catalog has no runtime handler")
 
-    return ToolCatalog([BoundTool(contract, _unbound_handler) for contract in _tool_contracts()])
+        _unbound_handler.__annotations__ = {
+            "_": contract.internal_input_model,
+            "return": contract.output_model,
+        }
+        return _unbound_handler
+
+    return ToolCatalog(
+        [BoundTool(contract, make_unbound_handler(contract)) for contract in _tool_contracts()]
+    )
 
 
 def build_tool_catalog(
@@ -239,6 +289,8 @@ async def execute_bound_tool(
             output = await asyncio.wait_for(run_tool(), timeout=contract.timeout_seconds)
     except TimeoutError:
         return _error_result(contract.llm_name, "timeout")
+    except (SQLAlchemyError, OSError):
+        return _error_result(contract.llm_name, "dependency_unavailable")
     except Exception:
         return _error_result(contract.llm_name, "execution_error")
 

@@ -4,6 +4,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -28,7 +30,12 @@ from app.tools.knowledge import (
     KnowledgeVectorIndexChunk,
 )
 from app.tools.registry import build_tool_registry
-from app.tools.schemas import CatalogCompareInput, CatalogSearchInput, DocumentSearchInput
+from app.tools.schemas import (
+    CatalogCompareInput,
+    CatalogSearchInput,
+    CatalogSearchOutput,
+    DocumentSearchInput,
+)
 
 TOOL_TEST_SETTINGS = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
 
@@ -202,6 +209,37 @@ def test_all_public_input_models_forbid_unknown_fields() -> None:
         assert schema.get("additionalProperties") is False
 
 
+def test_tool_catalog_rejects_duplicate_names_and_missing_handler() -> None:
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+
+    async def handler(request: CatalogSearchInput) -> CatalogSearchOutput:
+        return CatalogSearchOutput(result_type="empty")
+
+    with pytest.raises(ValueError, match="duplicate tool llm_name"):
+        ToolCatalog([BoundTool(contract, handler), BoundTool(contract, handler)])
+
+    with pytest.raises(ValueError, match="missing handler"):
+        ToolCatalog([BoundTool(contract, None)])  # type: ignore[arg-type]
+
+
+def test_tool_catalog_rejects_handler_model_mismatch() -> None:
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+
+    async def wrong_input_handler(request: DocumentSearchInput) -> CatalogSearchOutput:
+        return CatalogSearchOutput(result_type="empty")
+
+    async def wrong_output_handler(request: CatalogSearchInput) -> BaseModel:
+        return CatalogSearchOutput(result_type="empty")
+
+    with pytest.raises(ValueError, match="handler input model mismatch"):
+        ToolCatalog([BoundTool(contract, wrong_input_handler)])
+
+    with pytest.raises(ValueError, match="handler output model mismatch"):
+        ToolCatalog([BoundTool(contract, wrong_output_handler)])
+
+
 @pytest.mark.asyncio
 async def test_registry_rejects_unknown_fields_without_calling_handler() -> None:
     async def never_called_handler(request):  # pragma: no cover
@@ -323,6 +361,51 @@ async def test_registry_tool_executor_returns_execution_error_for_unknown_except
     assert result.error.message == "tool execution failed"
     assert result.error.retryable is False
     assert result.error.recommended_action == "stop"
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_executor_returns_dependency_unavailable() -> None:
+    contract = DefaultToolContractProvider().get_contract("catalog_search")
+    assert contract is not None
+
+    async def unavailable_handler(request):
+        raise SQLAlchemyError("postgresql://secret@localhost/internal")
+
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        catalog=ToolCatalog([BoundTool(contract, unavailable_handler)]),
+    )
+
+    result = await executor.execute(contract, {"query": "wireless mouse"}, {"user_id": 7})
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.code == "dependency_unavailable"
+    assert result.error.message == "tool dependency is temporarily unavailable"
+    assert result.error.retryable is True
+    assert result.error.recommended_action == "explain_temporary_unavailability"
+
+
+def test_stable_tool_error_codes_have_recovery_semantics() -> None:
+    from app.tools.contracts import _error_result
+
+    expected = {
+        "unknown_tool": (False, "stop"),
+        "invalid_input": (True, "replan_arguments"),
+        "unauthorized": (False, "request_authentication"),
+        "forbidden": (False, "stop"),
+        "timeout": (True, "retry_once"),
+        "dependency_unavailable": (True, "explain_temporary_unavailability"),
+        "execution_error": (False, "stop"),
+    }
+
+    for code, (retryable, recommended_action) in expected.items():
+        result = _error_result("catalog_search", code)
+        assert result.error is not None
+        assert result.error.code == code
+        assert result.error.retryable is retryable
+        assert result.error.recommended_action == recommended_action
 
 
 @pytest.mark.asyncio

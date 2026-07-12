@@ -27,6 +27,7 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
 
 - `catalog.search`
 - `catalog.compare`
+- `catalog.facets`
 - `order.lookup`
 - `policy.search`
 - `knowledge.search`
@@ -51,10 +52,23 @@ result = await registry.execute("catalog.search", {"query": "wireless mouse", "l
   "output": null,
   "error": {
     "code": "unknown_tool",
-    "message": "unknown tool: missing.tool"
+    "message": "unknown tool",
+    "retryable": false,
+    "recommended_action": "stop"
   }
 }
 ```
+
+Stable error codes exposed to orchestrator:
+
+- `unknown_tool`: no retry, `recommended_action=stop`.
+- `invalid_input`: argument validation failed, retryable via `recommended_action=replan_arguments`.
+- `unauthorized`: missing authenticated runtime context, `recommended_action=request_authentication`.
+- `forbidden`: explicitly forbidden, no retry, `recommended_action=stop`.
+- `timeout`: tool execution timed out, retryable via `recommended_action=retry_once`.
+- `dependency_unavailable`: PostgreSQL, embedding, or local index dependency unavailable, `recommended_action=explain_temporary_unavailability`.
+- `execution_error`: unclassified internal failure, no Python exception class, connection string, local path, secret, or stack trace is exposed, `recommended_action=stop`.
+
 
 ## catalog.search
 
@@ -598,3 +612,27 @@ Registry name：`catalog.facets`
 - 如果用户要两个商品事实对比，使用 `catalog.compare`。
 - 不走 LLM，不生成 SQL；由 SQLAlchemy 查询 PostgreSQL 后聚合。
 
+## Delivery Notes: Contract / Registry / Handler Convergence
+
+- `ToolContract + handler` is now represented by a single source of truth: `BoundTool` and `ToolCatalog` in `backend/app/tools/contracts.py`.
+- `DefaultToolContractProvider` derives LLM-facing contracts and schemas from the same `ToolCatalog`; `RegistryToolExecutor` resolves and executes `BoundTool` from that same catalog.
+- `llm_name` and `registry_name` remain separate namespaces, for example `catalog_search` and `catalog.search`; the mapping is defined once on `ToolContract`.
+- `ToolCatalog` validates `llm_name` uniqueness, `registry_name` uniqueness, handler presence, handler input annotation alignment with `contract.internal_input_model`, and handler return annotation alignment with `contract.output_model` at construction time.
+- Handler success outputs are validated again with `contract.output_model` at the executor boundary. Business empty results, `not_found`, and `unsupported_query` remain `ok=true` business outputs and are not mixed with system failures.
+- Dependency mapping: SQLAlchemy failures and local file/index `OSError` map to `dependency_unavailable`; timeout maps to `timeout`; unknown exceptions map to `execution_error` with a safe external message.
+- No tool has been verified as parallel-safe in this iteration. All tools remain `parallel_safe=False` because PostgreSQL tools share the current SQLAlchemy `AsyncSession`.
+
+Current acceptance commands:
+
+```bash
+cd backend
+.venv/bin/pytest
+.venv/bin/ruff check .
+```
+
+Current acceptance result:
+
+```text
+109 passed
+All checks passed
+```
