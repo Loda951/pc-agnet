@@ -145,6 +145,77 @@ class CatalogRepository:
         )
         return [product for _, product in ranked_products[: request.limit]]
 
+
+    async def list_facets(
+        self,
+        *,
+        facet: str,
+        category: str | None = None,
+        brand: str | None = None,
+        spec_key: str | None = None,
+        min_price: Decimal | None = None,
+        max_price: Decimal | None = None,
+        filters: dict[str, str] | None = None,
+        limit: int = 20,
+    ) -> list[tuple[str, int]]:
+        rows = await self._facet_candidate_rows(category, brand, min_price, max_price)
+        attributes_by_sku = await self._load_attributes([sku.id for sku, *_ in rows])
+        counts: dict[str, int] = {}
+        normalized_spec_key = spec_key.lower() if spec_key else None
+        for sku, _spu, row_brand, row_category in rows:
+            specs = _merge_specs(sku.specs_json or {}, attributes_by_sku.get(sku.id, {}))
+            if filters and not _matches_filters(specs, filters):
+                continue
+            if facet == "brand":
+                values = [row_brand.name]
+            elif facet == "category":
+                values = [row_category.name]
+            elif facet == "spec_key":
+                values = list(specs)
+            elif facet == "spec_value":
+                if normalized_spec_key:
+                    values = [
+                        value
+                        for key, value in specs.items()
+                        if key.lower() == normalized_spec_key
+                    ]
+                else:
+                    values = list(specs.values())
+            else:
+                raise ValueError(f"unsupported catalog facet: {facet}")
+            for value in values:
+                value = str(value).strip()
+                if not value:
+                    continue
+                counts[value] = counts.get(value, 0) + 1
+        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+    async def _facet_candidate_rows(
+        self,
+        category: str | None,
+        brand: str | None,
+        min_price: Decimal | None,
+        max_price: Decimal | None,
+    ):
+        stmt: Select = (
+            select(Sku, Spu, Brand, Category)
+            .join(Spu, Sku.spu_id == Spu.id)
+            .join(Brand, Spu.brand_id == Brand.id)
+            .join(Category, Spu.category_id == Category.id)
+            .where(Sku.status == 1, Spu.status == 1)
+        )
+        if category_terms := _category_terms(category):
+            stmt = stmt.where(
+                or_(*(Category.name.ilike(f"%{term}%") for term in category_terms))
+            )
+        if brand:
+            stmt = stmt.where(Brand.name.ilike(f"%{brand}%"))
+        if min_price is not None:
+            stmt = stmt.where(Sku.price >= min_price)
+        if max_price is not None:
+            stmt = stmt.where(Sku.price <= max_price)
+        return (await self.session.execute(stmt)).all()
+
     async def _load_attributes(self, sku_ids: list[int]) -> dict[int, dict[str, str]]:
         if not sku_ids:
             return {}

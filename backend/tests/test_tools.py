@@ -130,6 +130,7 @@ async def test_tool_registry_exposes_expected_business_tools(
 
     assert registry.tool_names == [
         "catalog.compare",
+        "catalog.facets",
         "catalog.search",
         "knowledge.search",
         "order.lookup",
@@ -144,6 +145,7 @@ def test_tool_contracts_expose_llm_safe_metadata() -> None:
     assert names == [
         "catalog_search",
         "catalog_compare",
+        "catalog_facets",
         "order_lookup",
         "policy_search",
         "knowledge_search",
@@ -173,6 +175,47 @@ def test_tool_contracts_export_public_llm_schemas_only() -> None:
         parameters = schema["function"]["parameters"]
         for runtime_field in contract.runtime_fields:
             assert runtime_field not in parameters.get("properties", {})
+
+
+@pytest.mark.asyncio
+async def test_tool_contracts_align_with_registry(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        registry = build_tool_registry(session, settings=TOOL_TEST_SETTINGS)
+
+    contracts = DefaultToolContractProvider().list_contracts()
+    assert sorted(contract.registry_name for contract in contracts) == registry.tool_names
+
+
+def test_all_public_input_models_forbid_unknown_fields() -> None:
+    contracts = DefaultToolContractProvider().list_contracts()
+
+    for contract in contracts:
+        schema = contract.public_input_model.model_json_schema()
+        assert schema.get("additionalProperties") is False
+
+
+@pytest.mark.asyncio
+async def test_registry_rejects_unknown_fields_without_calling_handler() -> None:
+    class NeverCalledRegistry:
+        async def execute(self, name: str, input_data: dict):  # pragma: no cover
+            raise AssertionError("registry should not be called")
+
+    executor = RegistryToolExecutor(
+        None,  # type: ignore[arg-type]
+        TOOL_TEST_SETTINGS,
+        registry=NeverCalledRegistry(),  # type: ignore[arg-type]
+    )
+
+    for contract in DefaultToolContractProvider().list_contracts():
+        args = {"unexpected_field": "must fail"}
+        if "query" in contract.public_input_model.model_json_schema().get("properties", {}):
+            args["query"] = "test"
+        result = await executor.execute(contract, args, {"user_id": 1})
+        assert not result.ok
+        assert result.error is not None
+        assert result.error.code == "invalid_input"
 
 
 @pytest.mark.asyncio
@@ -427,6 +470,46 @@ async def test_catalog_search_returns_unsupported_query(
     assert result.result_type == "empty"
     assert result.ranking_strategy == "unsupported_query"
     assert result.query_plan["supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_catalog_facets_returns_mouse_brands(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
+            "catalog.facets",
+            {"query": "what mouse brands do you sell", "facet": "brand", "category": "mouse"},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "facets"
+    assert result.output["facet"] == "brand"
+    values = {item["value"] for item in result.output["items"]}
+    assert {"Logitech", "Razer"} <= values
+
+
+@pytest.mark.asyncio
+async def test_catalog_facets_returns_spec_values(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
+            "catalog.facets",
+            {
+                "query": "what keyboard switches are available",
+                "facet": "spec_value",
+                "category": "keyboard",
+                "spec_key": "switches",
+            },
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "facets"
+    assert result.output["facet"] == "spec_value"
+    assert any("Red" in item["value"] for item in result.output["items"])
 
 
 @pytest.mark.asyncio

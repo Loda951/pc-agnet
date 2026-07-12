@@ -540,3 +540,61 @@ All checks passed
 - 如果没有 `LLM_API_KEY`，或显式设置 `CATALOG_LLM_PLANNER_ENABLED=false`，会自动回退到 `RuleBasedCatalogQueryPlanner`，主流程调用方式不变。
 - LLM 只返回 JSON query plan，不直接生成或执行 SQL；tool 会先做 guard 校验，再用 SQLAlchemy 查 PostgreSQL。
 
+## catalog.facets
+
+用途：
+
+- 查询商品目录元数据和聚合选项，而不是返回商品列表。
+- 适合“你们卖哪些品牌的鼠标”“Razer 有哪些外设”“显示器有哪些刷新率”“键盘有哪些轴体”等问题。
+
+LLM-safe name：`catalog_facets`
+
+Registry name：`catalog.facets`
+
+输入示例：
+
+```json
+{
+  "query": "你们卖哪些品牌的鼠标",
+  "facet": "brand",
+  "category": "mouse",
+  "brand": null,
+  "spec_key": null,
+  "min_price": null,
+  "max_price": null,
+  "filters": {},
+  "limit": 20
+}
+```
+
+支持的 `facet`：
+
+- `brand`：返回某类目/条件下有哪些品牌及数量。
+- `category`：返回某品牌/条件下有哪些类目及数量。
+- `spec_key`：返回某类目/条件下有哪些规格字段。
+- `spec_value`：返回某个规格字段有哪些可选值，例如 `switches`、`refresh_rate`、`resolution`。
+
+输出示例：
+
+```json
+{
+  "result_type": "facets",
+  "facet": "brand",
+  "items": [
+    {"value": "Logitech", "count": 12},
+    {"value": "Razer", "count": 8}
+  ],
+  "category": "mouse",
+  "brand": null,
+  "spec_key": null,
+  "query_plan": {}
+}
+```
+
+边界：
+
+- 只返回目录元数据和 count，不返回商品详情。
+- 如果用户要具体商品推荐，使用 `catalog.search`。
+- 如果用户要两个商品事实对比，使用 `catalog.compare`。
+- 不走 LLM，不生成 SQL；由 SQLAlchemy 查询 PostgreSQL 后聚合。
+

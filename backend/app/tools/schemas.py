@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.catalog import ProductCard
 from app.schemas.order import OrderCard
@@ -20,6 +20,8 @@ class ToolExecutionResult(BaseModel):
 
 
 class CatalogSearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(min_length=1)
     category: str | None = None
     brand: str | None = None
@@ -37,6 +39,8 @@ class CatalogSearchOutput(BaseModel):
 
 
 class CatalogCompareInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(min_length=1)
     sku_ids: list[int] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=5, ge=2, le=10)
@@ -63,7 +67,38 @@ class CatalogCompareOutput(BaseModel):
     query_plan: dict = Field(default_factory=dict)
 
 
+class CatalogFacetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = ""
+    facet: Literal["category", "brand", "spec_key", "spec_value"] = "brand"
+    category: str | None = None
+    brand: str | None = None
+    spec_key: str | None = None
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    filters: dict[str, str] = Field(default_factory=dict)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class CatalogFacetItem(BaseModel):
+    value: str
+    count: int
+
+
+class CatalogFacetOutput(BaseModel):
+    result_type: Literal["facets", "empty"]
+    facet: Literal["category", "brand", "spec_key", "spec_value"]
+    items: list[CatalogFacetItem] = Field(default_factory=list)
+    category: str | None = None
+    brand: str | None = None
+    spec_key: str | None = None
+    query_plan: dict = Field(default_factory=dict)
+
+
 class OrderLookupInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: int
     order_id: int | None = None
     limit: int = Field(default=5, ge=1, le=20)
@@ -87,6 +122,8 @@ class OrderLookupOutput(BaseModel):
 
 
 class DocumentSearchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(min_length=1)
     document_type: str | None = None
     limit: int = Field(default=3, ge=1, le=10)

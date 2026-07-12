@@ -10,6 +10,8 @@ from app.tools.registry import ToolRegistry, build_tool_registry
 from app.tools.schemas import (
     CatalogCompareInput,
     CatalogCompareOutput,
+    CatalogFacetInput,
+    CatalogFacetOutput,
     CatalogSearchInput,
     CatalogSearchOutput,
     DocumentSearchInput,
@@ -151,6 +153,7 @@ class RegistryToolExecutor:
 LLM_SAFE_TOOL_NAMES = (
     "catalog_search",
     "catalog_compare",
+    "catalog_facets",
     "order_lookup",
     "policy_search",
     "knowledge_search",
@@ -185,6 +188,21 @@ def default_tool_contracts() -> tuple[ToolContract, ...]:
             internal_input_model=CatalogCompareInput,
             output_model=CatalogCompareOutput,
             timeout_seconds=18.0,
+        ),
+
+        ToolContract(
+            llm_name="catalog_facets",
+            registry_name="catalog.facets",
+            description=(
+                "List catalog metadata and counts such as available brands in a category, "
+                "product categories sold by a brand, specification keys, or available values "
+                "for a specification. Use this for questions like which mouse brands are sold "
+                "or what monitor refresh rates are available. Do not use it for product lists."
+            ),
+            public_input_model=CatalogFacetInput,
+            internal_input_model=CatalogFacetInput,
+            output_model=CatalogFacetOutput,
+            timeout_seconds=8.0,
         ),
         ToolContract(
             llm_name="order_lookup",
