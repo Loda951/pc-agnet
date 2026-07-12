@@ -80,7 +80,9 @@ class ToolExecutor(Protocol):
     ) -> ToolExecutionResult: ...
 
 
-class StaticToolContractProvider:
+class DefaultToolContractProvider:
+    """Provide the authoritative built-in contracts owned by the tool module."""
+
     def __init__(self, contracts: Sequence[ToolContract] | None = None):
         configured = contracts or default_tool_contracts()
         self._contracts = {contract.llm_name: contract for contract in configured}

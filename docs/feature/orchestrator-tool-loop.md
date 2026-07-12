@@ -351,7 +351,7 @@ out_of_scope
 
 前端以 delta 构建即时文本，以 `done.response` 作为最终权威状态。
 
-## 10. Tool Contract 的当前过渡状态
+## 10. 正式 Tool Contract 接入状态
 
 当前编排层通过：
 
@@ -360,16 +360,18 @@ ToolContractProvider
 ToolExecutor
 ```
 
-获取并执行 Tool。临时实现位于 `backend/app/agent/tooling.py`：
+获取并执行 Tool。正式实现位于 `backend/app/tools/contracts.py`：
 
-- `StaticToolContractProvider`：静态提供 5 个精简 Contract。
-- `RegistryToolExecutor`：把 LLM-safe name 和 public input 适配到现有 `ToolRegistry`。
+- `DefaultToolContractProvider`：提供 Tool 模块拥有的 5 个正式 Contract。
+- `RegistryToolExecutor`：校验 public input、注入可信 Runtime 字段、校验 internal input 和
+  output，并调用现有 `ToolRegistry`。
 
-这层没有 mock 商品、订单或知识结果；真实运行仍调用现有业务 Tool。它只临时补齐队友正式
-Contract 尚未提供的 LLM-facing metadata 和 runtime injection。
+`backend/app/agent/graph.py` 已直接依赖正式 Contract，不再保留 agent 层的临时 Contract 或
+re-export Adapter。真实运行调用 PostgreSQL 商品/订单 Tool 和本地知识检索 Tool，不使用 mock
+业务结果。
 
-正式 Contract 到位后，替换 Provider/Executor Adapter 即可，Graph 不应依赖 Tool Service。
-详细要求见 `docs/feature/orchestrator-requirements-for-tools.md`。
+不阻塞当前运行的后续收口事项见
+`docs/feature/orchestrator-requirements-for-tools.md`。
 
 ## 11. 当前 LLM-safe Tool 名称
 
@@ -397,8 +399,8 @@ Contract 尚未提供的 LLM-facing metadata 和 runtime injection。
 
 建议后续迭代顺序：
 
-1. 接入队友正式 Tool Contract，删除临时 Static Contract。
-2. 增加真实 DeepSeek/Qwen 的 TYPE + Tool Call streaming 联调测试。
+1. 增加真实 DeepSeek/Qwen 的 TYPE + Tool Call streaming 联调测试。
+2. 收口 Tool 注册单一事实源、稳定错误分类和 public input 未知字段校验。
 3. 基于正式 `parallel_safe` 和独立 Session 策略决定是否并行执行 wave。
-4. 评估 Tool 错误分类、timeout 和 retry policy。
+4. 评估 retry policy。
 5. 再讨论 Working Memory 如何作为可信 context 进入 Orchestrator，避免与 Tool Contract 合并耦合。
