@@ -6,6 +6,8 @@ SAFE_QUERY_PLAN_KEYS = {
     "brands",
     "category",
     "comparison_fields",
+    "excluded_brands",
+    "excluded_usage",
     "fallback_reason",
     "filters",
     "items",

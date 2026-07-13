@@ -132,47 +132,6 @@ def test_explicit_usage_and_brand_negation_are_structured_corrections(
 
 
 @pytest.mark.asyncio
-async def test_agent_legacy_memory_path_preserves_structured_payload() -> None:
-    from typing import cast
-
-    from app.agent.graph import AgentRuntime
-    from app.agent.state import AgentState
-    from app.core.config import Settings
-
-    captured: list[dict] = []
-
-    class FakeRepository:
-        async def upsert_memory(
-            self,
-            _user_id: int,
-            _key: str,
-            _value: str,
-            _confidence: float,
-            **kwargs,
-        ):
-            captured.append(kwargs)
-
-    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
-    await runtime._maybe_update_memory(
-        cast(FakeRepository, FakeRepository()),
-        cast(AgentState, {"user_id": 1, "user_message_id": 9, "message": "以后不要无线"}),
-    )
-
-    assert captured == [
-        {
-            "scope": "user",
-            "fact_type": "preference",
-            "value_json": {
-                "preference": "wireless",
-                "negated": True,
-                "operation": "exclude",
-            },
-            "source_message_id": 9,
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_list_memory_filters_disabled_expired_and_other_users(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:

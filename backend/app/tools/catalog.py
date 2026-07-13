@@ -146,6 +146,8 @@ class ProductQueryPlan(BaseModel):
     query: str = Field(min_length=1)
     category: str | None = None
     brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_usage: list[str] = Field(default_factory=list, max_length=8)
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
@@ -206,10 +208,25 @@ class RuleBasedCatalogQueryPlanner:
         unsupported_reason = _unsupported_reason(request.query)
         explicit_brands = request.brands or ([request.brand] if request.brand else [])
         usage = request.usage or _usage_from_query(request.query) or defaults.usage
+        excluded_brands = _dedupe_keep_order(
+            [*defaults.excluded_brands, *request.excluded_brands]
+        )
+        excluded_brands = [
+            brand
+            for brand in excluded_brands
+            if brand.lower() not in {item.lower() for item in explicit_brands}
+        ]
+        excluded_usage = _dedupe_keep_order(
+            [*defaults.excluded_usage, *request.excluded_usage]
+        )
+        if usage:
+            excluded_usage = [item for item in excluded_usage if item != usage]
         return ProductQueryPlan(
             query=request.query,
             category=request.category or parsed.category,
             brands=explicit_brands or defaults.brands,
+            excluded_brands=excluded_brands,
+            excluded_usage=excluded_usage,
             min_price=request.min_price if request.min_price is not None else parsed.min_price,
             max_price=(
                 request.max_price
@@ -255,6 +272,8 @@ class LLMCatalogQueryPlanner:
             overrides={
                 "category": request.category,
                 "brands": explicit_brands,
+                "excluded_brands": request.excluded_brands,
+                "excluded_usage": request.excluded_usage,
                 "min_price": request.min_price,
                 "max_price": request.max_price,
                 "filters": request.filters,
@@ -344,6 +363,9 @@ class CatalogToolService:
         product_request = _plan_to_product_search(plan)
         products = await CatalogRepository(self.session).search_products(product_request)
         products = _filter_brands(products, plan.brands)
+        products = _filter_excluded_preferences(
+            products, plan.excluded_brands, plan.excluded_usage
+        )
         return CatalogSearchOutput(
             result_type="products" if products else "empty",
             products=products[: request.limit],
@@ -835,6 +857,19 @@ def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
         plan.max_price = overrides["max_price"]
     if overrides.get("filters"):
         plan.filters = {**plan.filters, **overrides["filters"]}
+    if overrides.get("excluded_brands"):
+        plan.excluded_brands = _dedupe_keep_order(
+            [*plan.excluded_brands, *overrides["excluded_brands"]]
+        )
+    if overrides.get("excluded_usage"):
+        plan.excluded_usage = _dedupe_keep_order(
+            [*plan.excluded_usage, *overrides["excluded_usage"]]
+        )
+    if plan.brands:
+        included = {item.lower() for item in plan.brands}
+        plan.excluded_brands = [
+            item for item in plan.excluded_brands if item.lower() not in included
+        ]
     if overrides.get("usage_scenario"):
         plan.usage_scenario = overrides["usage_scenario"]
         plan.keywords = _dedupe_keep_order(
@@ -845,6 +880,12 @@ def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
 def _apply_preference_defaults(plan: ProductQueryPlan, defaults: dict) -> None:
     if not plan.brands and defaults.get("brands"):
         plan.brands = list(defaults["brands"])
+    plan.excluded_brands = _dedupe_keep_order(
+        [*plan.excluded_brands, *defaults.get("excluded_brands", [])]
+    )
+    plan.excluded_usage = _dedupe_keep_order(
+        [*plan.excluded_usage, *defaults.get("excluded_usage", [])]
+    )
     if plan.max_price is None and defaults.get("max_price") is not None:
         plan.max_price = defaults["max_price"]
     connection_type = defaults.get("connection_type")
@@ -867,6 +908,31 @@ def _usage_from_query(query: str) -> str | None:
     if "办公" in query or "office" in lowered:
         return "office"
     return None
+
+
+def _filter_excluded_preferences(
+    products: list[ProductCard], excluded_brands: list[str], excluded_usage: list[str]
+) -> list[ProductCard]:
+    brand_terms = {item.lower() for item in excluded_brands}
+    usage_terms = {
+        term
+        for usage in excluded_usage
+        for term in {
+            usage.lower(),
+            "游戏" if usage.lower() == "gaming" else "办公" if usage.lower() == "office" else "",
+        }
+        if term
+    }
+
+    def allowed(product: ProductCard) -> bool:
+        if product.brand.lower() in brand_terms:
+            return False
+        haystack = " ".join(
+            [product.title, product.category, *[str(value) for value in product.specs.values()]]
+        ).lower()
+        return not any(term in haystack for term in usage_terms)
+
+    return [product for product in products if allowed(product)]
 
 
 def _comparison_fields_from_query(query: str) -> list[str]:

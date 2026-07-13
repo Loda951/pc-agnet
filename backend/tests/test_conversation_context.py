@@ -305,6 +305,42 @@ def test_applied_memory_ids_reject_booleans_and_fractional_numbers() -> None:
     assert context._valid_memory_ids([True, 7.9], {1, 7}) == []
 
 
+def test_successful_empty_catalog_result_clears_candidates_but_failure_preserves_them() -> None:
+    context = _context_module()
+    schemas = _context_schema_module()
+    previous = schemas.WorkingMemoryV2.model_validate(
+        {
+            "catalog": {
+                "query_plan": {"query": "old mouse"},
+                "candidate_spu_ids": [10],
+                "candidate_sku_ids": [101],
+                "candidate_display": [{"spu_id": 10, "sku_id": 101, "title": "Old"}],
+            }
+        }
+    )
+
+    success = context._next_working_memory(
+        previous,
+        {
+            "parsed": {"product_search": {"query": "no match"}},
+            "products": [],
+            "catalog_tool_succeeded": True,
+        },
+    )
+    failure = context._next_working_memory(
+        previous,
+        {
+            "products": [],
+            "catalog_tool_succeeded": False,
+        },
+    )
+
+    assert success.catalog.candidate_spu_ids == []
+    assert success.catalog.candidate_sku_ids == []
+    assert success.catalog.candidate_display == []
+    assert failure.catalog.candidate_sku_ids == [101]
+
+
 class FakeContextRepository:
     def __init__(self, memory) -> None:
         self.memory = memory

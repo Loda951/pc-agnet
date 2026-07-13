@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
     history: list[dict[str, str]]
     evidence: list[EvidenceItem]
     products: list[ProductCard]
+    catalog_tool_succeeded: bool
     order: OrderCard | None
     answer: str
     suggested_actions: list[dict[str, Any]]

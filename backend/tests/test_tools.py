@@ -9,6 +9,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+import app.tools.catalog as catalog_tools
+from app.schemas.catalog import ProductCard
 from app.tools.catalog import (
     CatalogComparePlan,
     CatalogToolService,
@@ -38,6 +40,46 @@ from app.tools.schemas import (
 )
 
 TOOL_TEST_SETTINGS = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
+
+
+def test_catalog_exclusions_filter_brand_and_usage_matches() -> None:
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=11,
+            title="Logitech Office Mouse",
+            brand="Logitech",
+            category="mouse",
+            price="199.00",
+            stock=5,
+            sales_count=10,
+            specs={"usage": "office"},
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=22,
+            title="Razer Gaming Mouse",
+            brand="Razer",
+            category="mouse",
+            price="299.00",
+            stock=5,
+            sales_count=20,
+            specs={"usage": "gaming"},
+        ),
+    ]
+
+    assert [
+        item.sku_id
+        for item in catalog_tools._filter_excluded_preferences(products, ["Logitech"], [])
+    ] == [
+        22
+    ]
+    assert [
+        item.sku_id
+        for item in catalog_tools._filter_excluded_preferences(products, [], ["gaming"])
+    ] == [
+        11
+    ]
 
 
 class FakeEmbeddingProvider:

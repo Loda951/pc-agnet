@@ -311,6 +311,8 @@ async def test_current_catalog_conditions_beat_working_and_long_term_defaults(
     assert tool_input["usage"] == "office"
     assert tool_input["preference_defaults"] == {
         "brands": ["Razer"],
+        "excluded_brands": [],
+        "excluded_usage": [],
         "max_price": "500",
         "connection_type": "Wired",
         "usage": "gaming",
@@ -606,3 +608,182 @@ async def test_failed_stream_run_uses_compact_context_audit(
     assert audit["dropped_turns"] == 3
     assert audit["applied_memory_ids"] == [1]
     assert captured["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_failure_finalizes_compact_failed_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = PreparedTurn(
+        user_id=7,
+        conversation_id=41,
+        user_message_id=58,
+        run_id=68,
+        message="推荐鼠标",
+        estimated_token_count=21,
+        retained_turns=1,
+        dropped_turns=4,
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeSession:
+        async def commit(self) -> None:
+            captured["committed"] = True
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            pass
+
+        async def fail_run(self, run_id, intent, state, error) -> None:
+            captured.update(run_id=run_id, intent=intent, state=state, error=error)
+
+    class RaisingRegistry:
+        async def execute(self, name: str, input_data: dict[str, Any]):
+            raise RuntimeError("registry boom")
+
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, FakeSession()),
+        Settings(llm_api_key=""),
+        knowledge_service=EmptyKnowledgeService(),
+        context_service=FakeContextService(prepared),
+        tool_registry=cast(Any, RaisingRegistry()),
+    )
+
+    with pytest.raises(RuntimeError, match="AI 回复生成失败"):
+        await runtime.run(ChatRequest(message=prepared.message), user_id=7)
+
+    assert captured["run_id"] == 68
+    assert captured["state"]["estimated_token_count"] == 21
+    assert captured["state"]["retained_turns"] == 1
+    assert captured["state"]["dropped_turns"] == 4
+    assert "history" not in captured["state"]
+    assert "memory" not in captured["state"]
+    assert "working_memory" not in captured["state"]
+    assert captured["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_current_negative_catalog_preferences_are_explicit_exclusions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = PreparedTurn(
+        user_id=7,
+        conversation_id=41,
+        user_message_id=59,
+        run_id=69,
+        message="不要 Logitech 的游戏无线鼠标",
+    )
+    context = FakeContextService(prepared)
+    registry = FakeToolRegistry(
+        {
+            "catalog.search": ToolExecutionResult(
+                tool_name="catalog.search",
+                ok=True,
+                output={
+                    "result_type": "empty",
+                    "products": [],
+                    "ranking_strategy": "test",
+                    "query_plan": {},
+                },
+            )
+        }
+    )
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            pass
+
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        knowledge_service=EmptyKnowledgeService(),
+        context_service=context,
+        tool_registry=registry,
+    )
+
+    await runtime.run(ChatRequest(message=prepared.message), user_id=7)
+
+    tool_input = registry.calls[0][1]
+    assert tool_input["brands"] == []
+    assert tool_input["excluded_brands"] == ["Logitech"]
+    assert tool_input["excluded_usage"] == ["gaming"]
+    assert tool_input["filters"]["connection_type"] == "Wired"
+
+
+@pytest.mark.asyncio
+async def test_negative_long_term_preferences_become_query_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = PreparedTurn(
+        user_id=7,
+        conversation_id=41,
+        user_message_id=60,
+        run_id=70,
+        message="推荐鼠标",
+        memory=[
+            StructuredMemory(
+                id=81,
+                scope="user",
+                fact_type="preference",
+                key="brand_preference",
+                value="不偏好 Logitech 品牌",
+                value_json={"brand": "Logitech", "negated": True},
+                confidence=0.8,
+            ),
+            StructuredMemory(
+                id=82,
+                scope="user",
+                fact_type="preference",
+                key="usage_preference",
+                value="不偏好游戏场景",
+                value_json={"usage": "gaming", "negated": True},
+                confidence=0.8,
+            ),
+        ],
+    )
+    context = FakeContextService(prepared)
+    registry = FakeToolRegistry(
+        {
+            "catalog.search": ToolExecutionResult(
+                tool_name="catalog.search",
+                ok=True,
+                output={
+                    "result_type": "empty",
+                    "products": [],
+                    "ranking_strategy": "test",
+                    "query_plan": {},
+                },
+            )
+        }
+    )
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            pass
+
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        knowledge_service=EmptyKnowledgeService(),
+        context_service=context,
+        tool_registry=registry,
+    )
+
+    await runtime.run(ChatRequest(message=prepared.message), user_id=7)
+
+    defaults = registry.calls[0][1]["preference_defaults"]
+    assert defaults["excluded_brands"] == ["Logitech"]
+    assert defaults["excluded_usage"] == ["gaming"]
+    assert context.completed_outcomes[0]["applied_memory_ids"] == [81, 82]

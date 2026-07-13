@@ -25,6 +25,8 @@ class CatalogPreferenceDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_usage: list[str] = Field(default_factory=list, max_length=8)
     max_price: Decimal | None = None
     connection_type: Literal["Wireless", "Wired"] | None = None
     usage: str | None = Field(default=None, max_length=64)
@@ -37,6 +39,8 @@ class CatalogSearchInput(BaseModel):
     category: str | None = None
     brand: str | None = None
     brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_usage: list[str] = Field(default_factory=list, max_length=8)
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)

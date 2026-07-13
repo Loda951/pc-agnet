@@ -225,10 +225,13 @@ def _next_working_memory(previous: WorkingMemoryV2, state: dict[str, Any]) -> Wo
     if isinstance(query_plan, dict):
         catalog.query_plan = CatalogMemory(query_plan=query_plan).query_plan
     products = state.get("products") if isinstance(state.get("products"), list) else []
-    if products:
+    if products or state.get("catalog_tool_succeeded") is True:
         catalog.candidate_spu_ids = _object_ids(products, "spu_id")
         catalog.candidate_sku_ids = _object_ids(products, "sku_id")
         catalog.candidate_display = _catalog_display_identities(products)
+        if not products:
+            catalog.referenced_spu_id = None
+            catalog.referenced_sku_id = None
     referenced = parsed.get("referenced_product")
     if referenced is not None:
         catalog.referenced_spu_id = _optional_object_int(referenced, "spu_id")
