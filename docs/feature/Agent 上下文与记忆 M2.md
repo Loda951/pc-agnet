@@ -14,7 +14,7 @@ priority: P1
 ## 目标与结论
 
 - 将 session history、working memory 和长期偏好收敛到 `ConversationContextService`，主流程通过 `prepare_turn()` 与 `complete_turn()` 使用上下文。
-- `AgentRuntime` 已通过 `ToolRegistry` 调用 `catalog.search`、`catalog.compare` 和 `order.lookup`；知识检索仍使用现有 `ChromaKnowledgeService`。
+- `AgentRuntime` 在 develop 的 `ToolContractProvider` / `RegistryToolExecutor` 编排上注入上下文，LLM-safe tool name 统一映射到 `catalog.search`、`catalog.compare`、`order.lookup`、`policy.search` 和 `knowledge.search` 等 registry name；M2 不另建旁路工具链。
 - 当前不引入 mem0、向量化用户记忆或 LLM 会话摘要。
 
 ## 上下文结构
@@ -62,5 +62,5 @@ priority: P1
 ## 验证与已知限制
 
 - 单元与无数据库集成测试覆盖 history 预算、V1→V2、偏好作用域/否定、ToolRegistry 同步与流式路径、记忆 API 和 response 序列化。
-- 本次最终修复验证为 109 passed、25 skipped；PostgreSQL 相关用例因本机数据库不可用而跳过，atomic disable、active SKU/SPU、exclusion SQL 和跨页 usage exclusion 均有无数据库 statement/behavior 覆盖。
-- 后续仍需补真实 PostgreSQL 全量回归、多标签页同会话幂等、生产 token 统计和 policy/knowledge 工具统一。
+- rebase develop 并完成编排对齐后的验证为 134 passed、29 skipped；PostgreSQL 相关用例因本机数据库不可用而跳过，atomic disable、active SKU/SPU、exclusion SQL 和跨页 usage exclusion 均有无数据库 statement/behavior 覆盖；Ruff 与前端构建通过。
+- 后续仍需补真实 PostgreSQL 全量回归、多标签页同会话幂等和生产 token 统计。

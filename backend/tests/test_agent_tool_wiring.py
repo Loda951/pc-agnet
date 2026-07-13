@@ -463,7 +463,7 @@ async def test_stream_registry_failure_emits_tool_error_and_finishes_safely(
     catalog_events = [
         event
         for event in events
-        if event["type"] == "tool_call" and event.get("tool_name") == "catalog.search"
+        if event["type"] == "tool_call" and event.get("tool_name") == "catalog_search"
     ]
     assert [event["status"] for event in catalog_events] == ["started", "error"]
     assert catalog_events[-1]["output"]["error"]["code"] == "catalog_unavailable"
@@ -533,7 +533,7 @@ async def test_v2_working_query_plan_routes_generic_catalog_followup(
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
-    assert response.intent == "product_recommendation"
+    assert response.intent == "catalog_search"
     assert registry.calls[0][0] == "catalog.search"
     tool_input = registry.calls[0][1]
     assert tool_input["category"] == "mouse"
@@ -795,7 +795,7 @@ async def test_failed_stream_run_uses_compact_context_audit(
 
 
 @pytest.mark.asyncio
-async def test_sync_runtime_failure_finalizes_compact_failed_run(
+async def test_sync_runtime_tool_exception_degrades_to_safe_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedTurn(
@@ -810,44 +810,39 @@ async def test_sync_runtime_failure_finalizes_compact_failed_run(
     )
     captured: dict[str, Any] = {}
 
-    class FakeSession:
-        async def commit(self) -> None:
-            captured["committed"] = True
-
     class FakeAuditRepository:
         def __init__(self, session: AsyncSession):
             pass
 
         async def add_tool_call(self, *args: Any) -> None:
-            pass
+            captured["tool_call"] = args
 
         async def fail_run(self, run_id, intent, state, error) -> None:
-            captured.update(run_id=run_id, intent=intent, state=state, error=error)
+            captured["failed_run"] = (run_id, intent, state, error)
 
     class RaisingRegistry:
         async def execute(self, name: str, input_data: dict[str, Any]):
             raise RuntimeError("registry boom")
 
     monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    context = FakeContextService(prepared)
     runtime = AgentRuntime(
-        cast(AsyncSession, FakeSession()),
+        cast(AsyncSession, None),
         Settings(llm_api_key=""),
         knowledge_service=EmptyKnowledgeService(),
-        context_service=FakeContextService(prepared),
+        context_service=context,
         tool_registry=cast(Any, RaisingRegistry()),
     )
 
-    with pytest.raises(RuntimeError, match="AI 回复生成失败"):
-        await runtime.run(ChatRequest(message=prepared.message), user_id=7)
+    response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
-    assert captured["run_id"] == 68
-    assert captured["state"]["estimated_token_count"] == 21
-    assert captured["state"]["retained_turns"] == 1
-    assert captured["state"]["dropped_turns"] == 4
-    assert "history" not in captured["state"]
-    assert "memory" not in captured["state"]
-    assert "working_memory" not in captured["state"]
-    assert captured["committed"] is True
+    assert response.intent == "catalog_search"
+    assert response.products == []
+    assert "查询暂时失败" in response.answer
+    assert captured["tool_call"][3]["error"]["code"] == "RuntimeError"
+    assert "failed_run" not in captured
+    assert context.completed_outcomes[0]["catalog_tool_succeeded"] is False
+    assert "product_search" not in context.completed_outcomes[0]["parsed"]
 
 
 @pytest.mark.asyncio

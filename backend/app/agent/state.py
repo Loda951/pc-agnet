@@ -23,6 +23,8 @@ class AgentState(TypedDict, total=False):
     boundary: dict[str, Any]
     parsed: dict[str, Any]
     history: list[dict[str, str]]
+    memory: list[dict[str, Any]]
+    working_memory: dict[str, Any]
     evidence: list[EvidenceItem]
     products: list[ProductCard]
     catalog_tool_succeeded: bool
@@ -32,3 +34,4 @@ class AgentState(TypedDict, total=False):
     prepared_turn: PreparedTurn
     applied_memory_ids: list[int]
     memory_changes: list[dict[str, Any]]
+    assistant_metadata: dict[str, Any]

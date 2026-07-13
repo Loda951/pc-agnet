@@ -5,13 +5,13 @@
 ## 总体边界
 
 - ToolRegistry 提供 tool 注册、schema 校验、执行和结构化返回，AgentRuntime 负责选择、调用顺序、结果融合和最终回答。
-- AgentRuntime 已接入 `catalog.search`、`catalog.compare`、`order.lookup`，同步与 SSE 路径都会记录对应 tool_call 事件。
+- AgentRuntime 通过统一 contract/executor 接入全部只读业务工具；LLM-safe name 在 contract 边界映射到对应 ToolRegistry name，同步与 SSE 路径共用同一 LangGraph。
 - 当前不提供 MCP。
 - 商品和订单 tools 读取 PostgreSQL。
 - 政策和知识 tools 读取本地 JSON 文档，并使用 BM25 / vector / hybrid 检索。
 - 向量检索使用本地真实 embedding 模型 `BAAI/bge-small-zh-v1.5`，通过 `sentence-transformers` 在本机生成向量。
 - 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
-- 注意：`policy.search` / `knowledge.search` 已注册但尚未成为 AgentRuntime 的知识主链；当前 Agent 继续使用 `ChromaKnowledgeService` 和 `knowledge.retrieve`，避免本阶段切换 RAG 数据源。
+- `policy.search` / `knowledge.search` 已成为 AgentRuntime 的知识工具主链；上下文与记忆 M2 复用该链路，不再维护独立的 `knowledge.retrieve` 编排旁路。
 
 ## ToolRegistry
 
@@ -648,6 +648,6 @@ cd backend
 当前验收结果：
 
 ```text
-109 passed
+134 passed, 29 skipped
 All checks passed
 ```

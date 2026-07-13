@@ -121,6 +121,7 @@ def build_orchestrator_input(
     message: str,
     tool_wave_count: int,
     orchestrator_call_count: int,
+    memory_context: dict[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "user_message": message,
@@ -131,6 +132,8 @@ def build_orchestrator_input(
             "maximum_orchestrator_calls": 3,
         },
     }
+    if memory_context:
+        payload["memory_context"] = memory_context
     return "当前请求上下文：" + json.dumps(payload, ensure_ascii=False)
 
 

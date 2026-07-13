@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
 import app.tools.catalog as catalog_tools
+from app.core.config import Settings
 from app.models import Sku, Spu
 from app.schemas.catalog import ProductCard
 from app.tools.catalog import (
