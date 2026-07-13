@@ -8,7 +8,8 @@ import type {
   ConversationSummary,
   HandoffRequest,
   HandoffRequestAccepted,
-  HandoffRequestType
+  HandoffRequestType,
+  MemoryItem
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -338,6 +339,33 @@ export async function listConversations(): Promise<ConversationSummary[]> {
     });
   }
   return response.json();
+}
+
+export async function listMemories(): Promise<MemoryItem[]> {
+  const response = await authorizedFetch("/api/memories", { method: "GET" });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
+  return response.json();
+}
+
+export async function forgetMemory(memoryId: number): Promise<void> {
+  const response = await authorizedFetch(`/api/memories/${memoryId}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response);
+    throw new ApiError(formatApiError(response.status, detail), {
+      status: response.status,
+      detail,
+      retryable: response.status >= 500
+    });
+  }
 }
 
 export async function deleteConversation(conversationId: number): Promise<void> {

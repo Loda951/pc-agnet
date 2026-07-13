@@ -214,9 +214,9 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
         id=7,
         scope="user",
         fact_type="preference",
-        key="brand_preference",
-        value="偏好 罗技 品牌",
-        value_json={"brand": "罗技", "operation": "set"},
+        key="connection_preference",
+        value="偏好无线设备",
+        value_json={"preference": "wireless", "operation": "set"},
         confidence=0.8,
     )
     repository = FakeContextRepository(memory)
@@ -276,6 +276,14 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
     assert "memory" not in changes.audit
     assert "working_memory" not in changes.audit
     assert changes.applied_memory_ids == [7]
+    assert [item.model_dump(mode="json") for item in changes.memory_changes] == [
+        {
+            "action": "updated",
+            "memory_id": 88,
+            "key": "connection_preference",
+            "display_value": "不偏好无线设备",
+        }
+    ]
     assert session.committed is True
 
 

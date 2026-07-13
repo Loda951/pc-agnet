@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.catalog import ProductCard
+from app.schemas.memory import MemoryChange
 from app.schemas.order import OrderCard
 
 BoundaryClassificationValue = Literal[
@@ -47,3 +48,4 @@ class ChatResponse(BaseModel):
     products: list[ProductCard] = Field(default_factory=list)
     order: OrderCard | None = None
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
+    memory_changes: list[MemoryChange] | None = None

@@ -245,7 +245,9 @@ class ConversationRepository:
         await self.session.flush()
         return True
 
-    async def list_memory(self, user_id: int, limit: int = 10) -> list[MemoryFact]:
+    async def list_memory(
+        self, user_id: int, limit: int | None = 10
+    ) -> list[MemoryFact]:
         now = utc_now_naive()
         stmt = (
             select(MemoryFact)
@@ -257,8 +259,9 @@ class ConversationRepository:
                 MemoryFact.value_json.is_not(None),
             )
             .order_by(MemoryFact.updated_at.desc())
-            .limit(limit)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
         return list((await self.session.execute(stmt)).scalars().all())
 
     async def upsert_memory(

@@ -1,7 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import after_sales, auth, catalog, chat, conversations, health, orders
+from app.api.routers import (
+    after_sales,
+    auth,
+    catalog,
+    chat,
+    conversations,
+    health,
+    memories,
+    orders,
+)
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -19,6 +28,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(conversations.router, prefix="/api")
+app.include_router(memories.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(catalog.router, prefix="/api")
 app.include_router(orders.router, prefix="/api")

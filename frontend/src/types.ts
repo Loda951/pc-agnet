@@ -39,6 +39,25 @@ export type SuggestedAction = {
   payload: Record<string, unknown>;
 };
 
+export type MemoryItem = {
+  id: number;
+  key: string;
+  fact_type: string;
+  display_value: string;
+  structured_value: Record<string, unknown>;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string | null;
+};
+
+export type MemoryChange = {
+  action: "created" | "updated";
+  memory_id: number;
+  key: string;
+  display_value: string;
+};
+
 export type AuthUser = {
   id: number;
   login_identifier: string;
@@ -92,6 +111,7 @@ export type ChatResponse = {
   products: ProductCard[];
   order?: OrderCard | null;
   suggested_actions: SuggestedAction[];
+  memory_changes?: MemoryChange[] | null;
 };
 
 export type ChatMessage = {

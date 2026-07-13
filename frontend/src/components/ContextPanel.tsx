@@ -7,11 +7,13 @@ import {
   ClipboardList,
   Headset,
   History,
+  Loader2,
   MessageSquareText,
   PackageSearch,
   RotateCcw,
   Search,
   ShieldCheck,
+  Sparkles,
   Truck
 } from "lucide-react";
 import { useState } from "react";
@@ -25,6 +27,7 @@ import type {
   HandoffRequest,
   HandoffRequestType,
   HandoffNotice,
+  MemoryItem,
   OrderCard,
   ProductCard
 } from "../types";
@@ -44,6 +47,10 @@ type ContextPanelProps = {
   products: ProductCard[];
   order: OrderCard | null;
   turns: ConversationTurn[];
+  memories: MemoryItem[];
+  memoriesLoading: boolean;
+  memoryError: string | null;
+  forgettingMemoryIds: ReadonlySet<number>;
   handoffNotice: HandoffNotice | null;
   ticketType: HandoffRequestType;
   ticketReason: string;
@@ -63,6 +70,7 @@ type ContextPanelProps = {
   onAcknowledgeHandoff: () => void;
   onHandoffQueryIdChange: (value: string) => void;
   onQueryHandoffRequest: () => void;
+  onForgetMemory: (memoryId: number) => void;
 };
 
 export function ContextPanel({
@@ -71,6 +79,10 @@ export function ContextPanel({
   products,
   order,
   turns,
+  memories,
+  memoriesLoading,
+  memoryError,
+  forgettingMemoryIds,
   handoffNotice,
   ticketType,
   ticketReason,
@@ -89,7 +101,8 @@ export function ContextPanel({
   onRequestHandoff,
   onAcknowledgeHandoff,
   onHandoffQueryIdChange,
-  onQueryHandoffRequest
+  onQueryHandoffRequest,
+  onForgetMemory
 }: ContextPanelProps) {
   const showAfterSales =
     boundary?.classification === "human_handoff_required" || handoffNotice !== null;
@@ -100,7 +113,12 @@ export function ContextPanel({
   const showDetails = !isMobile || mobileTab === "details";
   const mobileVisible = isMobile && mobileTab !== "chat";
 
-  const hasData = products.length > 0 || order !== null || evidence.length > 0 || turns.length > 0;
+  const hasData =
+    products.length > 0 ||
+    order !== null ||
+    evidence.length > 0 ||
+    turns.length > 0 ||
+    memories.length > 0;
 
   return (
     <aside className={`context-panel${mobileVisible ? " mobile-visible" : ""}`}>
@@ -123,6 +141,51 @@ export function ContextPanel({
             <BoundaryStatusBar boundary={boundary} />
           ) : (
             <EmptyState text="等待请求" />
+          )}
+        </section>
+      )}
+
+      {showDetails && (
+        <section className="panel-section">
+          <div className="section-title">
+            <Sparkles size={14} />
+            <h2>已记住偏好</h2>
+            {memories.length > 0 && <span className="section-count">{memories.length}</span>}
+          </div>
+          {memoriesLoading ? (
+            <div className="memory-state">
+              <Loader2 className="spin" size={14} />
+              <span>正在加载偏好</span>
+            </div>
+          ) : memoryError ? (
+            <div className="memory-state memory-error" role="alert">
+              {memoryError}
+            </div>
+          ) : memories.length > 0 ? (
+            <div className="memory-list">
+              {memories.map((memory) => {
+                const pending = forgettingMemoryIds.has(memory.id);
+                return (
+                  <article className="memory-item" key={memory.id}>
+                    <div>
+                      <strong>{memory.display_value}</strong>
+                      <small>{formatDateTime(memory.updated_at)}</small>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onForgetMemory(memory.id)}
+                      disabled={pending}
+                      aria-label={`忘记偏好：${memory.display_value}`}
+                    >
+                      {pending && <Loader2 className="spin" size={12} />}
+                      {pending ? "处理中" : "忘记"}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <EmptyState text="还没有已记住的偏好" />
           )}
         </section>
       )}

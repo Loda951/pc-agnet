@@ -1149,9 +1149,86 @@ select:focus-visible {
 
 .product-list,
 .evidence-list,
+.memory-list,
 .turn-list {
   display: grid;
   gap: var(--space-2);
+}
+
+/* --- Explicit Memory ------------------------------------------------------ */
+.memory-state {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.memory-state.memory-error {
+  border-color: var(--crimson-dim);
+  background: var(--crimson-weak);
+  color: var(--crimson);
+}
+
+.memory-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  padding: var(--space-3);
+}
+
+.memory-item > div {
+  min-width: 0;
+}
+
+.memory-item strong,
+.memory-item small {
+  display: block;
+}
+
+.memory-item strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.memory-item small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.memory-item button {
+  min-width: 58px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  border: 1px solid var(--crimson-dim);
+  border-radius: var(--radius-sm);
+  background: var(--crimson-weak);
+  color: var(--crimson);
+  font-size: 12px;
+}
+
+.memory-item button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 /* --- Boundary Card -------------------------------------------------------- */

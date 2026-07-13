@@ -5,9 +5,11 @@ import {
   clearAuthSession,
   createHandoffRequest,
   deleteConversation as deleteConversationApi,
+  forgetMemory,
   getConversation,
   getHandoffRequest,
   listConversations,
+  listMemories,
   login,
   logout,
   restoreSession,
@@ -31,6 +33,7 @@ import type {
   HandoffRequest,
   HandoffRequestType,
   HandoffNotice,
+  MemoryItem,
   OperatorProfile,
   OrderCard,
   PendingRequest,
@@ -56,6 +59,8 @@ type SubmitOptions = {
 
 export default function App() {
   const streamAbortRef = useRef<AbortController | null>(null);
+  const memoryRequestVersionRef = useRef(0);
+  const workspaceVersionRef = useRef(0);
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [authStatus, setAuthStatus] = useState<"restoring" | "ready" | "submitting">(
     "restoring"
@@ -63,6 +68,10 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [memoriesLoading, setMemoriesLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [forgettingMemoryIds, setForgettingMemoryIds] = useState<Set<number>>(new Set());
   const [conversationId, setConversationId] = useState<number | undefined>();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -121,6 +130,7 @@ export default function App() {
   useEffect(() => {
     if (!authSession) return;
     void refreshConversations();
+    void refreshMemories();
   }, [authSession?.user.id]);
 
   async function handleLogin(loginIdentifier: string, password: string) {
@@ -139,10 +149,11 @@ export default function App() {
   }
 
   async function handleLogout() {
-    await logout();
+    const logoutRequest = logout();
     setAuthSession(null);
     setAuthError(null);
     resetWorkspace();
+    await logoutRequest;
   }
 
   function handleAuthExpired() {
@@ -155,8 +166,14 @@ export default function App() {
   function resetWorkspace() {
     streamAbortRef.current?.abort();
     streamAbortRef.current = null;
+    memoryRequestVersionRef.current += 1;
+    workspaceVersionRef.current += 1;
     setConversations([]);
     setConversationsLoading(false);
+    setMemories([]);
+    setMemoriesLoading(false);
+    setMemoryError(null);
+    setForgettingMemoryIds(new Set());
     resetActiveConversation();
   }
 
@@ -193,6 +210,59 @@ export default function App() {
       }
     } finally {
       setConversationsLoading(false);
+    }
+  }
+
+  async function refreshMemories() {
+    const requestVersion = ++memoryRequestVersionRef.current;
+    setMemoriesLoading(true);
+    setMemoryError(null);
+    try {
+      const nextMemories = await listMemories();
+      if (requestVersion !== memoryRequestVersionRef.current) return;
+      setMemories(nextMemories);
+    } catch (err) {
+      if (requestVersion !== memoryRequestVersionRef.current) return;
+      const requestError = toRequestError(err, { message: "load memories" });
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+        return;
+      }
+      setMemoryError("偏好记忆加载失败，请稍后重试。");
+    } finally {
+      if (requestVersion === memoryRequestVersionRef.current) {
+        setMemoriesLoading(false);
+      }
+    }
+  }
+
+  async function handleForgetMemory(memoryId: number) {
+    if (forgettingMemoryIds.has(memoryId)) return;
+    const workspaceVersion = workspaceVersionRef.current;
+    setForgettingMemoryIds((current) => new Set(current).add(memoryId));
+    setMemoryError(null);
+    try {
+      await forgetMemory(memoryId);
+      if (workspaceVersion !== workspaceVersionRef.current) return;
+      memoryRequestVersionRef.current += 1;
+      setMemoriesLoading(false);
+      setMemories((current) => current.filter((memory) => memory.id !== memoryId));
+    } catch (err) {
+      if (workspaceVersion !== workspaceVersionRef.current) return;
+      const requestError = toRequestError(err, { message: "forget memory" });
+      if (requestError.status === 401 || requestError.status === 403) {
+        handleAuthExpired();
+        return;
+      }
+      setMemoryError(requestError.message);
+    } finally {
+      if (workspaceVersion === workspaceVersionRef.current) {
+        setForgettingMemoryIds((current) => {
+          const next = new Set(current);
+          next.delete(memoryId);
+          return next;
+        });
+      }
     }
   }
 
@@ -408,6 +478,9 @@ export default function App() {
 
     if (event.type === "done") {
       applyFinalResponse(event.response, assistantMessageId, userMessage);
+      if (event.response.memory_changes?.length) {
+        void refreshMemories();
+      }
       return;
     }
 
@@ -422,16 +495,7 @@ export default function App() {
   }
 
   function applyFinalResponse(
-    response: {
-      conversation_id: number;
-      answer: string;
-      intent: string;
-      boundary: BoundaryClassification;
-      evidence: EvidenceItem[];
-      products: ProductCard[];
-      order?: OrderCard | null;
-      suggested_actions: SuggestedAction[];
-    },
+    response: Extract<ChatStreamEvent, { type: "done" }>["response"],
     assistantMessageId: string,
     userMessage: string
   ) {
@@ -720,6 +784,10 @@ export default function App() {
         products={products}
         order={order}
         turns={turns}
+        memories={memories}
+        memoriesLoading={memoriesLoading}
+        memoryError={memoryError}
+        forgettingMemoryIds={forgettingMemoryIds}
         handoffNotice={handoffNotice}
         ticketType={ticketType}
         ticketReason={ticketReason}
@@ -739,6 +807,7 @@ export default function App() {
         onAcknowledgeHandoff={handleAcknowledgeHandoff}
         onHandoffQueryIdChange={setHandoffQueryId}
         onQueryHandoffRequest={handleQueryHandoffRequest}
+        onForgetMemory={(memoryId) => void handleForgetMemory(memoryId)}
       />
 
       <button

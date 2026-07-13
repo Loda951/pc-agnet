@@ -31,3 +31,4 @@ class AgentState(TypedDict, total=False):
     suggested_actions: list[dict[str, Any]]
     prepared_turn: PreparedTurn
     applied_memory_ids: list[int]
+    memory_changes: list[dict[str, Any]]

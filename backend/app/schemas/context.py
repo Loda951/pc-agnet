@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.schemas.memory import MemoryChange
+
 SAFE_QUERY_PLAN_KEYS = {
     "brands",
     "category",
@@ -177,6 +179,7 @@ class MemoryChanges(BaseModel):
     working_memory: WorkingMemoryV2
     upserted_memory_ids: list[int] = Field(default_factory=list)
     applied_memory_ids: list[int] = Field(default_factory=list)
+    memory_changes: list[MemoryChange] = Field(default_factory=list)
     audit: dict[str, Any] = Field(default_factory=dict)
 
 
