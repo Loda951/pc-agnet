@@ -305,6 +305,40 @@ def test_memory_upsert_statement_is_atomic_for_active_identity() -> None:
 
     assert "ON CONFLICT" in sql
     assert "disabled_at IS NULL" in sql
+    assert "xmax = 0" in sql
+
+
+@pytest.mark.asyncio
+async def test_memory_change_action_comes_from_atomic_upsert_result() -> None:
+    context = _context_module()
+    existing = SimpleNamespace(
+        id=7,
+        scope="user",
+        fact_type="preference",
+        key="connection_preference",
+        value="偏好无线设备",
+        value_json={"preference": "wireless"},
+        confidence=0.8,
+    )
+    repository = FakeContextRepository(existing, upsert_created=True)
+    session = FakeContextSession(repository.run)
+    service = context.ConversationContextService(
+        session,
+        Settings(llm_api_key=""),
+        repository=repository,
+    )
+
+    prepared = await service.prepare_turn(1, None, "以后不要无线")
+    changes = await service.complete_turn(
+        prepared,
+        {
+            "answer": "已记录",
+            "intent": "product_recommendation",
+            "boundary": {"classification": "in_scope_auto"},
+        },
+    )
+
+    assert changes.memory_changes[0].action == "created"
 
 
 def test_applied_memory_ids_reject_booleans_and_fractional_numbers() -> None:
@@ -350,8 +384,9 @@ def test_successful_empty_catalog_result_clears_candidates_but_failure_preserves
 
 
 class FakeContextRepository:
-    def __init__(self, memory) -> None:
+    def __init__(self, memory, *, upsert_created: bool = False) -> None:
         self.memory = memory
+        self.upsert_created = upsert_created
         self.run = SimpleNamespace(id=44)
         self.messages: list[tuple[int, str, str]] = []
         self.upserts: list[dict] = []
@@ -392,7 +427,10 @@ class FakeContextRepository:
         **kwargs,
     ):
         self.upserts.append(kwargs)
-        return SimpleNamespace(id=88)
+        return SimpleNamespace(
+            memory=SimpleNamespace(id=88),
+            created=self.upsert_created,
+        )
 
     async def update_working_memory(self, _conversation_id: int, value: dict):
         self.updated_working_memory = value

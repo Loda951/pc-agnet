@@ -1,6 +1,7 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,12 @@ from app.schemas.conversation import (
 
 def utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+@dataclass(frozen=True)
+class MemoryUpsertResult:
+    memory: MemoryFact
+    created: bool
 
 
 class ConversationRepository:
@@ -275,7 +282,7 @@ class ConversationRepository:
         value_json: dict | None = None,
         source_message_id: int | None = None,
         expires_in_days: int | None = None,
-    ) -> MemoryFact:
+    ) -> MemoryUpsertResult:
         now = utc_now_naive()
         expires_at = now + timedelta(days=expires_in_days) if expires_in_days else None
         result = await self.session.execute(
@@ -292,7 +299,8 @@ class ConversationRepository:
                 now=now,
             )
         )
-        return result.scalar_one()
+        row = result.one()
+        return MemoryUpsertResult(memory=row[0], created=bool(row.created))
 
     async def mark_memory_used(self, user_id: int, memory_ids: list[int]) -> int:
         if not memory_ids:
@@ -311,18 +319,21 @@ class ConversationRepository:
         return int(result.rowcount or 0)
 
     async def disable_memory(self, user_id: int, memory_id: int) -> bool:
+        now = utc_now_naive()
         memory = (
             await self.session.execute(
                 select(MemoryFact).where(
                     MemoryFact.id == memory_id,
                     MemoryFact.user_id == user_id,
                     MemoryFact.disabled_at.is_(None),
+                    or_(MemoryFact.expires_at.is_(None), MemoryFact.expires_at > now),
+                    MemoryFact.origin == "explicit_user",
+                    MemoryFact.value_json.is_not(None),
                 )
             )
         ).scalar_one_or_none()
         if memory is None:
             return False
-        now = utc_now_naive()
         memory.disabled_at = now
         memory.updated_at = now
         return True
@@ -381,4 +392,4 @@ def _memory_upsert_statement(
             "disabled_at": None,
             "updated_at": statement.excluded.updated_at,
         },
-    ).returning(MemoryFact)
+    ).returning(MemoryFact, literal_column("(xmax = 0)").label("created"))

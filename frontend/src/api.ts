@@ -16,6 +16,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const ACCESS_TOKEN_KEY = "pc-agent.accessToken";
 const REFRESH_TOKEN_KEY = "pc-agent.refreshToken";
 const EXPIRES_IN_KEY = "pc-agent.expiresIn";
+let authSessionGeneration = 0;
 
 type ApiErrorOptions = {
   status?: number;
@@ -91,6 +92,7 @@ export async function restoreSession(): Promise<AuthSession | null> {
 
 export async function refreshSession(): Promise<AuthSession> {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+  const generation = authSessionGeneration;
   if (!refreshToken) {
     clearAuthSession();
     throw new ApiError("登录已过期，请重新登录。", { status: 401 });
@@ -108,6 +110,9 @@ export async function refreshSession(): Promise<AuthSession> {
   }
 
   if (!response.ok) {
+    if (!isCurrentAuthSession(generation, refreshToken)) {
+      throw new ApiError("登录状态已变更。", { status: 401 });
+    }
     clearAuthSession();
     const detail = await parseErrorDetail(response);
     throw new ApiError(formatApiError(response.status, detail), {
@@ -117,6 +122,9 @@ export async function refreshSession(): Promise<AuthSession> {
     });
   }
 
+  if (!isCurrentAuthSession(generation, refreshToken)) {
+    throw new ApiError("登录状态已变更。", { status: 401 });
+  }
   return saveAuthSession((await response.json()) as AuthTokenResponse);
 }
 
@@ -410,9 +418,17 @@ function saveAuthSession(payload: AuthTokenResponse): AuthSession {
 }
 
 export function clearAuthSession() {
+  authSessionGeneration += 1;
   localStorage.removeItem(ACCESS_TOKEN_KEY);
   localStorage.removeItem(REFRESH_TOKEN_KEY);
   localStorage.removeItem(EXPIRES_IN_KEY);
+}
+
+function isCurrentAuthSession(generation: number, refreshToken: string): boolean {
+  return (
+    generation === authSessionGeneration &&
+    localStorage.getItem(REFRESH_TOKEN_KEY) === refreshToken
+  );
 }
 
 function readStoredSession(): AuthSession | null {

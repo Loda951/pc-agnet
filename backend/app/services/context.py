@@ -172,13 +172,9 @@ class ConversationContextService:
 
         upserted_memory_ids: list[int] = []
         memory_changes: list[MemoryChange] = []
-        existing_memory_keys = {
-            (item.scope, item.fact_type, item.key) for item in prepared_turn.memory
-        }
         if _allows_long_term_memory(state):
             for fact in self.memory_service.extract_long_term_facts(prepared_turn.message):
-                identity = (fact["scope"], fact["fact_type"], fact["key"])
-                persisted = await self.repository.upsert_memory(
+                upsert = await self.repository.upsert_memory(
                     prepared_turn.user_id,
                     fact["key"],
                     fact["value"],
@@ -188,16 +184,16 @@ class ConversationContextService:
                     value_json=fact["value_json"],
                     source_message_id=prepared_turn.user_message_id,
                 )
+                persisted = upsert.memory
                 upserted_memory_ids.append(persisted.id)
                 memory_changes.append(
                     MemoryChange(
-                        action="updated" if identity in existing_memory_keys else "created",
+                        action="created" if upsert.created else "updated",
                         memory_id=persisted.id,
                         key=fact["key"],
                         display_value=fact["value"],
                     )
                 )
-                existing_memory_keys.add(identity)
 
         working_memory = _next_working_memory(prepared_turn.working_memory, state)
         await self.repository.update_working_memory(

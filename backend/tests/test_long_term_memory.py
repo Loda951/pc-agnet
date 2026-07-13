@@ -248,7 +248,7 @@ async def test_upsert_memory_sets_governance_fields_and_can_disable_memory(
         await session.commit()
         assert marked == 1
         assert usage_memory.last_used_at is not None
-        assert untouched.last_used_at is None
+        assert untouched.memory.last_used_at is None
 
         disabled = await repo.disable_memory(1, usage_memory.id)
         await session.commit()
@@ -256,3 +256,52 @@ async def test_upsert_memory_sets_governance_fields_and_can_disable_memory(
         assert disabled is True
         remaining = await repo.list_memory(1)
         assert [item.key for item in remaining] == ["brand_preference"]
+
+
+@pytest.mark.asyncio
+async def test_disable_memory_rejects_hidden_or_unmanaged_rows(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    now = utc_now_naive()
+    async with db_session_factory() as session:
+        session.add_all(
+            [
+                MemoryFact(
+                    id=9101,
+                    user_id=1,
+                    scope="user",
+                    fact_type="preference",
+                    key="expired_hidden",
+                    value="expired",
+                    value_json={"value": "expired"},
+                    origin="explicit_user",
+                    expires_at=now - timedelta(days=1),
+                ),
+                MemoryFact(
+                    id=9102,
+                    user_id=1,
+                    scope="user",
+                    fact_type="preference",
+                    key="legacy_hidden",
+                    value="legacy",
+                    value_json={"value": "legacy"},
+                    origin="legacy_inferred",
+                ),
+                MemoryFact(
+                    id=9103,
+                    user_id=1,
+                    scope="user",
+                    fact_type="preference",
+                    key="unstructured_hidden",
+                    value="unstructured",
+                    value_json=None,
+                    origin="explicit_user",
+                ),
+            ]
+        )
+        await session.commit()
+        repo = ConversationRepository(session)
+
+        assert await repo.disable_memory(1, 9101) is False
+        assert await repo.disable_memory(1, 9102) is False
+        assert await repo.disable_memory(1, 9103) is False
