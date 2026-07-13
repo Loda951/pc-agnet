@@ -67,6 +67,7 @@ QUERY_STOP_WORDS = {
 
 TRUE_VALUES = {"是", "true", "yes", "1", "有", "支持", "wireless"}
 FALSE_VALUES = {"否", "false", "no", "0", "无", "不支持", "wired"}
+MAX_CANDIDATE_PAGES = 50
 
 
 class CatalogRepository:
@@ -74,66 +75,31 @@ class CatalogRepository:
         self.session = session
 
     async def search_products(self, request: ProductSearchRequest) -> list[ProductCard]:
-        stmt: Select = (
-            select(Sku, Spu, Brand, Category)
-            .join(Spu, Sku.spu_id == Spu.id)
-            .join(Brand, Spu.brand_id == Brand.id)
-            .join(Category, Spu.category_id == Category.id)
-            .where(Sku.status == 1, Spu.status == 1)
-            .order_by(Spu.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
-            .limit(_candidate_limit(request.limit))
-        )
         query_tokens = _query_tokens(request.query)
-
-        if query_tokens:
-            conditions = []
-            for token in query_tokens:
-                like = f"%{token}%"
-                conditions.extend(
-                    [
-                        Sku.title.ilike(like),
-                        Spu.title.ilike(like),
-                        Brand.name.ilike(like),
-                        Category.name.ilike(like),
-                    ]
-                )
-            stmt = stmt.where(or_(*conditions))
-
-        if category_terms := _category_terms(request.category):
-            stmt = stmt.where(
-                or_(*(Category.name.ilike(f"%{term}%") for term in category_terms))
+        page_size = _candidate_page_size(request.limit)
+        eligible_products: list[ProductCard] = []
+        offset = 0
+        for _ in range(MAX_CANDIDATE_PAGES):
+            page, exhausted = await self._fetch_candidate_page(
+                request,
+                offset=offset,
+                limit=page_size,
             )
-
-        if request.min_price is not None:
-            stmt = stmt.where(Sku.price >= request.min_price)
-        if request.max_price is not None:
-            stmt = stmt.where(Sku.price <= request.max_price)
-
-        rows = (await self.session.execute(stmt)).all()
-        attributes_by_sku = await self._load_attributes([sku.id for sku, *_ in rows])
-        ranked_products: list[tuple[int, ProductCard]] = []
-        for sku, spu, brand, category in rows:
-            specs = _merge_specs(sku.specs_json or {}, attributes_by_sku.get(sku.id, {}))
-            if request.filters and not _matches_filters(specs, request.filters):
-                continue
-            product = ProductCard(
-                spu_id=spu.id,
-                sku_id=sku.id,
-                title=sku.title,
-                brand=brand.name,
-                category=category.name,
-                price=Decimal(sku.price),
-                stock=sku.stock,
-                sales_count=spu.sales_count,
-                specs=specs,
-                image_url=sku.image_url,
-            )
-            ranked_products.append(
-                (
-                    _score_product(product, request, query_tokens),
-                    product,
+            eligible_products.extend(
+                _take_eligible_products(
+                    page,
+                    excluded_usage=request.excluded_usage,
+                    limit=page_size,
                 )
             )
+            if len(eligible_products) >= request.limit or exhausted:
+                break
+            offset += page_size
+
+        ranked_products = [
+            (_score_product(product, request, query_tokens), product)
+            for product in eligible_products
+        ]
         ranked_products.sort(
             key=lambda item: (
                 -item[0],
@@ -215,6 +181,36 @@ class CatalogRepository:
         if max_price is not None:
             stmt = stmt.where(Sku.price <= max_price)
         return (await self.session.execute(stmt)).all()
+    async def _fetch_candidate_page(
+        self,
+        request: ProductSearchRequest,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[ProductCard], bool]:
+        stmt = _catalog_search_statement(request, limit=limit, offset=offset)
+        rows = (await self.session.execute(stmt)).all()
+        attributes_by_sku = await self._load_attributes([sku.id for sku, *_ in rows])
+        products: list[ProductCard] = []
+        for sku, spu, brand, category in rows:
+            specs = _merge_specs(sku.specs_json or {}, attributes_by_sku.get(sku.id, {}))
+            if request.filters and not _matches_filters(specs, request.filters):
+                continue
+            products.append(
+                ProductCard(
+                    spu_id=spu.id,
+                    sku_id=sku.id,
+                    title=sku.title,
+                    brand=brand.name,
+                    category=category.name,
+                    price=Decimal(sku.price),
+                    stock=sku.stock,
+                    sales_count=spu.sales_count,
+                    specs=specs,
+                    image_url=sku.image_url,
+                )
+            )
+        return products, len(rows) < limit
 
     async def _load_attributes(self, sku_ids: list[int]) -> dict[int, dict[str, str]]:
         if not sku_ids:
@@ -231,8 +227,79 @@ class CatalogRepository:
         return attributes
 
 
-def _candidate_limit(limit: int) -> int:
+def _candidate_page_size(limit: int) -> int:
     return min(max(limit * 50, 100), 1000)
+
+
+def _catalog_search_statement(
+    request: ProductSearchRequest,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> Select:
+    page_limit = limit or _candidate_page_size(request.limit)
+    stmt: Select = (
+        select(Sku, Spu, Brand, Category)
+        .join(Spu, Sku.spu_id == Spu.id)
+        .join(Brand, Spu.brand_id == Brand.id)
+        .join(Category, Spu.category_id == Category.id)
+        .where(Sku.status == 1, Spu.status == 1)
+        .order_by(Spu.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
+        .limit(page_limit)
+        .offset(offset)
+    )
+    query_tokens = _query_tokens(request.query)
+    if query_tokens:
+        conditions = []
+        for token in query_tokens:
+            like = f"%{token}%"
+            conditions.extend(
+                [
+                    Sku.title.ilike(like),
+                    Spu.title.ilike(like),
+                    Brand.name.ilike(like),
+                    Category.name.ilike(like),
+                ]
+            )
+        stmt = stmt.where(or_(*conditions))
+    if category_terms := _category_terms(request.category):
+        stmt = stmt.where(
+            or_(*(Category.name.ilike(f"%{term}%") for term in category_terms))
+        )
+    if request.min_price is not None:
+        stmt = stmt.where(Sku.price >= request.min_price)
+    if request.max_price is not None:
+        stmt = stmt.where(Sku.price <= request.max_price)
+    for brand in request.excluded_brands:
+        stmt = stmt.where(~Brand.name.ilike(f"%{brand}%"))
+    return stmt
+
+
+def _take_eligible_products(
+    products: list[ProductCard], *, excluded_usage: list[str], limit: int
+) -> list[ProductCard]:
+    if not excluded_usage:
+        return products[:limit]
+    usage_terms = {
+        term
+        for usage in excluded_usage
+        for term in (
+            usage.lower(),
+            "游戏" if usage.lower() == "gaming" else "办公" if usage.lower() == "office" else "",
+        )
+        if term
+    }
+    eligible: list[ProductCard] = []
+    for product in products:
+        haystack = " ".join(
+            [product.title, product.category, *product.specs.values()]
+        ).lower()
+        if any(term in haystack for term in usage_terms):
+            continue
+        eligible.append(product)
+        if len(eligible) >= limit:
+            break
+    return eligible
 
 
 def _category_terms(category: str | None) -> set[str]:

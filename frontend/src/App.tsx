@@ -61,6 +61,8 @@ export default function App() {
   const streamAbortRef = useRef<AbortController | null>(null);
   const memoryRequestVersionRef = useRef(0);
   const workspaceVersionRef = useRef(0);
+  const conversationListRequestVersionRef = useRef(0);
+  const conversationDetailRequestVersionRef = useRef(0);
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [authStatus, setAuthStatus] = useState<"restoring" | "ready" | "submitting">(
     "restoring"
@@ -168,6 +170,8 @@ export default function App() {
     streamAbortRef.current = null;
     memoryRequestVersionRef.current += 1;
     workspaceVersionRef.current += 1;
+    conversationListRequestVersionRef.current += 1;
+    conversationDetailRequestVersionRef.current += 1;
     setConversations([]);
     setConversationsLoading(false);
     setMemories([]);
@@ -200,16 +204,32 @@ export default function App() {
   }
 
   async function refreshConversations() {
+    const workspaceVersion = workspaceVersionRef.current;
+    const requestVersion = ++conversationListRequestVersionRef.current;
     setConversationsLoading(true);
     try {
-      setConversations(await listConversations());
+      const nextConversations = await listConversations();
+      if (
+        workspaceVersion !== workspaceVersionRef.current ||
+        requestVersion !== conversationListRequestVersionRef.current
+      ) return;
+      setConversations(nextConversations);
     } catch (err) {
+      if (
+        workspaceVersion !== workspaceVersionRef.current ||
+        requestVersion !== conversationListRequestVersionRef.current
+      ) return;
       const requestError = toRequestError(err, { message: "load conversations" });
       if (requestError.status === 401 || requestError.status === 403) {
         handleAuthExpired();
       }
     } finally {
-      setConversationsLoading(false);
+      if (
+        workspaceVersion === workspaceVersionRef.current &&
+        requestVersion === conversationListRequestVersionRef.current
+      ) {
+        setConversationsLoading(false);
+      }
     }
   }
 
@@ -272,13 +292,18 @@ export default function App() {
   }
 
   async function handleDeleteConversation(targetId: number) {
+    const workspaceVersion = workspaceVersionRef.current;
     try {
       await deleteConversationApi(targetId);
+      if (workspaceVersion !== workspaceVersionRef.current) return;
       if (targetId === conversationId) {
         resetActiveConversation();
       }
-      await refreshConversations();
+      if (workspaceVersion === workspaceVersionRef.current) {
+        await refreshConversations();
+      }
     } catch (err) {
+      if (workspaceVersion !== workspaceVersionRef.current) return;
       const requestError = toRequestError(err, { message: "delete conversation" });
       if (requestError.status === 401 || requestError.status === 403) {
         handleAuthExpired();
@@ -288,13 +313,23 @@ export default function App() {
 
   async function handleSelectConversation(nextConversationId: number) {
     if (loading || nextConversationId === conversationId) return;
+    const workspaceVersion = workspaceVersionRef.current;
+    const requestVersion = ++conversationDetailRequestVersionRef.current;
     setError(null);
     setFailedRequest(null);
     setConversationsLoading(true);
     try {
       const detail = await getConversation(nextConversationId);
+      if (
+        workspaceVersion !== workspaceVersionRef.current ||
+        requestVersion !== conversationDetailRequestVersionRef.current
+      ) return;
       applyConversationDetail(detail);
     } catch (err) {
+      if (
+        workspaceVersion !== workspaceVersionRef.current ||
+        requestVersion !== conversationDetailRequestVersionRef.current
+      ) return;
       const requestError = toRequestError(err, { message: "load conversation" });
       if (requestError.status === 401 || requestError.status === 403) {
         handleAuthExpired();
@@ -306,7 +341,12 @@ export default function App() {
       });
       setResponseStatus("error");
     } finally {
-      setConversationsLoading(false);
+      if (
+        workspaceVersion === workspaceVersionRef.current &&
+        requestVersion === conversationDetailRequestVersionRef.current
+      ) {
+        setConversationsLoading(false);
+      }
     }
   }
 

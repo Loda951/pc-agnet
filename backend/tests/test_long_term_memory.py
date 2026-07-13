@@ -251,9 +251,11 @@ async def test_upsert_memory_sets_governance_fields_and_can_disable_memory(
         assert untouched.memory.last_used_at is None
 
         disabled = await repo.disable_memory(1, usage_memory.id)
+        disabled_again = await repo.disable_memory(1, usage_memory.id)
         await session.commit()
 
         assert disabled is True
+        assert disabled_again is False
         remaining = await repo.list_memory(1)
         assert [item.key for item in remaining] == ["brand_preference"]
 

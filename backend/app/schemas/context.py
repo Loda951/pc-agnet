@@ -7,12 +7,10 @@ from app.schemas.memory import MemoryChange
 SAFE_QUERY_PLAN_KEYS = {
     "brands",
     "category",
-    "comparison_fields",
     "excluded_brands",
     "excluded_usage",
     "fallback_reason",
     "filters",
-    "items",
     "keywords",
     "limit",
     "max_price",
@@ -63,10 +61,26 @@ class CatalogDisplayIdentity(BaseModel):
     image_url: str | None = None
 
 
+class CatalogComparisonMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str | None = None
+    sku_ids: list[int] = Field(default_factory=list)
+    comparison_fields: list[str] = Field(default_factory=list)
+
+    @field_validator("sku_ids", mode="before")
+    @classmethod
+    def unique_sku_ids(cls, value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(int(item) for item in value if item is not None))[:10]
+
+
 class CatalogMemory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query_plan: dict[str, Any] = Field(default_factory=dict)
+    comparison: CatalogComparisonMemory = Field(default_factory=CatalogComparisonMemory)
     candidate_spu_ids: list[int] = Field(default_factory=list)
     candidate_sku_ids: list[int] = Field(default_factory=list)
     candidate_display: list[CatalogDisplayIdentity] = Field(default_factory=list)

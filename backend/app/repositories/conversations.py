@@ -161,6 +161,15 @@ class ConversationRepository:
         )
         return list(reversed(messages))
 
+    async def count_complete_turns(self, conversation_id: int) -> int:
+        result = await self.session.execute(
+            select(func.count(Message.id)).where(
+                Message.conversation_id == conversation_id,
+                Message.role == "assistant",
+            )
+        )
+        return int(result.scalar_one())
+
     async def get_working_memory(self, conversation_id: int) -> dict:
         conversation = await self.session.get(Conversation, conversation_id)
         if conversation is None or conversation.working_memory_json is None:
@@ -320,23 +329,10 @@ class ConversationRepository:
 
     async def disable_memory(self, user_id: int, memory_id: int) -> bool:
         now = utc_now_naive()
-        memory = (
-            await self.session.execute(
-                select(MemoryFact).where(
-                    MemoryFact.id == memory_id,
-                    MemoryFact.user_id == user_id,
-                    MemoryFact.disabled_at.is_(None),
-                    or_(MemoryFact.expires_at.is_(None), MemoryFact.expires_at > now),
-                    MemoryFact.origin == "explicit_user",
-                    MemoryFact.value_json.is_not(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if memory is None:
-            return False
-        memory.disabled_at = now
-        memory.updated_at = now
-        return True
+        result = await self.session.execute(
+            _disable_memory_statement(user_id=user_id, memory_id=memory_id, now=now)
+        )
+        return result.scalar_one_or_none() is not None
 
 
 def _clip(value: str, limit: int = 80) -> str:
@@ -393,3 +389,19 @@ def _memory_upsert_statement(
             "updated_at": statement.excluded.updated_at,
         },
     ).returning(MemoryFact, literal_column("(xmax = 0)").label("created"))
+
+
+def _disable_memory_statement(*, user_id: int, memory_id: int, now: datetime):
+    return (
+        update(MemoryFact)
+        .where(
+            MemoryFact.id == memory_id,
+            MemoryFact.user_id == user_id,
+            MemoryFact.disabled_at.is_(None),
+            or_(MemoryFact.expires_at.is_(None), MemoryFact.expires_at > now),
+            MemoryFact.origin == "explicit_user",
+            MemoryFact.value_json.is_not(None),
+        )
+        .values(disabled_at=now, updated_at=now)
+        .returning(MemoryFact.id)
+    )

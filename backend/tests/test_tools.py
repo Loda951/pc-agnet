@@ -6,10 +6,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import select, update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 import app.tools.catalog as catalog_tools
+from app.models import Sku, Spu
 from app.schemas.catalog import ProductCard
 from app.tools.catalog import (
     CatalogComparePlan,
@@ -137,6 +140,8 @@ async def test_negative_brand_search_recalls_alternatives_before_filtering(
 
     assert captured["request"].query == ""
     assert captured["request"].limit >= 12
+    assert captured["request"].excluded_brands == ["Logitech"]
+    assert captured["request"].excluded_usage == ["gaming"]
     assert [item.brand for item in result.products] == ["Razer"]
 
 
@@ -839,6 +844,48 @@ async def test_catalog_compare_uses_compare_plan_fields(
     assert {"Logitech", "Razer"} <= brands
     assert sum(1 for product in result.products if product.brand == "Logitech") >= 1
     assert sum(1 for product in result.products if product.brand == "Razer") >= 1
+
+
+@pytest.mark.asyncio
+async def test_direct_sku_compare_omits_inactive_sku_and_spu(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Sku.id, Spu.id)
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(Sku.title.in_([
+                    "Logitech Codex G502 Hero Black",
+                    "Razer Codex Viper V3 Pro White",
+                ]))
+                .order_by(Sku.id)
+            )
+        ).all()
+        assert len(rows) == 2
+        inactive_sku_id, _ = rows[0]
+        active_sku_id, inactive_spu_id = rows[1]
+        await session.execute(update(Sku).where(Sku.id == inactive_sku_id).values(status=0))
+        await session.execute(update(Spu).where(Spu.id == inactive_spu_id).values(status=0))
+        await session.flush()
+
+        result = await CatalogToolService(session).compare(
+            CatalogCompareInput(
+                query="compare selected products",
+                sku_ids=[inactive_sku_id, active_sku_id],
+                limit=5,
+            )
+        )
+
+    assert result.products == []
+
+
+def test_direct_sku_compare_statement_requires_active_sku_and_spu() -> None:
+    statement = catalog_tools._active_sku_rows_statement([11, 22])
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "sku.status" in sql
+    assert "spu.status" in sql
 
 
 @pytest.mark.asyncio

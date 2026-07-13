@@ -24,7 +24,14 @@ PRODUCT_FOLLOWUP_TERMS = [
     "第三个",
 ]
 ORDER_REFERENCE_TERMS = ["这个订单", "这笔订单", "刚才的订单", "上一单", "这单"]
-POLICY_REFERENCE_TERMS = ["这个政策", "该政策", "这个规则", "这条规则", "那", "还有呢"]
+POLICY_REFERENCE_TERMS = [
+    "这个政策",
+    "该政策",
+    "这个规则",
+    "这条规则",
+    "那保修",
+    "还有呢",
+]
 STABLE_MEMORY_MARKERS = ["以后", "长期", "我通常", "请记住", "记住我"]
 ORDINAL_PRODUCT_REFERENCES = [
     (0, ["第一个", "第一款", "第1个", "第1款", "1号"]),
@@ -112,7 +119,7 @@ class MemoryService:
         last_policy_query = working_memory.get("last_policy_query")
         if not last_policy_query:
             return message
-        if len(message) <= 12 or any(term in message for term in POLICY_REFERENCE_TERMS):
+        if self._is_controlled_policy_followup(message):
             return f"{last_policy_query}\n追问：{message}"
         return message
 
@@ -191,10 +198,12 @@ class MemoryService:
 
     def _is_policy_followup(self, message: str, working_memory: dict[str, Any]) -> bool:
         return bool(working_memory.get("last_policy_query")) and (
-            len(message) <= 12
-            or "保修" in message
-            or any(term in message for term in POLICY_REFERENCE_TERMS)
+            self._is_controlled_policy_followup(message)
         )
+
+    @staticmethod
+    def _is_controlled_policy_followup(message: str) -> bool:
+        return "保修" in message or any(term in message for term in POLICY_REFERENCE_TERMS)
 
 
 def _extract_clause_facts(message: str) -> list[dict[str, Any]]:

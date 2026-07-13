@@ -3,8 +3,9 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.graph import AgentRuntime
+from app.agent.graph import AgentRuntime, _catalog_search_input
 from app.core.config import Settings
+from app.schemas.catalog import ProductSearchRequest
 from app.schemas.chat import ChatRequest
 from app.schemas.context import (
     MemoryChanges,
@@ -538,6 +539,189 @@ async def test_v2_working_query_plan_routes_generic_catalog_followup(
     assert tool_input["category"] == "mouse"
     assert tool_input["filters"]["connection_type"] == "Wireless"
     assert tool_input["preference_defaults"]["max_price"] == "500"
+
+
+def test_three_turn_search_compare_followup_reuses_complete_safe_search_plan() -> None:
+    working_memory = WorkingMemoryV2.model_validate(
+        {
+            "catalog": {
+                "query_plan": {
+                    "query": "fps ergonomic mouse",
+                    "category": "mouse",
+                    "brands": ["Razer"],
+                    "excluded_brands": ["Logitech"],
+                    "excluded_usage": ["office"],
+                    "min_price": 200,
+                    "max_price": 500,
+                    "filters": {
+                        "connection_type": "Wired",
+                        "max_dpi": "20000",
+                        "hand_orientation": "Right",
+                        "tracking_method": "Optical",
+                    },
+                    "keywords": ["fps", "lightweight"],
+                    "usage_scenario": "gaming",
+                    "sort": "price_asc",
+                    "limit": 6,
+                },
+                "comparison": {
+                    "query": "对比第一个和第二个",
+                    "sku_ids": [101, 102],
+                    "comparison_fields": ["price", "max_dpi"],
+                },
+                "candidate_sku_ids": [101, 102],
+            }
+        }
+    )
+    state = cast(
+        Any,
+        {
+            "message": "换成无线",
+            "working_memory": working_memory.model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+
+    tool_input, _ = _catalog_search_input(
+        state,
+        ProductSearchRequest(
+            query="换成无线",
+            filters={"connection_type": "Wireless"},
+            limit=6,
+        ),
+    )
+    payload = tool_input.model_dump(mode="json")
+
+    assert payload["query"] == "fps ergonomic mouse"
+    assert payload["category"] == "mouse"
+    assert payload["brands"] == ["Razer"]
+    assert payload["excluded_brands"] == ["Logitech"]
+    assert payload["excluded_usage"] == ["office"]
+    assert payload["min_price"] == "200"
+    assert payload["max_price"] == "500"
+    assert payload["filters"] == {
+        "connection_type": "Wireless",
+        "max_dpi": "20000",
+        "hand_orientation": "Right",
+        "tracking_method": "Optical",
+    }
+    assert payload["keywords"] == ["fps", "lightweight"]
+    assert payload["usage"] == "gaming"
+    assert payload["sort"] == "price_asc"
+    assert "换成无线" not in payload["keywords"]
+
+
+@pytest.mark.asyncio
+async def test_bare_v2_brand_exclusion_routes_back_to_catalog_search() -> None:
+    runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
+    working_memory = WorkingMemoryV2.model_validate(
+        {
+            "catalog": {
+                "query_plan": {
+                    "query": "gaming mouse",
+                    "category": "mouse",
+                    "brands": ["Razer"],
+                }
+            }
+        }
+    )
+
+    state = await runtime._route_intent(
+        cast(
+            Any,
+            {
+                "message": "不要 Razer",
+                "working_memory": working_memory.model_dump(mode="json"),
+                "memory": [],
+            },
+        )
+    )
+
+    assert state["intent"] == "product_recommendation"
+    assert "product_search" in state["parsed"]
+
+
+def test_v2_followup_brand_exclusion_removes_historical_positive_brand() -> None:
+    state = cast(
+        Any,
+        {
+            "message": "不要 Razer",
+            "working_memory": WorkingMemoryV2.model_validate(
+                {
+                    "catalog": {
+                        "query_plan": {
+                            "query": "gaming mouse",
+                            "category": "mouse",
+                            "brands": ["Razer"],
+                            "keywords": ["gaming"],
+                            "usage_scenario": "gaming",
+                            "limit": 6,
+                        }
+                    }
+                }
+            ).model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+
+    tool_input, _ = _catalog_search_input(
+        state,
+        ProductSearchRequest(query="不要 Razer", limit=6),
+    )
+
+    assert tool_input.brands == []
+    assert tool_input.excluded_brands == ["Razer"]
+
+
+def test_v2_category_switch_uses_current_query_and_drops_old_constraints() -> None:
+    state = cast(
+        Any,
+        {
+            "message": "换成无线键盘",
+            "working_memory": WorkingMemoryV2.model_validate(
+                {
+                    "catalog": {
+                        "query_plan": {
+                            "query": "fps ergonomic mouse",
+                            "category": "mouse",
+                            "max_price": 500,
+                            "filters": {
+                                "connection_type": "Wired",
+                                "max_dpi": "20000",
+                                "hand_orientation": "Right",
+                            },
+                            "keywords": ["fps", "lightweight"],
+                            "usage_scenario": "gaming",
+                            "sort": "price_asc",
+                            "limit": 6,
+                        }
+                    }
+                }
+            ).model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+
+    tool_input, _ = _catalog_search_input(
+        state,
+        ProductSearchRequest(
+            query="无线键盘",
+            category="keyboard",
+            filters={"connection_type": "Wireless"},
+            limit=6,
+        ),
+    )
+
+    assert tool_input.query == "无线键盘"
+    assert tool_input.category == "keyboard"
+    assert tool_input.filters == {"connection_type": "Wireless"}
+    assert tool_input.keywords == []
+    assert tool_input.usage is None
+    assert tool_input.max_price == 500
+    assert tool_input.sort == "price_asc"
+    assert tool_input.preference_defaults.brands == []
+    assert tool_input.preference_defaults.connection_type is None
+    assert tool_input.preference_defaults.usage is None
 
 
 @pytest.mark.asyncio

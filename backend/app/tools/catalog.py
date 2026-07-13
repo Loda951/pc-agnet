@@ -247,8 +247,11 @@ class RuleBasedCatalogQueryPlanner:
                 else defaults.max_price
             ),
             filters=filters,
-            keywords=[usage] if usage else [],
+            keywords=_dedupe_keep_order(
+                [*request.keywords, *([usage] if usage else [])]
+            ),
             usage_scenario=usage,
+            sort=request.sort,
             limit=request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
@@ -288,7 +291,9 @@ class LLMCatalogQueryPlanner:
                 "min_price": request.min_price,
                 "max_price": request.max_price,
                 "filters": request.filters,
+                "keywords": request.keywords,
                 "usage_scenario": request.usage,
+                "sort": request.sort,
             },
             preference_defaults=request.preference_defaults.model_dump(mode="json"),
         )
@@ -519,13 +524,7 @@ class CatalogToolService:
     async def _products_by_sku_ids(self, sku_ids: list[int]) -> list[ProductCard]:
         if not sku_ids:
             return []
-        stmt = (
-            select(Sku, Spu, Brand, Category)
-            .where(Sku.id.in_(sku_ids))
-            .join(Spu, Sku.spu_id == Spu.id)
-            .join(Brand, Spu.brand_id == Brand.id)
-            .join(Category, Spu.category_id == Category.id)
-        )
+        stmt = _active_sku_rows_statement(sku_ids)
         rows = (await self.session.execute(stmt)).all()
         attributes = await CatalogRepository(self.session)._load_attributes(
             [sku.id for sku, *_ in rows]
@@ -592,6 +591,16 @@ def validate_catalog_sql(sql: str) -> None:
     unknown = referenced_tables - CATALOG_ALLOWED_TABLES
     if unknown:
         raise ValueError(f"catalog SQL references non-catalog tables: {', '.join(sorted(unknown))}")
+
+
+def _active_sku_rows_statement(sku_ids: list[int]):
+    return (
+        select(Sku, Spu, Brand, Category)
+        .join(Spu, Sku.spu_id == Spu.id)
+        .join(Brand, Spu.brand_id == Brand.id)
+        .join(Category, Spu.category_id == Category.id)
+        .where(Sku.id.in_(sku_ids), Sku.status == 1, Spu.status == 1)
+    )
 
 
 def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPlan:
@@ -686,6 +695,8 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         min_price=plan.min_price,
         max_price=plan.max_price,
         filters=plan.filters,
+        excluded_brands=plan.excluded_brands,
+        excluded_usage=plan.excluded_usage,
         limit=min(20, max(12, plan.limit * 4)) if has_exclusions else plan.limit,
     )
 
@@ -874,6 +885,10 @@ def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
         plan.max_price = overrides["max_price"]
     if overrides.get("filters"):
         plan.filters = {**plan.filters, **overrides["filters"]}
+    if overrides.get("keywords"):
+        plan.keywords = list(overrides["keywords"])
+    if overrides.get("sort"):
+        plan.sort = overrides["sort"]
     if overrides.get("excluded_brands"):
         plan.excluded_brands = _dedupe_keep_order(
             [*plan.excluded_brands, *overrides["excluded_brands"]]

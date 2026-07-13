@@ -17,6 +17,22 @@ const ACCESS_TOKEN_KEY = "pc-agent.accessToken";
 const REFRESH_TOKEN_KEY = "pc-agent.refreshToken";
 const EXPIRES_IN_KEY = "pc-agent.expiresIn";
 let authSessionGeneration = 0;
+let refreshSessionFlight: RefreshSessionFlight | null = null;
+
+export type AuthSessionSnapshot = {
+  generation: number;
+  accessToken: string | null;
+  refreshToken: string | null;
+};
+
+type RefreshSessionFlight = {
+  snapshot: RefreshAuthSessionSnapshot;
+  promise: Promise<AuthSession>;
+};
+
+type RefreshAuthSessionSnapshot = AuthSessionSnapshot & {
+  refreshToken: string;
+};
 
 type ApiErrorOptions = {
   status?: number;
@@ -64,6 +80,7 @@ export async function login(loginIdentifier: string, password: string): Promise<
     });
   }
 
+  authSessionGeneration += 1;
   return saveAuthSession((await response.json()) as AuthTokenResponse);
 }
 
@@ -90,27 +107,54 @@ export async function restoreSession(): Promise<AuthSession | null> {
   });
 }
 
-export async function refreshSession(): Promise<AuthSession> {
-  const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-  const generation = authSessionGeneration;
-  if (!refreshToken) {
+export function refreshSession(): Promise<AuthSession> {
+  return refreshSessionForSnapshot(readAuthSessionSnapshot());
+}
+
+function refreshSessionForSnapshot(snapshot: AuthSessionSnapshot): Promise<AuthSession> {
+  if (!snapshot.refreshToken) {
     clearAuthSession();
-    throw new ApiError("登录已过期，请重新登录。", { status: 401 });
+    return Promise.reject(new ApiError("登录已过期，请重新登录。", { status: 401 }));
+  }
+  const refreshSnapshot: RefreshAuthSessionSnapshot = {
+    ...snapshot,
+    refreshToken: snapshot.refreshToken
+  };
+  if (
+    refreshSessionFlight &&
+    refreshSessionSnapshotsMatch(
+      refreshSessionFlight.snapshot,
+      refreshSnapshot
+    )
+  ) {
+    return refreshSessionFlight.promise;
   }
 
+  const refresh = performRefreshSession(refreshSnapshot);
+  refreshSessionFlight = { snapshot: refreshSnapshot, promise: refresh };
+  refresh.then(
+    () => clearRefreshPromise(refresh),
+    () => clearRefreshPromise(refresh)
+  );
+  return refresh;
+}
+
+async function performRefreshSession(
+  snapshot: RefreshAuthSessionSnapshot
+): Promise<AuthSession> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}/api/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken })
+      body: JSON.stringify({ refresh_token: snapshot.refreshToken })
     });
   } catch {
     throw new ApiError("无法连接后端服务，请稍后重试。", { retryable: true });
   }
 
   if (!response.ok) {
-    if (!isCurrentAuthSession(generation, refreshToken)) {
+    if (!isCurrentAuthSession(snapshot.generation, snapshot.refreshToken)) {
       throw new ApiError("登录状态已变更。", { status: 401 });
     }
     clearAuthSession();
@@ -122,10 +166,34 @@ export async function refreshSession(): Promise<AuthSession> {
     });
   }
 
-  if (!isCurrentAuthSession(generation, refreshToken)) {
+  if (!isCurrentAuthSession(snapshot.generation, snapshot.refreshToken)) {
     throw new ApiError("登录状态已变更。", { status: 401 });
   }
   return saveAuthSession((await response.json()) as AuthTokenResponse);
+}
+
+function clearRefreshPromise(refresh: Promise<AuthSession>): void {
+  if (refreshSessionFlight?.promise === refresh) {
+    refreshSessionFlight = null;
+  }
+}
+
+export function authSessionSnapshotsMatch(
+  left: AuthSessionSnapshot,
+  right: AuthSessionSnapshot
+): boolean {
+  return (
+    left.generation === right.generation &&
+    left.accessToken === right.accessToken &&
+    left.refreshToken === right.refreshToken
+  );
+}
+
+export function refreshSessionSnapshotsMatch(
+  left: AuthSessionSnapshot,
+  right: AuthSessionSnapshot
+): boolean {
+  return left.generation === right.generation && left.refreshToken === right.refreshToken;
 }
 
 export async function logout(): Promise<void> {
@@ -462,9 +530,13 @@ async function authorizedFetch(
   init: RequestInit = {},
   retryAuth = true
 ): Promise<Response> {
+  const requestSnapshot = readAuthSessionSnapshot();
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, withAuthHeader(init));
+    response = await fetch(
+      `${API_BASE}${path}`,
+      withAuthHeader(init, requestSnapshot.accessToken)
+    );
   } catch (error) {
     if (isAbortError(error) || init.signal?.aborted) {
       throw error;
@@ -478,9 +550,24 @@ async function authorizedFetch(
     return response;
   }
 
+  const currentSnapshot = readAuthSessionSnapshot();
+  if (
+    currentSnapshot.accessToken &&
+    !authSessionSnapshotsMatch(requestSnapshot, currentSnapshot)
+  ) {
+    return authorizedFetch(path, init, false);
+  }
+
   try {
-    await refreshSession();
+    await refreshSessionForSnapshot(requestSnapshot);
   } catch {
+    const latestSnapshot = readAuthSessionSnapshot();
+    if (
+      latestSnapshot.accessToken &&
+      !authSessionSnapshotsMatch(requestSnapshot, latestSnapshot)
+    ) {
+      return authorizedFetch(path, init, false);
+    }
     return response;
   }
 
@@ -496,13 +583,22 @@ async function authorizedFetch(
   }
 }
 
-function withAuthHeader(init: RequestInit): RequestInit {
+function withAuthHeader(init: RequestInit, accessToken?: string | null): RequestInit {
   const headers = new Headers(init.headers);
-  const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY);
-  if (accessToken) {
-    headers.set("Authorization", `Bearer ${accessToken}`);
+  const token =
+    accessToken === undefined ? localStorage.getItem(ACCESS_TOKEN_KEY) : accessToken;
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
   }
   return { ...init, headers };
+}
+
+function readAuthSessionSnapshot(): AuthSessionSnapshot {
+  return {
+    generation: authSessionGeneration,
+    accessToken: localStorage.getItem(ACCESS_TOKEN_KEY),
+    refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY)
+  };
 }
 
 function consumeSseEvents(

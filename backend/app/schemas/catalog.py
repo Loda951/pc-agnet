@@ -9,6 +9,8 @@ class ProductSearchRequest(BaseModel):
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
+    excluded_brands: list[str] = Field(default_factory=list, max_length=8)
+    excluded_usage: list[str] = Field(default_factory=list, max_length=8)
     limit: int = Field(default=8, ge=1, le=20)
 
 

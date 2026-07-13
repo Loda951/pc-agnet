@@ -308,6 +308,52 @@ def test_memory_upsert_statement_is_atomic_for_active_identity() -> None:
     assert "xmax = 0" in sql
 
 
+def test_disable_memory_statement_is_one_atomic_guarded_update() -> None:
+    repositories = importlib.import_module("app.repositories.conversations")
+    statement = repositories._disable_memory_statement(
+        user_id=7,
+        memory_id=11,
+        now=SimpleNamespace(),
+    )
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert sql.startswith("UPDATE memory_fact SET")
+    assert "RETURNING memory_fact.id" in sql
+    assert "memory_fact.user_id" in sql
+    assert "memory_fact.disabled_at IS NULL" in sql
+    assert "memory_fact.expires_at IS NULL OR memory_fact.expires_at >" in sql
+    assert "memory_fact.origin" in sql
+    assert "memory_fact.value_json IS NOT NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_disable_memory_returns_false_when_atomic_update_returns_no_id() -> None:
+    repositories = importlib.import_module("app.repositories.conversations")
+
+    class Result:
+        def __init__(self, value: int | None) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> int | None:
+            return self.value
+
+    class Session:
+        def __init__(self) -> None:
+            self.results = iter([Result(11), Result(None)])
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return next(self.results)
+
+    session = Session()
+    repository = repositories.ConversationRepository(session)
+
+    assert await repository.disable_memory(7, 11) is True
+    assert await repository.disable_memory(7, 11) is False
+    assert len(session.statements) == 2
+
+
 @pytest.mark.asyncio
 async def test_memory_change_action_comes_from_atomic_upsert_result() -> None:
     context = _context_module()
@@ -383,6 +429,88 @@ def test_successful_empty_catalog_result_clears_candidates_but_failure_preserves
     assert failure.catalog.candidate_sku_ids == [101]
 
 
+def test_compare_metadata_does_not_overwrite_stable_catalog_search_plan() -> None:
+    context = _context_module()
+    schemas = _context_schema_module()
+    search_plan = {
+        "query": "fps ergonomic mouse",
+        "category": "mouse",
+        "brands": ["Razer"],
+        "min_price": 200,
+        "max_price": 500,
+        "filters": {
+            "connection_type": "Wired",
+            "max_dpi": "20000",
+            "hand_orientation": "Right",
+        },
+        "keywords": ["fps", "lightweight"],
+        "usage_scenario": "gaming",
+        "sort": "price_asc",
+        "limit": 6,
+    }
+    previous = schemas.WorkingMemoryV2.model_validate(
+        {"catalog": {"query_plan": search_plan, "candidate_sku_ids": [101, 102]}}
+    )
+
+    after_compare = context._next_working_memory(
+        previous,
+        {
+            "parsed": {
+                "catalog_comparison": {
+                    "query": "对比第一个和第二个",
+                    "sku_ids": [101, 102],
+                    "comparison_fields": ["price", "max_dpi"],
+                }
+            },
+            "products": [],
+            "catalog_tool_succeeded": True,
+        },
+    )
+
+    assert after_compare.catalog.query_plan == search_plan
+    assert after_compare.catalog.comparison.query == "对比第一个和第二个"
+    assert after_compare.catalog.comparison.sku_ids == [101, 102]
+    assert after_compare.catalog.comparison.comparison_fields == ["price", "max_dpi"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_turn_audits_complete_turns_dropped_beyond_recent_64_messages() -> None:
+    context = _context_module()
+
+    class LongHistoryRepository(FakeContextRepository):
+        async def list_recent_messages(self, _conversation_id: int, limit: int):
+            assert limit == 64
+            return [
+                SimpleNamespace(role=role, content=f"{role}-{turn}")
+                for turn in range(32)
+                for role in ("user", "assistant")
+            ]
+
+        async def count_complete_turns(self, _conversation_id: int) -> int:
+            return 70
+
+    memory = SimpleNamespace(
+        id=7,
+        scope="user",
+        fact_type="preference",
+        key="connection_preference",
+        value="偏好无线设备",
+        value_json={"preference": "wireless"},
+        confidence=0.8,
+    )
+    repository = LongHistoryRepository(memory)
+    service = context.ConversationContextService(
+        FakeContextSession(repository.run),
+        Settings(llm_api_key="", agent_context_budget_tokens=10_000),
+        repository=repository,
+    )
+
+    prepared = await service.prepare_turn(1, None, "new turn")
+
+    assert prepared.retained_turns == 6
+    assert prepared.dropped_turns == 64
+
+
 class FakeContextRepository:
     def __init__(self, memory, *, upsert_created: bool = False) -> None:
         self.memory = memory
@@ -404,6 +532,9 @@ class FakeContextRepository:
             SimpleNamespace(role="assistant", content="上一轮回答"),
             SimpleNamespace(role="user", content="失败消息"),
         ]
+
+    async def count_complete_turns(self, _conversation_id: int) -> int:
+        return 1
 
     async def get_working_memory(self, _conversation_id: int):
         return {"recent_products": [{"spu_id": 9, "sku_id": 99, "price": "99"}]}

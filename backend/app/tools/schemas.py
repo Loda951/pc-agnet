@@ -44,7 +44,9 @@ class CatalogSearchInput(BaseModel):
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
+    keywords: list[str] = Field(default_factory=list, max_length=12)
     usage: str | None = Field(default=None, max_length=64)
+    sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
     preference_defaults: CatalogPreferenceDefaults = Field(
         default_factory=CatalogPreferenceDefaults
     )

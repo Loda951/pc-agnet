@@ -10,6 +10,7 @@ from app.core.config import Settings, get_settings
 from app.models import AgentRun
 from app.repositories.conversations import ConversationRepository
 from app.schemas.context import (
+    CatalogComparisonMemory,
     CatalogDisplayIdentity,
     CatalogMemory,
     ContextMessage,
@@ -119,10 +120,12 @@ class ConversationContextService:
     ) -> PreparedTurn:
         conversation = await self.repository.get_or_create(user_id, conversation_id)
         raw_history = await self.repository.list_recent_messages(conversation.id, limit=64)
+        total_complete_turns = await self.repository.count_complete_turns(conversation.id)
         history = select_complete_turns(
             raw_history,
             budget_tokens=self.settings.agent_context_budget_tokens,
         )
+        history.dropped_turns = max(0, total_complete_turns - history.retained_turns)
         working_memory = upgrade_working_memory(
             await self.repository.get_working_memory(conversation.id)
         )
@@ -236,6 +239,9 @@ def _next_working_memory(previous: WorkingMemoryV2, state: dict[str, Any]) -> Wo
     query_plan = parsed.get("product_search")
     if isinstance(query_plan, dict):
         catalog.query_plan = CatalogMemory(query_plan=query_plan).query_plan
+    comparison = parsed.get("catalog_comparison")
+    if isinstance(comparison, dict):
+        catalog.comparison = CatalogComparisonMemory.model_validate(comparison)
     products = state.get("products") if isinstance(state.get("products"), list) else []
     if products or state.get("catalog_tool_succeeded") is True:
         catalog.candidate_spu_ids = _object_ids(products, "spu_id")
