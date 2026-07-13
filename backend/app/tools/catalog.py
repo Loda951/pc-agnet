@@ -150,6 +150,7 @@ class ProductQueryPlan(BaseModel):
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list, max_length=12)
+    usage_scenario: str | None = None
     sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
     limit: int = Field(default=3, ge=1, le=20)
     supported: bool = True
@@ -195,15 +196,31 @@ class RuleBasedCatalogQueryPlanner:
 
     async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         parsed = build_product_search(request.query)
-        filters = {**parsed.filters, **request.filters}
+        defaults = request.preference_defaults
+        default_filters = (
+            {"connection_type": defaults.connection_type}
+            if defaults.connection_type is not None
+            else {}
+        )
+        filters = {**default_filters, **parsed.filters, **request.filters}
         unsupported_reason = _unsupported_reason(request.query)
+        explicit_brands = request.brands or ([request.brand] if request.brand else [])
+        usage = request.usage or _usage_from_query(request.query) or defaults.usage
         return ProductQueryPlan(
             query=request.query,
             category=request.category or parsed.category,
-            brands=[request.brand] if request.brand else [],
+            brands=explicit_brands or defaults.brands,
             min_price=request.min_price if request.min_price is not None else parsed.min_price,
-            max_price=request.max_price if request.max_price is not None else parsed.max_price,
+            max_price=(
+                request.max_price
+                if request.max_price is not None
+                else parsed.max_price
+                if parsed.max_price is not None
+                else defaults.max_price
+            ),
             filters=filters,
+            keywords=[usage] if usage else [],
+            usage_scenario=usage,
             limit=request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
@@ -230,17 +247,20 @@ class LLMCatalogQueryPlanner:
         self.chat_model = chat_model
 
     async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
+        explicit_brands = request.brands or ([request.brand] if request.brand else [])
         return await self._plan(
             task="search",
             query=request.query,
             limit=request.limit,
             overrides={
                 "category": request.category,
-                "brands": [request.brand] if request.brand else [],
+                "brands": explicit_brands,
                 "min_price": request.min_price,
                 "max_price": request.max_price,
                 "filters": request.filters,
+                "usage_scenario": request.usage,
             },
+            preference_defaults=request.preference_defaults.model_dump(mode="json"),
         )
 
     async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
@@ -272,6 +292,7 @@ class LLMCatalogQueryPlanner:
         query: str,
         limit: int,
         overrides: dict,
+        preference_defaults: dict,
     ) -> ProductQueryPlan:
         response = await self.chat_model.ainvoke(
             [
@@ -283,6 +304,7 @@ class LLMCatalogQueryPlanner:
                             "query": query,
                             "limit": limit,
                             "explicit_overrides": _json_safe(overrides),
+                            "preference_defaults": _json_safe(preference_defaults),
                         },
                         ensure_ascii=False,
                     )
@@ -295,6 +317,7 @@ class LLMCatalogQueryPlanner:
         plan_data["limit"] = limit
         plan = ProductQueryPlan.model_validate(plan_data)
         plan.planner = "llm"
+        _apply_preference_defaults(plan, preference_defaults)
         _apply_explicit_overrides(plan, overrides)
         return plan
 
@@ -719,6 +742,7 @@ Allowed JSON fields:
 - max_price: number or null
 - filters: object with allowed keys only
 - keywords: array of short product intent keywords, max 12
+- usage_scenario: short usage string such as gaming or office, or null
 - sort: one of recommend, sales, price_asc, price_desc, stock
 - supported: boolean
 - unsupported_reason: string or null
@@ -732,6 +756,9 @@ style, switches, tenkeyless, tracking_method, type, weight_g, wireless.
 Set supported=false when the user asks for analytics not available in the
 catalog tables, such as time-series growth, revenue, profit, or user purchase
 statistics. Otherwise set supported=true.
+
+The current query and explicit_overrides always take precedence.
+preference_defaults only fill fields that the current request leaves unspecified.
 """.strip()
 
 
@@ -808,10 +835,38 @@ def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
         plan.max_price = overrides["max_price"]
     if overrides.get("filters"):
         plan.filters = {**plan.filters, **overrides["filters"]}
+    if overrides.get("usage_scenario"):
+        plan.usage_scenario = overrides["usage_scenario"]
+        plan.keywords = _dedupe_keep_order(
+            [*plan.keywords, str(overrides["usage_scenario"])]
+        )
+
+
+def _apply_preference_defaults(plan: ProductQueryPlan, defaults: dict) -> None:
+    if not plan.brands and defaults.get("brands"):
+        plan.brands = list(defaults["brands"])
+    if plan.max_price is None and defaults.get("max_price") is not None:
+        plan.max_price = defaults["max_price"]
+    connection_type = defaults.get("connection_type")
+    if connection_type and "connection_type" not in plan.filters:
+        plan.filters["connection_type"] = connection_type
+    usage = defaults.get("usage")
+    if plan.usage_scenario is None and usage:
+        plan.usage_scenario = str(usage)
+        plan.keywords = _dedupe_keep_order([*plan.keywords, str(usage)])
 
 
 def _json_safe(data: dict) -> dict:
     return json.loads(json.dumps(data, default=str))
+
+
+def _usage_from_query(query: str) -> str | None:
+    lowered = query.lower()
+    if "fps" in lowered or "游戏" in query or "gaming" in lowered:
+        return "gaming"
+    if "办公" in query or "office" in lowered:
+        return "office"
+    return None
 
 
 def _comparison_fields_from_query(query: str) -> list[str]:

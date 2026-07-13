@@ -48,12 +48,24 @@ SAFE_QUERY_FILTER_KEYS = {
 }
 
 
+class CatalogDisplayIdentity(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    spu_id: int
+    sku_id: int
+    title: str
+    brand: str | None = None
+    category: str | None = None
+    image_url: str | None = None
+
+
 class CatalogMemory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query_plan: dict[str, Any] = Field(default_factory=dict)
     candidate_spu_ids: list[int] = Field(default_factory=list)
     candidate_sku_ids: list[int] = Field(default_factory=list)
+    candidate_display: list[CatalogDisplayIdentity] = Field(default_factory=list)
     referenced_spu_id: int | None = None
     referenced_sku_id: int | None = None
 
@@ -185,6 +197,14 @@ def upgrade_working_memory(value: dict[str, Any] | None) -> WorkingMemoryV2:
             query_plan=value.get("current_product_search") or {},
             candidate_spu_ids=_collect_ids(products, "spu_id"),
             candidate_sku_ids=_collect_ids(products, "sku_id"),
+            candidate_display=[
+                CatalogDisplayIdentity.model_validate(item)
+                for item in products
+                if isinstance(item, dict)
+                and item.get("spu_id") is not None
+                and item.get("sku_id") is not None
+                and item.get("title")
+            ],
             referenced_spu_id=_optional_int(referenced_product.get("spu_id")),
             referenced_sku_id=_optional_int(referenced_product.get("sku_id")),
         ),

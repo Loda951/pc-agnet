@@ -2,6 +2,7 @@ from typing import Any, TypedDict
 
 from app.schemas.catalog import ProductCard
 from app.schemas.chat import EvidenceItem
+from app.schemas.context import PreparedTurn
 from app.schemas.order import OrderCard
 
 
@@ -27,3 +28,5 @@ class AgentState(TypedDict, total=False):
     order: OrderCard | None
     answer: str
     suggested_actions: list[dict[str, Any]]
+    prepared_turn: PreparedTurn
+    applied_memory_ids: list[int]

@@ -237,7 +237,17 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
             "boundary": {"classification": "in_scope_auto"},
             "applied_memory_ids": ["invalid", True, 7.9, "7", 999, 7],
             "products": [
-                SimpleNamespace(spu_id=10, sku_id=101, price="199", stock=5, specs={})
+                SimpleNamespace(
+                    spu_id=10,
+                    sku_id=101,
+                    title="Test Mouse",
+                    brand="Razer",
+                    category="mouse",
+                    image_url="/mouse.png",
+                    price="199",
+                    stock=5,
+                    specs={},
+                )
             ],
         },
     )
@@ -247,6 +257,16 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
     assert repository.upserts[0]["value_json"]["operation"] == "exclude"
     assert repository.marked_ids == [7]
     assert repository.updated_working_memory["schema_version"] == 2
+    assert repository.updated_working_memory["catalog"]["candidate_display"] == [
+        {
+            "spu_id": 10,
+            "sku_id": 101,
+            "title": "Test Mouse",
+            "brand": "Razer",
+            "category": "mouse",
+            "image_url": "/mouse.png",
+        }
+    ]
     serialized = json.dumps(repository.updated_working_memory, ensure_ascii=False)
     assert "199" not in serialized
     assert "stock" not in serialized

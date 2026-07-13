@@ -10,6 +10,7 @@ from app.core.config import Settings, get_settings
 from app.models import AgentRun
 from app.repositories.conversations import ConversationRepository
 from app.schemas.context import (
+    CatalogDisplayIdentity,
     CatalogMemory,
     ContextMessage,
     EvidenceReference,
@@ -227,6 +228,7 @@ def _next_working_memory(previous: WorkingMemoryV2, state: dict[str, Any]) -> Wo
     if products:
         catalog.candidate_spu_ids = _object_ids(products, "spu_id")
         catalog.candidate_sku_ids = _object_ids(products, "sku_id")
+        catalog.candidate_display = _catalog_display_identities(products)
     referenced = parsed.get("referenced_product")
     if referenced is not None:
         catalog.referenced_spu_id = _optional_object_int(referenced, "spu_id")
@@ -300,6 +302,31 @@ def _object_ids(items: list[Any], key: str) -> list[int]:
             if (value := _optional_object_int(item, key)) is not None
         )
     )
+
+
+def _catalog_display_identities(items: list[Any]) -> list[CatalogDisplayIdentity]:
+    identities: list[CatalogDisplayIdentity] = []
+    for item in items:
+        spu_id = _optional_object_int(item, "spu_id")
+        sku_id = _optional_object_int(item, "sku_id")
+        title = _message_value(item, "title")
+        if spu_id is None or sku_id is None or not title:
+            continue
+        identities.append(
+            CatalogDisplayIdentity(
+                spu_id=spu_id,
+                sku_id=sku_id,
+                title=str(title),
+                brand=_optional_string(_message_value(item, "brand")),
+                category=_optional_string(_message_value(item, "category")),
+                image_url=_optional_string(_message_value(item, "image_url")),
+            )
+        )
+    return identities
+
+
+def _optional_string(value: Any) -> str | None:
+    return str(value) if value is not None else None
 
 
 def _optional_object_int(value: Any, key: str) -> int | None:

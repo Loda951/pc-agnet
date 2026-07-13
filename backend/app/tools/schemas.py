@@ -21,15 +21,29 @@ class ToolExecutionResult(BaseModel):
     error: ToolError | None = None
 
 
+class CatalogPreferenceDefaults(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    brands: list[str] = Field(default_factory=list, max_length=8)
+    max_price: Decimal | None = None
+    connection_type: Literal["Wireless", "Wired"] | None = None
+    usage: str | None = Field(default=None, max_length=64)
+
+
 class CatalogSearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1)
     category: str | None = None
     brand: str | None = None
+    brands: list[str] = Field(default_factory=list, max_length=8)
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
+    usage: str | None = Field(default=None, max_length=64)
+    preference_defaults: CatalogPreferenceDefaults = Field(
+        default_factory=CatalogPreferenceDefaults
+    )
     limit: int = Field(default=3, ge=1, le=20)
 
 

@@ -493,6 +493,57 @@ async def test_llm_catalog_planner_applies_explicit_overrides() -> None:
     assert plan.filters == {"connection_type": "wireless"}
 
 
+@pytest.mark.asyncio
+async def test_rule_catalog_planner_fills_missing_fields_from_typed_preferences() -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    request = CatalogSearchInput(
+        query="推荐鼠标",
+        category="mouse",
+        preference_defaults={
+            "brands": ["Logitech"],
+            "max_price": 500,
+            "connection_type": "Wireless",
+            "usage": "gaming",
+        },
+    )
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(request)
+
+    assert plan.brands == ["Logitech"]
+    assert plan.max_price == 500
+    assert plan.filters["connection_type"] == "Wireless"
+    assert plan.usage_scenario == "gaming"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_keeps_current_conditions_over_preferences() -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":["Razer"],"max_price":800,'
+        '"filters":{"connection_type":"Wired"},"keywords":[],'
+        '"usage_scenario":"office","sort":"recommend","supported":true,'
+        '"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(
+            query="这次要 800 元以内的雷蛇有线办公鼠标",
+            preference_defaults={
+                "brands": ["Logitech"],
+                "max_price": 500,
+                "connection_type": "Wireless",
+                "usage": "gaming",
+            },
+        )
+    )
+
+    assert plan.brands == ["Razer"]
+    assert plan.max_price == 800
+    assert plan.filters["connection_type"] == "Wired"
+    assert plan.usage_scenario == "office"
+
+
 def test_build_catalog_planner_is_opt_in() -> None:
     planner = build_catalog_planner(
         SimpleNamespace(catalog_llm_planner_enabled=False)  # type: ignore[arg-type]
