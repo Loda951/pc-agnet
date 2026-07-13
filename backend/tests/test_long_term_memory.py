@@ -78,6 +78,20 @@ def test_stable_marker_only_applies_to_the_clause_that_contains_it() -> None:
     service = MemoryService()
 
     assert service.extract_long_term_facts("这次预算 500 元，以后再说") == []
+    assert service.extract_long_term_facts("以后不要无线但这次预算 500 元以内") == [
+        {
+            "scope": "user",
+            "fact_type": "preference",
+            "key": "connection_preference",
+            "value": "不偏好无线设备",
+            "value_json": {
+                "preference": "wireless",
+                "negated": True,
+                "operation": "exclude",
+            },
+            "confidence": 0.8,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -94,6 +108,12 @@ def test_stable_marker_only_applies_to_the_clause_that_contains_it() -> None:
             "brand_preference",
             "不偏好 罗技 品牌",
             {"brand": "罗技", "negated": True, "operation": "exclude"},
+        ),
+        (
+            "以后不要logitech",
+            "brand_preference",
+            "不偏好 Logitech 品牌",
+            {"brand": "Logitech", "negated": True, "operation": "exclude"},
         ),
     ],
 )

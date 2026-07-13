@@ -392,16 +392,21 @@ def _extract_budget_amount(message: str) -> float:
 
 
 def _is_negative_preference(message: str, preference: str) -> bool:
+    normalized_message = message.lower()
+    normalized_preference = preference.lower()
     return bool(
         re.search(
-            rf"(?:不要|不玩|不用|不喜欢|不偏好|排除|别(?:用|要|玩)?)[^，。；]{{0,8}}{re.escape(preference)}",
-            message,
+            rf"(?:不要|不玩|不用|不喜欢|不偏好|排除|别(?:用|要|玩)?)[^，。；]{{0,8}}{re.escape(normalized_preference)}",
+            normalized_message,
         )
     )
 
 
 def _stable_memory_clauses(message: str) -> list[str]:
-    clauses = [item.strip() for item in re.split(r"[，,。.!！？；;\n]", message)]
+    clauses = [
+        item.strip()
+        for item in re.split(r"[，,。.!！？；;\n]|但(?:是)?(?=这次|本次|当前)", message)
+    ]
     return [
         clause
         for clause in clauses

@@ -326,10 +326,14 @@ def _valid_memory_ids(values: Any, available_ids: set[int]) -> list[int]:
         return []
     valid: list[int] = []
     for value in values:
-        try:
-            memory_id = int(value)
-        except (TypeError, ValueError):
+        if isinstance(value, bool):
             continue
-        if memory_id in available_ids and memory_id not in valid:
+        if isinstance(value, int):
+            memory_id = value
+        elif isinstance(value, str) and value.isdigit():
+            memory_id = int(value)
+        else:
+            continue
+        if memory_id > 0 and memory_id in available_ids and memory_id not in valid:
             valid.append(memory_id)
     return valid

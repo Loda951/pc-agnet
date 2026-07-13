@@ -20,6 +20,32 @@ SAFE_QUERY_PLAN_KEYS = {
     "unsupported_reason",
     "usage_scenario",
 }
+SAFE_QUERY_FILTER_KEYS = {
+    "backlit",
+    "channels",
+    "color",
+    "connection_type",
+    "enclosure_type",
+    "field_of_view",
+    "frame_rate",
+    "frequency_response",
+    "hand_orientation",
+    "max_dpi",
+    "microphone",
+    "panel_type",
+    "power_w",
+    "refresh_rate",
+    "resolution",
+    "response_time_ms",
+    "size_inch",
+    "style",
+    "switches",
+    "tenkeyless",
+    "tracking_method",
+    "type",
+    "weight_g",
+    "wireless",
+}
 
 
 class CatalogMemory(BaseModel):
@@ -36,7 +62,18 @@ class CatalogMemory(BaseModel):
     def strip_volatile_query_values(cls, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
             return {}
-        return {key: item for key, item in value.items() if key in SAFE_QUERY_PLAN_KEYS}
+        sanitized = {key: item for key, item in value.items() if key in SAFE_QUERY_PLAN_KEYS}
+        filters = sanitized.get("filters")
+        if isinstance(filters, dict):
+            sanitized["filters"] = {
+                key: item
+                for key, item in filters.items()
+                if key in SAFE_QUERY_FILTER_KEYS
+                and (item is None or isinstance(item, (str, int, float, bool)))
+            }
+        elif "filters" in sanitized:
+            sanitized["filters"] = {}
+        return sanitized
 
     @field_validator("candidate_spu_ids", "candidate_sku_ids", mode="before")
     @classmethod

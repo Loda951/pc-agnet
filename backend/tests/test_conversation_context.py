@@ -145,7 +145,12 @@ def test_v2_query_plan_keeps_only_supported_constraint_fields() -> None:
                     "category": "mouse",
                     "min_price": 100,
                     "max_price": 500,
-                    "filters": {"connection_type": "Wireless"},
+                    "filters": {
+                        "connection_type": "Wireless",
+                        "stock": 5,
+                        "specs": {"dpi": 12000},
+                        "logistics": {"carrier": "secret"},
+                    },
                     "sort": "recommend",
                     "limit": 3,
                     "sale_price": 199,
@@ -230,7 +235,7 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
             "answer": "已记录",
             "intent": "product_recommendation",
             "boundary": {"classification": "in_scope_auto"},
-            "applied_memory_ids": ["invalid", 7, 999, 7],
+            "applied_memory_ids": ["invalid", True, 7.9, "7", 999, 7],
             "products": [
                 SimpleNamespace(spu_id=10, sku_id=101, price="199", stock=5, specs={})
             ],
@@ -272,6 +277,12 @@ def test_memory_upsert_statement_is_atomic_for_active_identity() -> None:
 
     assert "ON CONFLICT" in sql
     assert "disabled_at IS NULL" in sql
+
+
+def test_applied_memory_ids_reject_booleans_and_fractional_numbers() -> None:
+    context = _context_module()
+
+    assert context._valid_memory_ids([True, 7.9], {1, 7}) == []
 
 
 class FakeContextRepository:
