@@ -4,13 +4,14 @@
 
 ## 总体边界
 
-- 本分支只提供 tool 注册、schema 校验、tool 执行逻辑和结构化返回。
-- 主流程负责意图识别、选择 tool、调用顺序、结果融合和最终自然语言回答。
-- 当前不提供 MCP，不负责 LangGraph 主流程节点改造，不负责 SSE tool_call 事件。
+- ToolRegistry 提供 tool 注册、schema 校验、执行和结构化返回，AgentRuntime 负责选择、调用顺序、结果融合和最终回答。
+- AgentRuntime 已接入 `catalog.search`、`catalog.compare`、`order.lookup`，同步与 SSE 路径都会记录对应 tool_call 事件。
+- 当前不提供 MCP。
 - 商品和订单 tools 读取 PostgreSQL。
 - 政策和知识 tools 读取本地 JSON 文档，并使用 BM25 / vector / hybrid 检索。
 - 向量检索使用本地真实 embedding 模型 `BAAI/bge-small-zh-v1.5`，通过 `sentence-transformers` 在本机生成向量。
 - 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
+- 注意：`policy.search` / `knowledge.search` 已注册但尚未成为 AgentRuntime 的知识主链；当前 Agent 继续使用 `ChromaKnowledgeService` 和 `knowledge.retrieve`，避免本阶段切换 RAG 数据源。
 
 ## ToolRegistry
 
@@ -89,10 +90,21 @@ Stable error codes exposed to orchestrator:
   "query": "Logitech wireless mouse under 300",
   "category": "mouse",
   "brand": "Logitech",
+  "brands": ["Logitech"],
+  "excluded_brands": [],
+  "excluded_usage": [],
   "min_price": null,
   "max_price": 300,
   "filters": {
     "wireless": "wireless"
+  },
+  "preference_defaults": {
+    "brands": [],
+    "excluded_brands": [],
+    "excluded_usage": [],
+    "max_price": null,
+    "connection_type": null,
+    "usage": null
   },
   "limit": 3
 }
@@ -103,6 +115,9 @@ Stable error codes exposed to orchestrator:
 - `query`：必填，自然语言需求。
 - `category`：可选，类目过滤。
 - `brand`：可选，品牌过滤。当前 planner 会识别常见品牌；repository 层主要通过 query token 命中品牌。
+- `brands` / `excluded_brands`：当前轮明确包含或排除的品牌；显式排除优先于 planner 正向推断。
+- `excluded_usage`：当前轮或上下文需要排除的用途，如 `gaming`。
+- `preference_defaults`：由 Agent 上下文传入的 working/长期默认值，只补当前请求未明确的字段。
 - `min_price` / `max_price`：可选，价格范围。
 - `filters`：可选，规格过滤，例如 `wireless`, `connection_type`。
 - `limit`：默认 `3`，范围 `1..20`。
