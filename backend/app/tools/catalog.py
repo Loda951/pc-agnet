@@ -669,10 +669,10 @@ def validate_catalog_compare_plan(plan: CatalogComparePlan | dict) -> CatalogCom
 def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
     has_exclusions = bool(plan.excluded_brands or plan.excluded_usage)
     if has_exclusions:
-        positive_keywords = [
-            keyword for keyword in plan.keywords if keyword not in plan.excluded_usage
-        ]
-        query_parts = [plan.category or "", *plan.brands, *positive_keywords]
+        # Category, price and specs are already structured filters. In exclusion
+        # queries, repeating localized category/usage words as title keywords can
+        # eliminate every alternative before the post-retrieval exclusion pass.
+        query_parts = [*plan.brands]
     elif plan.planner.startswith("rule_based"):
         query_parts = [plan.query, *plan.keywords]
     else:

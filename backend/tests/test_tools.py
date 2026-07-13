@@ -118,8 +118,8 @@ async def test_negative_brand_search_recalls_alternatives_before_filtering(
 
         async def search_products(self, request):
             captured["request"] = request
-            if "Logitech" in request.query:
-                return products[:1]
+            if request.query:
+                return []
             return products
 
     monkeypatch.setattr(catalog_tools, "CatalogRepository", FakeCatalogRepository)
@@ -127,14 +127,15 @@ async def test_negative_brand_search_recalls_alternatives_before_filtering(
 
     result = await service.search(
         CatalogSearchInput(
-            query="不要 Logitech 鼠标",
-            category="mouse",
+            query="不要 Logitech 游戏鼠标",
+            category="鼠标",
             excluded_brands=["Logitech"],
+            excluded_usage=["gaming"],
             limit=3,
         )
     )
 
-    assert "Logitech" not in captured["request"].query
+    assert captured["request"].query == ""
     assert captured["request"].limit >= 12
     assert [item.brand for item in result.products] == ["Razer"]
 
