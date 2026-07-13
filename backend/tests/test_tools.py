@@ -586,6 +586,40 @@ async def test_llm_catalog_planner_keeps_current_conditions_over_preferences() -
     assert plan.usage_scenario == "office"
 
 
+@pytest.mark.asyncio
+async def test_rule_planner_does_not_reparse_explicit_usage_exclusion_as_positive() -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(
+            query="不要游戏鼠标",
+            excluded_usage=["gaming"],
+        )
+    )
+
+    assert plan.usage_scenario is None
+    assert plan.excluded_usage == ["gaming"]
+
+
+@pytest.mark.asyncio
+async def test_llm_planner_explicit_brand_exclusion_overrides_positive_model_output() -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":["Logitech"],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(
+            query="不要 Logitech 鼠标",
+            excluded_brands=["Logitech"],
+        )
+    )
+
+    assert plan.brands == []
+    assert plan.excluded_brands == ["Logitech"]
+
+
 def test_build_catalog_planner_is_opt_in() -> None:
     planner = build_catalog_planner(
         SimpleNamespace(catalog_llm_planner_enabled=False)  # type: ignore[arg-type]

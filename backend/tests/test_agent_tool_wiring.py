@@ -787,3 +787,68 @@ async def test_negative_long_term_preferences_become_query_defaults(
     assert defaults["excluded_brands"] == ["Logitech"]
     assert defaults["excluded_usage"] == ["gaming"]
     assert context.completed_outcomes[0]["applied_memory_ids"] == [81, 82]
+
+
+@pytest.mark.asyncio
+async def test_working_exclusion_beats_long_term_positive_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = PreparedTurn(
+        user_id=7,
+        conversation_id=41,
+        user_message_id=61,
+        run_id=71,
+        message="推荐鼠标",
+        working_memory=WorkingMemoryV2.model_validate(
+            {"catalog": {"query_plan": {"excluded_brands": ["Logitech"]}}}
+        ),
+        memory=[
+            StructuredMemory(
+                id=83,
+                scope="user",
+                fact_type="preference",
+                key="brand_preference",
+                value="偏好 Logitech 品牌",
+                value_json={"brand": "Logitech", "negated": False},
+                confidence=0.8,
+            )
+        ],
+    )
+    context = FakeContextService(prepared)
+    registry = FakeToolRegistry(
+        {
+            "catalog.search": ToolExecutionResult(
+                tool_name="catalog.search",
+                ok=True,
+                output={
+                    "result_type": "empty",
+                    "products": [],
+                    "ranking_strategy": "test",
+                    "query_plan": {},
+                },
+            )
+        }
+    )
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            pass
+
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        knowledge_service=EmptyKnowledgeService(),
+        context_service=context,
+        tool_registry=registry,
+    )
+
+    await runtime.run(ChatRequest(message=prepared.message), user_id=7)
+
+    defaults = registry.calls[0][1]["preference_defaults"]
+    assert defaults["brands"] == []
+    assert defaults["excluded_brands"] == ["Logitech"]
+    assert context.completed_outcomes[0]["applied_memory_ids"] == []
