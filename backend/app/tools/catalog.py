@@ -667,7 +667,13 @@ def validate_catalog_compare_plan(plan: CatalogComparePlan | dict) -> CatalogCom
 
 
 def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
-    if plan.planner.startswith("rule_based"):
+    has_exclusions = bool(plan.excluded_brands or plan.excluded_usage)
+    if has_exclusions:
+        positive_keywords = [
+            keyword for keyword in plan.keywords if keyword not in plan.excluded_usage
+        ]
+        query_parts = [plan.category or "", *plan.brands, *positive_keywords]
+    elif plan.planner.startswith("rule_based"):
         query_parts = [plan.query, *plan.keywords]
     else:
         # Natural language is already represented by structured fields. Using the
@@ -680,7 +686,7 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         min_price=plan.min_price,
         max_price=plan.max_price,
         filters=plan.filters,
-        limit=plan.limit,
+        limit=min(20, max(12, plan.limit * 4)) if has_exclusions else plan.limit,
     )
 
 

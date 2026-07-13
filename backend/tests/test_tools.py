@@ -82,6 +82,63 @@ def test_catalog_exclusions_filter_brand_and_usage_matches() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_negative_brand_search_recalls_alternatives_before_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=11,
+            title="Logitech Mouse",
+            brand="Logitech",
+            category="mouse",
+            price="199.00",
+            stock=5,
+            sales_count=10,
+            specs={},
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=22,
+            title="Razer Mouse",
+            brand="Razer",
+            category="mouse",
+            price="299.00",
+            stock=5,
+            sales_count=20,
+            specs={},
+        ),
+    ]
+    captured = {}
+
+    class FakeCatalogRepository:
+        def __init__(self, session):
+            pass
+
+        async def search_products(self, request):
+            captured["request"] = request
+            if "Logitech" in request.query:
+                return products[:1]
+            return products
+
+    monkeypatch.setattr(catalog_tools, "CatalogRepository", FakeCatalogRepository)
+    service = CatalogToolService(SimpleNamespace())
+
+    result = await service.search(
+        CatalogSearchInput(
+            query="不要 Logitech 鼠标",
+            category="mouse",
+            excluded_brands=["Logitech"],
+            limit=3,
+        )
+    )
+
+    assert "Logitech" not in captured["request"].query
+    assert captured["request"].limit >= 12
+    assert [item.brand for item in result.products] == ["Razer"]
+
+
 class FakeEmbeddingProvider:
     model_name = "fake-embedding"
 
