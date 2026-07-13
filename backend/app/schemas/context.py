@@ -2,13 +2,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-VOLATILE_WORKING_MEMORY_KEYS = {
-    "content",
-    "logistics",
-    "price",
-    "snippet",
-    "specs",
-    "stock",
+SAFE_QUERY_PLAN_KEYS = {
+    "brands",
+    "category",
+    "comparison_fields",
+    "fallback_reason",
+    "filters",
+    "items",
+    "keywords",
+    "limit",
+    "max_price",
+    "min_price",
+    "planner",
+    "query",
+    "sort",
+    "supported",
+    "unsupported_reason",
+    "usage_scenario",
 }
 
 
@@ -24,7 +34,9 @@ class CatalogMemory(BaseModel):
     @field_validator("query_plan", mode="before")
     @classmethod
     def strip_volatile_query_values(cls, value: Any) -> dict[str, Any]:
-        return _sanitize_mapping(value if isinstance(value, dict) else {})
+        if not isinstance(value, dict):
+            return {}
+        return {key: item for key, item in value.items() if key in SAFE_QUERY_PLAN_KEYS}
 
     @field_validator("candidate_spu_ids", "candidate_sku_ids", mode="before")
     @classmethod
@@ -166,19 +178,3 @@ def _collect_ids(items: list[Any], key: str) -> list[int]:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
-
-
-def _sanitize_mapping(value: dict[str, Any]) -> dict[str, Any]:
-    sanitized: dict[str, Any] = {}
-    for key, item in value.items():
-        if key.lower() in VOLATILE_WORKING_MEMORY_KEYS:
-            continue
-        if isinstance(item, dict):
-            sanitized[key] = _sanitize_mapping(item)
-        elif isinstance(item, list):
-            sanitized[key] = [
-                _sanitize_mapping(entry) if isinstance(entry, dict) else entry for entry in item
-            ]
-        else:
-            sanitized[key] = item
-    return sanitized

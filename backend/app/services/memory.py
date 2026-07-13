@@ -179,113 +179,10 @@ class MemoryService:
         }
 
     def extract_long_term_facts(self, message: str) -> list[dict[str, Any]]:
-        if not any(marker in message for marker in STABLE_MEMORY_MARKERS):
-            return []
-
         facts: list[dict[str, Any]] = []
-        lowered = message.lower()
-
-        if "无线" in message and _is_negative_preference(message, "无线"):
-            facts.append(
-                _memory_fact(
-                    "connection_preference",
-                    "不偏好无线设备",
-                    0.8,
-                    {
-                        "preference": "wireless",
-                        "negated": True,
-                        "operation": "exclude",
-                    },
-                )
-            )
-        elif "有线" in message and _is_negative_preference(message, "有线"):
-            facts.append(
-                _memory_fact(
-                    "connection_preference",
-                    "不偏好有线设备",
-                    0.8,
-                    {
-                        "preference": "wired",
-                        "negated": True,
-                        "operation": "exclude",
-                    },
-                )
-            )
-        elif "无线" in message:
-            facts.append(
-                _memory_fact(
-                    "connection_preference",
-                    "偏好无线设备",
-                    0.8,
-                    {
-                        "preference": "wireless",
-                        "negated": False,
-                        "operation": "set",
-                    },
-                )
-            )
-        elif "有线" in message:
-            facts.append(
-                _memory_fact(
-                    "connection_preference",
-                    "偏好有线设备",
-                    0.75,
-                    {
-                        "preference": "wired",
-                        "negated": False,
-                        "operation": "set",
-                    },
-                )
-            )
-
-        budget = _extract_budget_preference(message)
-        if budget:
-            amount = _extract_budget_amount(message)
-            facts.append(
-                _memory_fact(
-                    "budget_preference",
-                    budget,
-                    0.7,
-                    {
-                        "amount": amount,
-                        "currency": "CNY",
-                        "maximum": True,
-                        "operation": "set",
-                    },
-                )
-            )
-
-        if "fps" in lowered or "游戏" in message:
-            facts.append(
-                _memory_fact(
-                    "usage_preference",
-                    "偏好游戏场景",
-                    0.75,
-                    {"usage": "gaming", "negated": False, "operation": "set"},
-                )
-            )
-        elif "办公" in message:
-            facts.append(
-                _memory_fact(
-                    "usage_preference",
-                    "偏好办公场景",
-                    0.7,
-                    {"usage": "office", "negated": False, "operation": "set"},
-                )
-            )
-
-        brand = _extract_brand_preference(message)
-        if brand:
-            facts.append(
-                _memory_fact(
-                    "brand_preference",
-                    f"偏好 {brand} 品牌",
-                    0.65,
-                    {"brand": brand, "negated": False, "operation": "set"},
-                )
-            )
-
-        return facts
+        for clause in _stable_memory_clauses(message):
+            facts.extend(_extract_clause_facts(clause))
+        return list({fact["key"]: fact for fact in facts}.values())
 
     def _is_product_followup(self, message: str, working_memory: dict[str, Any]) -> bool:
         return bool(working_memory.get("current_product_search")) and any(
@@ -298,6 +195,130 @@ class MemoryService:
             or "保修" in message
             or any(term in message for term in POLICY_REFERENCE_TERMS)
         )
+
+
+def _extract_clause_facts(message: str) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    lowered = message.lower()
+
+    if "无线" in message and _is_negative_preference(message, "无线"):
+        facts.append(
+            _memory_fact(
+                "connection_preference",
+                "不偏好无线设备",
+                0.8,
+                {
+                    "preference": "wireless",
+                    "negated": True,
+                    "operation": "exclude",
+                },
+            )
+        )
+    elif "有线" in message and _is_negative_preference(message, "有线"):
+        facts.append(
+            _memory_fact(
+                "connection_preference",
+                "不偏好有线设备",
+                0.8,
+                {
+                    "preference": "wired",
+                    "negated": True,
+                    "operation": "exclude",
+                },
+            )
+        )
+    elif "无线" in message:
+        facts.append(
+            _memory_fact(
+                "connection_preference",
+                "偏好无线设备",
+                0.8,
+                {
+                    "preference": "wireless",
+                    "negated": False,
+                    "operation": "set",
+                },
+            )
+        )
+    elif "有线" in message:
+        facts.append(
+            _memory_fact(
+                "connection_preference",
+                "偏好有线设备",
+                0.75,
+                {
+                    "preference": "wired",
+                    "negated": False,
+                    "operation": "set",
+                },
+            )
+        )
+
+    budget = _extract_budget_preference(message)
+    if budget:
+        amount = _extract_budget_amount(message)
+        facts.append(
+            _memory_fact(
+                "budget_preference",
+                budget,
+                0.7,
+                {
+                    "amount": amount,
+                    "currency": "CNY",
+                    "maximum": True,
+                    "operation": "set",
+                },
+            )
+        )
+
+    if "fps" in lowered or "游戏" in message:
+        negated = _is_negative_preference(message, "fps") or _is_negative_preference(
+            message, "游戏"
+        )
+        facts.append(
+            _memory_fact(
+                "usage_preference",
+                "不偏好游戏场景" if negated else "偏好游戏场景",
+                0.75,
+                {
+                    "usage": "gaming",
+                    "negated": negated,
+                    "operation": "exclude" if negated else "set",
+                },
+            )
+        )
+    elif "办公" in message:
+        negated = _is_negative_preference(message, "办公")
+        facts.append(
+            _memory_fact(
+                "usage_preference",
+                "不偏好办公场景" if negated else "偏好办公场景",
+                0.7,
+                {
+                    "usage": "office",
+                    "negated": negated,
+                    "operation": "exclude" if negated else "set",
+                },
+            )
+        )
+
+    brand = _extract_brand_preference(message)
+    if brand:
+        negated = _is_negative_preference(message, brand)
+        facts.append(
+            _memory_fact(
+                "brand_preference",
+                f"不偏好 {brand} 品牌" if negated else f"偏好 {brand} 品牌",
+                0.65,
+                {
+                    "brand": brand,
+                    "negated": negated,
+                    "operation": "exclude" if negated else "set",
+                },
+            )
+        )
+
+    return facts
 
 
 def _product_memory_item(product: ProductCard) -> dict[str, Any]:
@@ -373,10 +394,19 @@ def _extract_budget_amount(message: str) -> float:
 def _is_negative_preference(message: str, preference: str) -> bool:
     return bool(
         re.search(
-            rf"(?:不要|不喜欢|不偏好|排除|别(?:用|要)?)[^，。；]{{0,8}}{re.escape(preference)}",
+            rf"(?:不要|不玩|不用|不喜欢|不偏好|排除|别(?:用|要|玩)?)[^，。；]{{0,8}}{re.escape(preference)}",
             message,
         )
     )
+
+
+def _stable_memory_clauses(message: str) -> list[str]:
+    clauses = [item.strip() for item in re.split(r"[，,。.!！？；;\n]", message)]
+    return [
+        clause
+        for clause in clauses
+        if clause and any(marker in clause for marker in STABLE_MEMORY_MARKERS)
+    ]
 
 
 def _extract_brand_preference(message: str) -> str | None:

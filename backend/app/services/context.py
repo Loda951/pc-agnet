@@ -190,12 +190,8 @@ class ConversationContextService:
         )
 
         available_memory_ids = {item.id for item in prepared_turn.memory}
-        applied_memory_ids = list(
-            dict.fromkeys(
-                int(item)
-                for item in state.get("applied_memory_ids", [])
-                if int(item) in available_memory_ids
-            )
+        applied_memory_ids = _valid_memory_ids(
+            state.get("applied_memory_ids", []), available_memory_ids
         )
         await self.repository.mark_memory_used(prepared_turn.user_id, applied_memory_ids)
         audit = serialize_compact_audit(
@@ -323,3 +319,17 @@ def _json_value(value: Any) -> Any:
     except (TypeError, ValueError):
         return str(value)
     return value
+
+
+def _valid_memory_ids(values: Any, available_ids: set[int]) -> list[int]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    valid: list[int] = []
+    for value in values:
+        try:
+            memory_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if memory_id in available_ids and memory_id not in valid:
+            valid.append(memory_id)
+    return valid

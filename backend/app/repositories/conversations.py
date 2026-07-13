@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentRun, Conversation, MemoryFact, Message, ToolCall
@@ -274,43 +275,21 @@ class ConversationRepository:
     ) -> MemoryFact:
         now = utc_now_naive()
         expires_at = now + timedelta(days=expires_in_days) if expires_in_days else None
-        existing = (
-            await self.session.execute(
-                select(MemoryFact).where(
-                    MemoryFact.user_id == user_id,
-                    MemoryFact.scope == scope,
-                    MemoryFact.fact_type == fact_type,
-                    MemoryFact.key == key,
-                    MemoryFact.disabled_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if existing:
-            existing.value = value
-            existing.value_json = value_json or {"value": value}
-            existing.origin = "explicit_user"
-            existing.confidence = confidence
-            existing.source_message_id = source_message_id or existing.source_message_id
-            existing.expires_at = expires_at
-            existing.disabled_at = None
-            existing.updated_at = now
-            return existing
-        else:
-            memory = MemoryFact(
+        result = await self.session.execute(
+            _memory_upsert_statement(
                 user_id=user_id,
-                scope=scope,
-                fact_type=fact_type,
                 key=key,
                 value=value,
-                value_json=value_json or {"value": value},
-                origin="explicit_user",
                 confidence=confidence,
+                scope=scope,
+                fact_type=fact_type,
+                value_json=value_json or {"value": value},
                 source_message_id=source_message_id,
                 expires_at=expires_at,
+                now=now,
             )
-            self.session.add(memory)
-            await self.session.flush()
-            return memory
+        )
+        return result.scalar_one()
 
     async def mark_memory_used(self, user_id: int, memory_ids: list[int]) -> int:
         if not memory_ids:
@@ -351,3 +330,52 @@ def _clip(value: str, limit: int = 80) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 1]}…"
+
+
+def _memory_upsert_statement(
+    *,
+    user_id: int,
+    key: str,
+    value: str,
+    confidence: float,
+    scope: str,
+    fact_type: str,
+    value_json: dict,
+    source_message_id: int | None,
+    expires_at: datetime | None,
+    now: datetime,
+):
+    statement = pg_insert(MemoryFact).values(
+        user_id=user_id,
+        scope=scope,
+        fact_type=fact_type,
+        key=key,
+        value=value,
+        value_json=value_json,
+        origin="explicit_user",
+        confidence=confidence,
+        source_message_id=source_message_id,
+        expires_at=expires_at,
+        updated_at=now,
+    )
+    return statement.on_conflict_do_update(
+        index_elements=[
+            MemoryFact.user_id,
+            MemoryFact.scope,
+            MemoryFact.fact_type,
+            MemoryFact.key,
+        ],
+        index_where=MemoryFact.disabled_at.is_(None),
+        set_={
+            "value": statement.excluded.value,
+            "value_json": statement.excluded.value_json,
+            "origin": "explicit_user",
+            "confidence": statement.excluded.confidence,
+            "source_message_id": func.coalesce(
+                statement.excluded.source_message_id, MemoryFact.source_message_id
+            ),
+            "expires_at": statement.excluded.expires_at,
+            "disabled_at": None,
+            "updated_at": statement.excluded.updated_at,
+        },
+    ).returning(MemoryFact)
