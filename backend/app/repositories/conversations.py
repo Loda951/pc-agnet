@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentRun, Conversation, MemoryFact, Message, ToolCall
@@ -252,14 +252,13 @@ class ConversationRepository:
                 MemoryFact.user_id == user_id,
                 MemoryFact.disabled_at.is_(None),
                 or_(MemoryFact.expires_at.is_(None), MemoryFact.expires_at > now),
+                MemoryFact.origin == "explicit_user",
+                MemoryFact.value_json.is_not(None),
             )
             .order_by(MemoryFact.updated_at.desc())
             .limit(limit)
         )
-        memories = list((await self.session.execute(stmt)).scalars().all())
-        for memory in memories:
-            memory.last_used_at = now
-        return memories
+        return list((await self.session.execute(stmt)).scalars().all())
 
     async def upsert_memory(
         self,
@@ -269,9 +268,10 @@ class ConversationRepository:
         confidence: float = 0.7,
         scope: str = "user",
         fact_type: str = "preference",
+        value_json: dict | None = None,
         source_message_id: int | None = None,
         expires_in_days: int | None = None,
-    ) -> None:
+    ) -> MemoryFact:
         now = utc_now_naive()
         expires_at = now + timedelta(days=expires_in_days) if expires_in_days else None
         existing = (
@@ -281,31 +281,52 @@ class ConversationRepository:
                     MemoryFact.scope == scope,
                     MemoryFact.fact_type == fact_type,
                     MemoryFact.key == key,
+                    MemoryFact.disabled_at.is_(None),
                 )
             )
         ).scalar_one_or_none()
         if existing:
             existing.value = value
+            existing.value_json = value_json or {"value": value}
+            existing.origin = "explicit_user"
             existing.confidence = confidence
             existing.source_message_id = source_message_id or existing.source_message_id
             existing.expires_at = expires_at
             existing.disabled_at = None
-            existing.last_used_at = now
             existing.updated_at = now
+            return existing
         else:
-            self.session.add(
-                MemoryFact(
-                    user_id=user_id,
-                    scope=scope,
-                    fact_type=fact_type,
-                    key=key,
-                    value=value,
-                    confidence=confidence,
-                    source_message_id=source_message_id,
-                    expires_at=expires_at,
-                    last_used_at=now,
-                )
+            memory = MemoryFact(
+                user_id=user_id,
+                scope=scope,
+                fact_type=fact_type,
+                key=key,
+                value=value,
+                value_json=value_json or {"value": value},
+                origin="explicit_user",
+                confidence=confidence,
+                source_message_id=source_message_id,
+                expires_at=expires_at,
             )
+            self.session.add(memory)
+            await self.session.flush()
+            return memory
+
+    async def mark_memory_used(self, user_id: int, memory_ids: list[int]) -> int:
+        if not memory_ids:
+            return 0
+        now = utc_now_naive()
+        result = await self.session.execute(
+            update(MemoryFact)
+            .where(
+                MemoryFact.user_id == user_id,
+                MemoryFact.id.in_(set(memory_ids)),
+                MemoryFact.disabled_at.is_(None),
+                MemoryFact.origin == "explicit_user",
+            )
+            .values(last_used_at=now)
+        )
+        return int(result.rowcount or 0)
 
     async def disable_memory(self, user_id: int, memory_id: int) -> bool:
         memory = (

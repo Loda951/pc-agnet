@@ -1,0 +1,184 @@
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+VOLATILE_WORKING_MEMORY_KEYS = {
+    "content",
+    "logistics",
+    "price",
+    "snippet",
+    "specs",
+    "stock",
+}
+
+
+class CatalogMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query_plan: dict[str, Any] = Field(default_factory=dict)
+    candidate_spu_ids: list[int] = Field(default_factory=list)
+    candidate_sku_ids: list[int] = Field(default_factory=list)
+    referenced_spu_id: int | None = None
+    referenced_sku_id: int | None = None
+
+    @field_validator("query_plan", mode="before")
+    @classmethod
+    def strip_volatile_query_values(cls, value: Any) -> dict[str, Any]:
+        return _sanitize_mapping(value if isinstance(value, dict) else {})
+
+    @field_validator("candidate_spu_ids", "candidate_sku_ids", mode="before")
+    @classmethod
+    def unique_identifiers(cls, value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(int(item) for item in value if item is not None))
+
+
+class OrderMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_order_id: int | None = None
+
+
+class EvidenceReference(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    source_type: str
+    source_id: int
+    title: str | None = None
+    document_type: str | None = None
+
+
+class PolicyMemory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_query: str | None = None
+    evidence_refs: list[EvidenceReference] = Field(default_factory=list)
+
+
+class HandoffMemory(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    order_id: int | None = None
+    request_type: str | None = None
+    reason: str | None = None
+
+
+class WorkingMemoryV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    catalog: CatalogMemory = Field(default_factory=CatalogMemory)
+    order: OrderMemory = Field(default_factory=OrderMemory)
+    policy: PolicyMemory = Field(default_factory=PolicyMemory)
+    handoff: HandoffMemory = Field(default_factory=HandoffMemory)
+
+
+class ContextMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class HistorySelection(BaseModel):
+    messages: list[ContextMessage] = Field(default_factory=list)
+    estimated_token_count: int = 0
+    retained_turns: int = 0
+    dropped_turns: int = 0
+
+
+class StructuredMemory(BaseModel):
+    id: int
+    scope: str
+    fact_type: str
+    key: str
+    value: str
+    value_json: dict[str, Any]
+    confidence: float
+
+
+class PreparedTurn(BaseModel):
+    user_id: int
+    conversation_id: int
+    user_message_id: int
+    run_id: int
+    message: str
+    history: list[ContextMessage] = Field(default_factory=list)
+    memory: list[StructuredMemory] = Field(default_factory=list)
+    working_memory: WorkingMemoryV2 = Field(default_factory=WorkingMemoryV2)
+    estimated_token_count: int = 0
+    retained_turns: int = 0
+    dropped_turns: int = 0
+
+
+class MemoryChanges(BaseModel):
+    working_memory: WorkingMemoryV2
+    upserted_memory_ids: list[int] = Field(default_factory=list)
+    applied_memory_ids: list[int] = Field(default_factory=list)
+    audit: dict[str, Any] = Field(default_factory=dict)
+
+
+def upgrade_working_memory(value: dict[str, Any] | None) -> WorkingMemoryV2:
+    if not value:
+        return WorkingMemoryV2()
+    if value.get("schema_version") == 2:
+        return WorkingMemoryV2.model_validate(value)
+
+    recent_products = value.get("recent_products")
+    products = recent_products if isinstance(recent_products, list) else []
+    referenced = value.get("last_referenced_product")
+    referenced_product = referenced if isinstance(referenced, dict) else {}
+    evidence = value.get("recent_evidence")
+    evidence_items = evidence if isinstance(evidence, list) else []
+    handoff = value.get("pending_handoff")
+
+    return WorkingMemoryV2(
+        catalog=CatalogMemory(
+            query_plan=value.get("current_product_search") or {},
+            candidate_spu_ids=_collect_ids(products, "spu_id"),
+            candidate_sku_ids=_collect_ids(products, "sku_id"),
+            referenced_spu_id=_optional_int(referenced_product.get("spu_id")),
+            referenced_sku_id=_optional_int(referenced_product.get("sku_id")),
+        ),
+        order=OrderMemory(last_order_id=_optional_int(value.get("last_order_id"))),
+        policy=PolicyMemory(
+            last_query=value.get("last_policy_query"),
+            evidence_refs=[
+                EvidenceReference.model_validate(item)
+                for item in evidence_items
+                if isinstance(item, dict)
+                and item.get("source_type") is not None
+                and item.get("source_id") is not None
+            ],
+        ),
+        handoff=HandoffMemory.model_validate(handoff or {}),
+    )
+
+
+def _collect_ids(items: list[Any], key: str) -> list[int]:
+    return list(
+        dict.fromkeys(
+            int(item[key])
+            for item in items
+            if isinstance(item, dict) and item.get(key) is not None
+        )
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
+
+
+def _sanitize_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, item in value.items():
+        if key.lower() in VOLATILE_WORKING_MEMORY_KEYS:
+            continue
+        if isinstance(item, dict):
+            sanitized[key] = _sanitize_mapping(item)
+        elif isinstance(item, list):
+            sanitized[key] = [
+                _sanitize_mapping(entry) if isinstance(entry, dict) else entry for entry in item
+            ]
+        else:
+            sanitized[key] = item
+    return sanitized

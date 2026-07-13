@@ -61,6 +61,10 @@ class MemoryFact(Base):
     fact_type: Mapped[str] = mapped_column(String(64), nullable=False, default="preference")
     key: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
+    value_json: Mapped[dict | None] = mapped_column(JSONB)
+    origin: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="legacy_inferred", server_default="legacy_inferred"
+    )
     confidence: Mapped[float] = mapped_column(default=0.7, server_default="0.7")
     source_message_id: Mapped[int | None] = mapped_column(BigInteger)
     expires_at: Mapped[datetime | None]

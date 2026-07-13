@@ -289,6 +289,12 @@ LLM_API_KEY=sk-...
 LLM_MODEL=qwen-plus
 ```
 
+Agent 对话上下文默认最多使用 6000 个估算 token，可通过环境变量调整：
+
+```env
+AGENT_CONTEXT_BUDGET_TOKENS=6000
+```
+
 ## Auth 配置
 
 本地 demo 会由 `python -m scripts.seed_demo` 写入演示账号。生产或共享环境务必覆盖：

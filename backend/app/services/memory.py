@@ -25,6 +25,7 @@ PRODUCT_FOLLOWUP_TERMS = [
 ]
 ORDER_REFERENCE_TERMS = ["这个订单", "这笔订单", "刚才的订单", "上一单", "这单"]
 POLICY_REFERENCE_TERMS = ["这个政策", "该政策", "这个规则", "这条规则", "那", "还有呢"]
+STABLE_MEMORY_MARKERS = ["以后", "长期", "我通常", "请记住", "记住我"]
 ORDINAL_PRODUCT_REFERENCES = [
     (0, ["第一个", "第一款", "第1个", "第1款", "1号"]),
     (1, ["第二个", "第二款", "第2个", "第2款", "2号"]),
@@ -178,26 +179,111 @@ class MemoryService:
         }
 
     def extract_long_term_facts(self, message: str) -> list[dict[str, Any]]:
+        if not any(marker in message for marker in STABLE_MEMORY_MARKERS):
+            return []
+
         facts: list[dict[str, Any]] = []
         lowered = message.lower()
 
-        if "无线" in message:
-            facts.append(_memory_fact("connection_preference", "偏好无线设备", 0.8))
+        if "无线" in message and _is_negative_preference(message, "无线"):
+            facts.append(
+                _memory_fact(
+                    "connection_preference",
+                    "不偏好无线设备",
+                    0.8,
+                    {
+                        "preference": "wireless",
+                        "negated": True,
+                        "operation": "exclude",
+                    },
+                )
+            )
+        elif "有线" in message and _is_negative_preference(message, "有线"):
+            facts.append(
+                _memory_fact(
+                    "connection_preference",
+                    "不偏好有线设备",
+                    0.8,
+                    {
+                        "preference": "wired",
+                        "negated": True,
+                        "operation": "exclude",
+                    },
+                )
+            )
+        elif "无线" in message:
+            facts.append(
+                _memory_fact(
+                    "connection_preference",
+                    "偏好无线设备",
+                    0.8,
+                    {
+                        "preference": "wireless",
+                        "negated": False,
+                        "operation": "set",
+                    },
+                )
+            )
         elif "有线" in message:
-            facts.append(_memory_fact("connection_preference", "偏好有线设备", 0.75))
+            facts.append(
+                _memory_fact(
+                    "connection_preference",
+                    "偏好有线设备",
+                    0.75,
+                    {
+                        "preference": "wired",
+                        "negated": False,
+                        "operation": "set",
+                    },
+                )
+            )
 
         budget = _extract_budget_preference(message)
         if budget:
-            facts.append(_memory_fact("budget_preference", budget, 0.7))
+            amount = _extract_budget_amount(message)
+            facts.append(
+                _memory_fact(
+                    "budget_preference",
+                    budget,
+                    0.7,
+                    {
+                        "amount": amount,
+                        "currency": "CNY",
+                        "maximum": True,
+                        "operation": "set",
+                    },
+                )
+            )
 
         if "fps" in lowered or "游戏" in message:
-            facts.append(_memory_fact("usage_preference", "偏好游戏场景", 0.75))
+            facts.append(
+                _memory_fact(
+                    "usage_preference",
+                    "偏好游戏场景",
+                    0.75,
+                    {"usage": "gaming", "negated": False, "operation": "set"},
+                )
+            )
         elif "办公" in message:
-            facts.append(_memory_fact("usage_preference", "偏好办公场景", 0.7))
+            facts.append(
+                _memory_fact(
+                    "usage_preference",
+                    "偏好办公场景",
+                    0.7,
+                    {"usage": "office", "negated": False, "operation": "set"},
+                )
+            )
 
         brand = _extract_brand_preference(message)
         if brand:
-            facts.append(_memory_fact("brand_preference", f"偏好 {brand} 品牌", 0.65))
+            facts.append(
+                _memory_fact(
+                    "brand_preference",
+                    f"偏好 {brand} 品牌",
+                    0.65,
+                    {"brand": brand, "negated": False, "operation": "set"},
+                )
+            )
 
         return facts
 
@@ -248,12 +334,15 @@ def _infer_handoff_request_type(message: str) -> str:
     return "other"
 
 
-def _memory_fact(key: str, value: str, confidence: float) -> dict[str, Any]:
+def _memory_fact(
+    key: str, value: str, confidence: float, value_json: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "scope": "user",
         "fact_type": "preference",
         "key": key,
         "value": value,
+        "value_json": value_json,
         "confidence": confidence,
     }
 
@@ -269,6 +358,25 @@ def _extract_budget_preference(message: str) -> str | None:
     if amount is None:
         return None
     return f"偏好 {amount} 元以内预算"
+
+
+def _extract_budget_amount(message: str) -> float:
+    match = re.search(
+        r"预算\s*(\d+(?:\.\d+)?)\s*(?:元|块)?|(\d+(?:\.\d+)?)\s*(?:元|块)?以内",
+        message,
+    )
+    if match is None:
+        raise ValueError("budget amount is unavailable")
+    return float(match.group(1) or match.group(2))
+
+
+def _is_negative_preference(message: str, preference: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?:不要|不喜欢|不偏好|排除|别(?:用|要)?)[^，。；]{{0,8}}{re.escape(preference)}",
+            message,
+        )
+    )
 
 
 def _extract_brand_preference(message: str) -> str | None:
