@@ -1,8 +1,21 @@
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models import (
+    AppUser,
+    Conversation,
+    Message,
+    OrderInfo,
+    OrderItem,
+    UserAuthCredential,
+    UserSession,
+)
+from app.services.auth import PasswordHasher
 from scripts.seed_user_isolation import (
     DEMO_PASSWORD,
     ConversationSummary,
@@ -15,6 +28,7 @@ from scripts.seed_user_isolation import (
     build_order_specs,
     build_user_specs,
     format_summary,
+    seed_user_isolation,
 )
 
 ANCHOR = datetime(2026, 7, 14, 12, 0, 0)
@@ -112,3 +126,85 @@ def test_format_summary_lists_credentials_orders_and_conversations() -> None:
     assert f"password={DEMO_PASSWORD}" in output
     assert "order_id=991000000101 user_id=10 owner=test_user_001" in output
     assert "conversation_id=992000000101 user_id=10 owner=test_user_001" in output
+
+
+@pytest.mark.asyncio
+async def test_seed_user_isolation_persists_owned_data_idempotently(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        first = await seed_user_isolation(session, ANCHOR)
+        await session.commit()
+    async with db_session_factory() as session:
+        second = await seed_user_isolation(session, ANCHOR)
+        await session.commit()
+
+        users = (
+            (
+                await session.execute(
+                    select(AppUser).where(
+                        AppUser.login_identifier.like("test_user_%@example.com")
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        user_ids = {user.id for user in users}
+        credentials = (
+            (
+                await session.execute(
+                    select(UserAuthCredential).where(
+                        UserAuthCredential.user_id.in_(user_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        order_counts = dict(
+            (
+                await session.execute(
+                    select(OrderInfo.user_id, func.count(OrderInfo.id))
+                    .where(OrderInfo.id.between(991000000101, 991000000505))
+                    .group_by(OrderInfo.user_id)
+                )
+            ).all()
+        )
+        conversation_counts = dict(
+            (
+                await session.execute(
+                    select(Conversation.user_id, func.count(Conversation.id))
+                    .where(Conversation.id.between(992000000101, 992000000502))
+                    .group_by(Conversation.user_id)
+                )
+            ).all()
+        )
+        item_count = await session.scalar(
+            select(func.count(OrderItem.id)).where(
+                OrderItem.id.between(994000000101, 994000000505)
+            )
+        )
+        message_count = await session.scalar(
+            select(func.count(Message.id)).where(
+                Message.id.between(993000001011, 993000005022)
+            )
+        )
+        session_count = await session.scalar(
+            select(func.count(UserSession.id)).where(UserSession.user_id.in_(user_ids))
+        )
+
+    assert len(first.users) == len(second.users) == 5
+    assert len(first.orders) == len(second.orders) == 25
+    assert len(first.conversations) == len(second.conversations) == 10
+    assert len(users) == len(credentials) == 5
+    assert all(
+        PasswordHasher.verify_password(DEMO_PASSWORD, credential.password_hash)
+        for credential in credentials
+    )
+    assert set(order_counts) == set(conversation_counts) == user_ids
+    assert set(order_counts.values()) == {5}
+    assert set(conversation_counts.values()) == {2}
+    assert item_count == 25
+    assert message_count == 20
+    assert session_count == 0
