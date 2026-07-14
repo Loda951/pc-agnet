@@ -31,6 +31,13 @@ ORDER_ID_BASE = 991_000_000_000
 CONVERSATION_ID_BASE = 992_000_000_000
 MESSAGE_ID_BASE = 993_000_000_000
 ORDER_ITEM_ID_BASE = 994_000_000_000
+ORDER_STATUS_LABELS = {
+    1: "待付款",
+    2: "待发货",
+    3: "已发货",
+    4: "已完成",
+    5: "已关闭",
+}
 CATEGORY_NAME = "隔离测试外设"
 BRAND_NAME = "Isolation Mock"
 SPU_TITLE = "Isolation Mock 可追溯测试鼠标"
@@ -97,6 +104,7 @@ class OrderSummary:
     order_id: int
     user_id: int
     username: str
+    total_amount: Decimal
     pay_amount: Decimal
     status: int
     created_at: datetime
@@ -222,7 +230,8 @@ def format_summary(summary: SeedSummary) -> str:
     lines.extend(("", "[orders]"))
     lines.extend(
         f"order_id={item.order_id} user_id={item.user_id} owner={item.username} "
-        f"amount={item.pay_amount:.2f} status={item.status} "
+        f"total_amount={item.total_amount:.2f} pay_amount={item.pay_amount:.2f} "
+        f"status={item.status}({ORDER_STATUS_LABELS.get(item.status, '未知状态')}) "
         f"created_at={item.created_at.isoformat()}"
         for item in summary.orders
     )
@@ -542,6 +551,7 @@ async def seed_user_isolation(
                     order_id=order.id,
                     user_id=user.id,
                     username=user_spec.username,
+                    total_amount=order.total_amount,
                     pay_amount=order.pay_amount,
                     status=order.status,
                     created_at=order.created_at,

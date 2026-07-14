@@ -106,6 +106,7 @@ def test_format_summary_lists_credentials_orders_and_conversations() -> None:
                 order_id=991000000101,
                 user_id=10,
                 username="test_user_001",
+                total_amount=Decimal("130.00"),
                 pay_amount=Decimal("120.00"),
                 status=2,
                 created_at=ANCHOR,
@@ -125,6 +126,7 @@ def test_format_summary_lists_credentials_orders_and_conversations() -> None:
 
     assert f"password={DEMO_PASSWORD}" in output
     assert "order_id=991000000101 user_id=10 owner=test_user_001" in output
+    assert "total_amount=130.00 pay_amount=120.00 status=2(待发货)" in output
     assert "conversation_id=992000000101 user_id=10 owner=test_user_001" in output
 
 
