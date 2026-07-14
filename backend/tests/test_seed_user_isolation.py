@@ -208,3 +208,39 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
     assert item_count == 25
     assert message_count == 20
     assert session_count == 0
+
+
+def test_main_prints_summary_only_after_success(monkeypatch, capsys) -> None:
+    summary = SeedSummary(users=(), orders=(), conversations=())
+
+    async def successful_seed() -> SeedSummary:
+        return summary
+
+    monkeypatch.setattr(
+        "scripts.seed_user_isolation.seed_in_transaction",
+        successful_seed,
+    )
+
+    from scripts.seed_user_isolation import main
+
+    assert main() == 0
+    captured = capsys.readouterr()
+    assert "用户隔离 Mock 数据写入完成" in captured.out
+    assert captured.err == ""
+
+
+def test_main_reports_failure_without_success_summary(monkeypatch, capsys) -> None:
+    async def failed_seed() -> SeedSummary:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        "scripts.seed_user_isolation.seed_in_transaction",
+        failed_seed,
+    )
+
+    from scripts.seed_user_isolation import main
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "database unavailable" in captured.err

@@ -1,3 +1,5 @@
+import asyncio
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -578,3 +580,20 @@ async def seed_in_transaction() -> SeedSummary:
         async with session.begin():
             summary = await seed_user_isolation(session)
         return summary
+
+
+def main() -> int:
+    try:
+        summary = asyncio.run(seed_in_transaction())
+    except Exception as exc:
+        print(
+            f"用户隔离 Mock 数据写入失败: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    print(format_summary(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
