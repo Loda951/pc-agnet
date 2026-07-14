@@ -393,13 +393,23 @@ class AgentRuntime:
         results: list[dict[str, Any]] = []
 
         for planned_call in decision.tool_calls:
-            call, applied_memory_ids = self._prepare_tool_call(state, planned_call)
-            if applied_memory_ids:
-                state["applied_memory_ids"] = list(
-                    dict.fromkeys(
-                        [*state.get("applied_memory_ids", []), *applied_memory_ids]
-                    )
+            call = planned_call
+            execution: ToolExecutionResult | None = None
+            try:
+                call, applied_memory_ids = self._prepare_tool_call(state, planned_call)
+            except ValidationError as exc:
+                execution = ToolExecutionResult(
+                    tool_name=call.name,
+                    ok=False,
+                    error=ToolError(code="invalid_input", message=str(exc)),
                 )
+            else:
+                if applied_memory_ids:
+                    state["applied_memory_ids"] = list(
+                        dict.fromkeys(
+                            [*state.get("applied_memory_ids", []), *applied_memory_ids]
+                        )
+                    )
             writer(
                 {
                     "kind": "tool_call",
@@ -408,32 +418,35 @@ class AgentRuntime:
                     "input": call.arguments,
                 }
             )
-            contract = self.contract_provider.get_contract(call.name)
-            if contract is None:
-                execution = ToolExecutionResult(
-                    tool_name=call.name,
-                    ok=False,
-                    error=ToolError(code="unknown_tool", message=f"unknown tool: {call.name}"),
-                )
-            else:
-                try:
-                    execution = await self.tool_executor.execute(
-                        contract,
-                        call.arguments,
-                        {"user_id": state["user_id"]},
-                    )
-                except ValidationError as exc:
+            if execution is None:
+                contract = self.contract_provider.get_contract(call.name)
+                if contract is None:
                     execution = ToolExecutionResult(
                         tool_name=call.name,
                         ok=False,
-                        error=ToolError(code="invalid_input", message=str(exc)),
+                        error=ToolError(
+                            code="unknown_tool", message=f"unknown tool: {call.name}"
+                        ),
                     )
-                except Exception as exc:  # defensive orchestration boundary
-                    execution = ToolExecutionResult(
-                        tool_name=call.name,
-                        ok=False,
-                        error=ToolError(code=type(exc).__name__, message=str(exc)),
-                    )
+                else:
+                    try:
+                        execution = await self.tool_executor.execute(
+                            contract,
+                            call.arguments,
+                            {"user_id": state["user_id"]},
+                        )
+                    except ValidationError as exc:
+                        execution = ToolExecutionResult(
+                            tool_name=call.name,
+                            ok=False,
+                            error=ToolError(code="invalid_input", message=str(exc)),
+                        )
+                    except Exception as exc:  # defensive orchestration boundary
+                        execution = ToolExecutionResult(
+                            tool_name=call.name,
+                            ok=False,
+                            error=ToolError(code=type(exc).__name__, message=str(exc)),
+                        )
 
             call_json = call.model_dump(mode="json")
             execution_json = execution.model_dump(mode="json")
@@ -478,7 +491,9 @@ class AgentRuntime:
         call: PlannedToolCall,
     ) -> tuple[PlannedToolCall, list[int]]:
         if call.name == "catalog_search":
-            request = CatalogSearchInput.model_validate(call.arguments)
+            request = CatalogSearchInput.model_validate(
+                _normalize_catalog_search_arguments(call.arguments)
+            )
             catalog_input, applied_memory_ids = _catalog_search_input(state, request)
             return (
                 call.model_copy(
@@ -761,6 +776,17 @@ def _contextual_intent(
     if intent == "general" and _is_v2_policy_followup(message, working_memory):
         return "after_sales"
     return intent
+
+
+def _normalize_catalog_search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(arguments)
+    connection_type = normalized.pop("connection_type", None)
+    filters = normalized.get("filters")
+    if connection_type is not None and (filters is None or isinstance(filters, dict)):
+        normalized_filters = dict(filters or {})
+        normalized_filters.setdefault("connection_type", connection_type)
+        normalized["filters"] = normalized_filters
+    return normalized
 
 
 def _product_search_from_state(state: AgentState) -> ProductSearchRequest:

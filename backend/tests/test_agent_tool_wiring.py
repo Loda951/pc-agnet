@@ -1,9 +1,12 @@
 from typing import Any, cast
 
 import pytest
+from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.decisions import PlannedToolCall
 from app.agent.graph import AgentRuntime, _catalog_search_input
+from app.agent.state import AgentState
 from app.core.config import Settings
 from app.schemas.catalog import ProductSearchRequest
 from app.schemas.chat import ChatRequest
@@ -96,6 +99,123 @@ class FakeToolRegistry:
 class EmptyKnowledgeService:
     async def retrieve(self, query: str) -> list:
         return []
+
+
+def test_catalog_tool_call_normalizes_top_level_connection_type() -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    state = cast(
+        AgentState,
+        {
+            "message": "推荐 500 元以内无线鼠标",
+            "working_memory": WorkingMemoryV2().model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+    call = PlannedToolCall(
+        id="catalog-call",
+        name="catalog_search",
+        arguments={
+            "query": "无线鼠标",
+            "max_price": 500,
+            "connection_type": "Wireless",
+            "limit": 5,
+        },
+    )
+
+    prepared_call, _ = runtime._prepare_tool_call(state, call)
+
+    assert "connection_type" not in prepared_call.arguments
+    assert prepared_call.arguments["filters"]["connection_type"] == "Wireless"
+
+
+def test_catalog_tool_call_prefers_nested_connection_type() -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    state = cast(
+        AgentState,
+        {
+            "message": "推荐有线鼠标",
+            "working_memory": WorkingMemoryV2().model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+    call = PlannedToolCall(
+        id="catalog-call",
+        name="catalog_search",
+        arguments={
+            "query": "有线鼠标",
+            "connection_type": "Wireless",
+            "filters": {"connection_type": "Wired"},
+        },
+    )
+
+    prepared_call, _ = runtime._prepare_tool_call(state, call)
+
+    assert prepared_call.arguments["filters"]["connection_type"] == "Wired"
+
+
+@pytest.mark.asyncio
+async def test_invalid_catalog_tool_arguments_become_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_calls: list[tuple[Any, ...]] = []
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            captured_calls.append(args)
+
+    registry = FakeToolRegistry({})
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        tool_registry=registry,
+    )
+    workflow = StateGraph(AgentState)
+    workflow.add_node("execute_tool_wave", runtime._execute_tool_wave)
+    workflow.set_entry_point("execute_tool_wave")
+    workflow.add_edge("execute_tool_wave", END)
+
+    result = await workflow.compile().ainvoke(
+        cast(
+            AgentState,
+            {
+                "user_id": 7,
+                "run_id": 61,
+                "message": "推荐鼠标",
+                "decision": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "id": "catalog-call",
+                            "name": "catalog_search",
+                            "arguments": {
+                                "query": "鼠标",
+                                "unexpected_filter": "value",
+                            },
+                        }
+                    ],
+                },
+                "working_memory": WorkingMemoryV2().model_dump(mode="json"),
+                "memory": [],
+                "parsed": {},
+                "products": [],
+                "evidence": [],
+                "order": None,
+                "tool_waves": [],
+                "tool_results": [],
+                "tool_wave_count": 0,
+            },
+        )
+    )
+
+    execution = result["tool_results"][0]["execution"]
+    assert execution["ok"] is False
+    assert execution["error"]["code"] == "invalid_input"
+    assert registry.calls == []
+    assert captured_calls[0][1] == "catalog_search"
 
 
 @pytest.mark.asyncio
