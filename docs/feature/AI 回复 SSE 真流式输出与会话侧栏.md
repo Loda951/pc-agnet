@@ -1,6 +1,6 @@
 ---
-title: AI 回复 SSE 真流式输出与会话侧栏
-description: "记录第二阶段前端工作台产品化中的真 SSE 流式回复、会话列表隔离、订单可展开明细、取消超时重试体验和验证结果。"
+title: AI 回复 SSE 进度流与会话侧栏
+description: "记录第二阶段前端工作台中的 SSE 进度事件、完整回复校验、会话列表隔离、订单可展开明细、取消超时重试体验和验证结果。"
 tags: [feature, SSE, streaming, chat, 会话隔离, 前端工作台, 订单明细]
 category: feature
 doc_type: feature-summary
@@ -9,12 +9,12 @@ status: completed
 priority: P0
 ---
 
-# AI 回复 SSE 真流式输出与会话侧栏
+# AI 回复 SSE 进度流与会话侧栏
 
 ## 背景与目标
 
 - 此前 `/api/chat/stream` 会先等待 `AgentRuntime.run()` 生成完整回答，再把 answer 拆行发送；用户体验仍然是“等完整回答”。
-- 第二阶段需要把边界判断、工具检索、上下文更新和回答 token/chunk 逐步暴露给前端。
+- 第二阶段需要把边界判断、工具检索和上下文更新逐步暴露给前端；最终回答在完整生成并校验后一次性发送。
 - 前端左侧从快捷 prompt 调整为当前用户的会话列表，让每次对话可切换、可隔离、可恢复。
 - 订单上下文需要可点开查看明细，避免只看到一行摘要。
 
@@ -33,11 +33,12 @@ priority: P0
     - `done`
     - `error`
   - 商品、订单、知识库检索会在开始/完成时发送 `tool_call`，并在上下文变化后发送 `context`。
-  - LLM 路径使用 `astream()` 输出 token；无 LLM key 的 fallback 文案按小 chunk 输出。
+  - LLM 路径使用 `ainvoke()` 获取完整响应；原生 Tool Call 继续进入 loop，没有 Tool Call 的完整正文直接进入 `finalize_response`。
+  - 终态不再使用 `TYPE:` 头；已有成功 Tool Result 时，普通模型正文仅在内部按 `grounded_response` 记录。
   - 客户端断开时将 run 标记为 failed/cancelled，避免长期停留在 running。
 
 - `backend/app/core/llm.py`
-  - `ChatOpenAI` 显式启用 `streaming=True`。
+  - `ChatOpenAI` 显式使用 `streaming=False`，避免未校验的部分正文进入用户界面。
 
 - `backend/app/api/routers/chat.py`
   - `/api/chat/stream` 改为直接消费 `run_stream()`。
@@ -67,7 +68,7 @@ priority: P0
   - `boundary` 事件更新顶部边界和气泡徽标。
   - `tool_call` 事件更新生成阶段文案。
   - `context` 事件即时更新右侧商品、订单、evidence 面板。
-  - `delta` 事件逐 chunk 追加到助手气泡。
+  - `delta` 事件一次性写入已经完整校验的助手回答。
   - `done` 事件补齐最终 metadata、suggested actions 和会话记录。
   - 取消流式请求会显示“已取消”，超时/断流会保留重试入口。
 
@@ -85,6 +86,9 @@ priority: P0
 
 - 决策：保留原 `/api/chat` 和 LangGraph `run()`，新增顺序版 `run_stream()`。
   - 理由：非流式接口和既有测试保持稳定；流式路径更容易精确控制事件时机。
+
+- 决策：保留 SSE 进度事件，但最终模型回答不做 token 流式输出。
+  - 理由：客服回答需要先完整生成；未完成的部分正文一旦发送便无法撤回。完整正文直接在 `finalize_response` 后一次性发送。
 
 - 决策：前端使用 `fetch reader`，不使用 `EventSource`。
   - 理由：聊天请求需要 POST body 和 Authorization header，`EventSource` 不适合该场景。
@@ -122,4 +126,4 @@ npm run build -> passed
 
 - 当前会话列表只支持按最近更新时间排序，尚未支持重命名、删除、置顶和搜索。
 - 订单“可点开”先实现为右侧上下文内展开明细，尚未引入独立前端路由页面。
-- SSE 事件目前覆盖核心进度，后续可增加更细的检索耗时、重排分数和 token 统计。
+- SSE 事件目前覆盖核心进度，后续可增加更细的检索耗时和重排分数；最终正文保持完整校验后发送。

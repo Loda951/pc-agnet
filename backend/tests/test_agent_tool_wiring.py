@@ -214,6 +214,8 @@ async def test_invalid_catalog_tool_arguments_become_tool_error(
     execution = result["tool_results"][0]["execution"]
     assert execution["ok"] is False
     assert execution["error"]["code"] == "invalid_input"
+    assert execution["error"]["retryable"] is True
+    assert execution["error"]["recommended_action"] == "replan_arguments"
     assert registry.calls == []
     assert captured_calls[0][1] == "catalog_search"
 

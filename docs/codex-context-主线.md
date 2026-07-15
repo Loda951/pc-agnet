@@ -202,7 +202,7 @@ priority: P0
 
 1. P0：真实鉴权与权限隔离。`docs/feature/收敛 read-only 边界与人工接管策略.md` 已把订单 query `user_id` 标为遗留风险，必须先补。
 2. P0：人工接管从“提示”升级为“可追踪队列”。当前 `human_handoff_required` 只改变回答和前端状态，尚未形成客服可处理记录。
-3. P0：前端 SSE 真流式输出与状态体验。基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
+3. P0：前端 SSE 进度流与状态体验。基础版本已完成，最终回答采用完整校验后一次性发送，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 4. P1：工作记忆与个性化记忆分层。上下文与记忆 M2 已完成，详见 `docs/feature/Agent 上下文与记忆 M2.md`；当前剩余项是复杂自由指代评测、跨标签页幂等和生产 token 统计。
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
@@ -225,12 +225,12 @@ priority: P0
 - 简明描述：保持第二阶段默认 read-only，但把 `human_handoff_required` 从纯提示升级为真实可追踪的人工接管请求，避免用户以为系统已经办理退款、退货或维修。
 - 需要实现的功能点：新增 `handoff_request` 或扩展售后表作为人工队列入口，保存用户、会话、订单、原因、边界分类、状态和处理备注；`/api/after-sales` 从固定 409 逐步改为创建人工接管记录并返回 `202 accepted` 或明确的队列响应；Agent 建议动作中的“转人工客服”调用该入口；前端展示接管状态、请求时间、关联订单和可取消/补充说明；保留 read-only 策略，不自动承诺退款、赔付、维修结论或订单修改；测试覆盖办理类请求不进入自动业务写操作。
 
-## P0：AI 回复 SSE 真流式输出
+## P0：AI 回复 SSE 进度流与完整回复校验
 
 - 状态：基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 - 所属维度：优化前端展示。
 - 简明描述：把聊天体验从“等待完整回答”改为可见的事件流，让用户先看到边界判断、检索进度、依据更新和逐字回答。
-- 需要实现的功能点：后端新增 `AgentRuntime.run_stream()` 或等价流式接口，事件类型建议包含 `run_started`、`boundary`、`tool_call`、`context`、`delta`、`done`、`error`；LLM provider 支持 token streaming，fallback 回答也按 chunk 输出；`/api/chat/stream` 使用 POST + `StreamingResponse`，避免等待 `run()` 完整结束后再按行拆分；前端新增 `sendChatStream`，用 fetch reader 解析 SSE，因为 EventSource 不适合携带 POST body；消息气泡边生成边渲染，右侧商品、订单、evidence 面板在 `context` 事件到达时更新；断流、超时、取消和重试都要有用户可理解的状态。
+- 需要实现的功能点：后端通过 `AgentRuntime.run_stream()` 输出 `run_started`、`boundary`、`tool_call`、`context`、`delta`、`done`、`error` 等进度事件；LLM 使用非流式完整响应，原生 Tool Call 继续进入编排 loop，没有 Tool Call 的正文在 `finalize_response` 后通过单个 `delta` 一次性发送；`/api/chat/stream` 使用 POST + `StreamingResponse`；前端用 fetch reader 解析 SSE，右侧商品、订单、evidence 面板在 `context` 事件到达时更新；断流、超时、取消和重试都要有用户可理解的状态。
 
 ## P1：工作记忆与长期个性化记忆分层
 
@@ -284,7 +284,7 @@ priority: P0
 ### 第二阶段推荐实施顺序
 
 1. 先做多用户鉴权与隔离，同时补越权测试。这是所有订单、记忆和人工接管能力的安全前置。
-2. 接着做人工接管队列和 SSE 真流式输出，形成可演示且不假装办理业务的客服体验。
+2. 接着做人工接管队列和 SSE 进度流，形成可演示且不假装办理业务的客服体验。
 3. 然后做工作记忆、统一 evidence 和前端布局优化，让多轮推荐、订单上下文和依据展示真正可用。
 4. 再做外部图片源、推荐对比增强和 RAG 生产化，提高商品咨询质量和视觉可信度。
 5. 最后再评估 MCP 试点和模型化边界分类，避免过早引入工具平台复杂度。

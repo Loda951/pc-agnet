@@ -18,8 +18,6 @@ class AgentState(TypedDict, total=False):
     tool_wave_count: int
     tool_waves: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
-    decision_header_streamed: bool
-    response_streamed: bool
     boundary: dict[str, Any]
     parsed: dict[str, Any]
     history: list[dict[str, str]]

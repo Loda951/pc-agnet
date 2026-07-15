@@ -68,7 +68,8 @@ async def test_chat_stream_emits_progress_context_delta_and_done(
         event["type"] == "context" and event["evidence"][0]["title"] == "测试退货政策"
         for event in events
     )
-    assert "".join(event["delta"] for event in events if event["type"] == "delta")
+    deltas = [event["delta"] for event in events if event["type"] == "delta"]
+    assert deltas == [events[-1]["response"]["answer"]]
     assert events[-1]["response"]["evidence"][0]["title"] == "测试退货政策"
 
 

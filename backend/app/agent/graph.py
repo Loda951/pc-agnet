@@ -7,7 +7,6 @@ from typing import Any
 
 from langchain_core.messages import (
     AIMessage,
-    AIMessageChunk,
     HumanMessage,
     SystemMessage,
     ToolMessage,
@@ -20,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.decisions import (
     OrchestratorDecision,
     PlannedToolCall,
-    TerminalResponseStreamParser,
     decision_from_ai_message,
 )
 from app.agent.intent import (
@@ -30,7 +28,10 @@ from app.agent.intent import (
     classify_intent,
     extract_order_id,
 )
-from app.agent.prompts import ORCHESTRATOR_SYSTEM_PROMPT, build_orchestrator_input
+from app.agent.prompts import (
+    build_orchestrator_system_prompt,
+    build_orchestrator_user_prompt,
+)
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.core.llm import build_chat_model
@@ -137,16 +138,7 @@ class AgentRuntime:
             ):
                 if mode == "custom":
                     event_kind = update.get("kind")
-                    if event_kind == "decision_header":
-                        decision = OrchestratorDecision(type=update["decision_type"])
-                        yield _stream_event(
-                            "boundary",
-                            state,
-                            boundary=_boundary_from_decision(decision),
-                        )
-                    elif event_kind == "response_delta":
-                        yield _stream_event("delta", state, delta=update["delta"])
-                    elif event_kind == "tool_call":
+                    if event_kind == "tool_call":
                         yield _stream_event(
                             "tool_call",
                             state,
@@ -161,9 +153,7 @@ class AgentRuntime:
                     state.update(node_state)
                     if node_name == "load_context":
                         yield _stream_event("run_started", state)
-                    elif node_name == "orchestrate" and not state.get(
-                        "decision_header_streamed"
-                    ):
+                    elif node_name == "orchestrate":
                         yield _stream_event("boundary", state, boundary=state["boundary"])
                     elif node_name == "execute_tool_wave":
                         yield _context_event(state)
@@ -172,10 +162,7 @@ class AgentRuntime:
                         "render_handoff_template",
                         "render_out_of_scope_template",
                     }:
-                        if not state.get("response_streamed"):
-                            for delta in _chunk_text(state["answer"]):
-                                await asyncio.sleep(0)
-                                yield _stream_event("delta", state, delta=delta)
+                        yield _stream_event("delta", state, delta=state["answer"])
                     elif node_name == "persist_turn":
                         yield _stream_event(
                             "done",
@@ -204,8 +191,6 @@ class AgentRuntime:
             "tool_wave_count": 0,
             "tool_waves": [],
             "tool_results": [],
-            "decision_header_streamed": False,
-            "response_streamed": False,
             "parsed": {},
             "products": [],
             "evidence": [],
@@ -258,27 +243,35 @@ class AgentRuntime:
 
     async def _orchestrate(self, state: AgentState) -> AgentState:
         call_count = state.get("orchestrator_call_count", 0) + 1
-        if call_count > MAX_ORCHESTRATOR_CALLS:
+        boundary = classify_boundary(state["message"])
+        if boundary.classification == "human_handoff_required":
+            decision = OrchestratorDecision(type="handoff", reason=boundary.reason)
+        elif boundary.classification == "out_of_scope":
+            decision = OrchestratorDecision(type="out_of_scope", reason=boundary.reason)
+        elif call_count > MAX_ORCHESTRATOR_CALLS:
             decision = _limit_decision()
         elif self.orchestrator:
             try:
-                decision, header_streamed, response_streamed = (
-                    await self._stream_orchestrator_decision(state, call_count)
-                )
-                state["decision_header_streamed"] = header_streamed
-                state["response_streamed"] = response_streamed
+                decision = await self._invoke_orchestrator_decision(state, call_count)
             except (ValidationError, ValueError, TypeError) as exc:
-                decision = OrchestratorDecision(
-                    type="clarification",
-                    response="我还不能准确判断你的需求。请补充具体商品、订单或想咨询的问题。",
-                    reason=f"invalid_orchestrator_response:{type(exc).__name__}",
-                )
-                state["decision_header_streamed"] = False
-                state["response_streamed"] = False
+                reason = f"invalid_orchestrator_response:{type(exc).__name__}"
+                if _has_successful_tool_result(state):
+                    decision = OrchestratorDecision(
+                        type="grounded_response",
+                        response=_fallback_answer(state),
+                        reason=reason,
+                    )
+                else:
+                    decision = OrchestratorDecision(
+                        type="clarification",
+                        response=(
+                            "我还不能准确判断你的需求。"
+                            "请补充具体商品、订单或想咨询的问题。"
+                        ),
+                        reason=reason,
+                    )
         else:
             decision = self._fallback_orchestrator_decision(state)
-            state["decision_header_streamed"] = False
-            state["response_streamed"] = False
 
         decision = self._validate_decision_budget(state, decision, call_count)
         state["orchestrator_call_count"] = call_count
@@ -287,67 +280,20 @@ class AgentRuntime:
         state["boundary"] = _boundary_from_decision(decision)
         return state
 
-    async def _stream_orchestrator_decision(
+    async def _invoke_orchestrator_decision(
         self,
         state: AgentState,
         call_count: int,
-    ) -> tuple[OrchestratorDecision, bool, bool]:
-        writer = get_stream_writer()
-        parser = TerminalResponseStreamParser()
-        aggregate: AIMessageChunk | None = None
-        saw_tool_call = False
-        header_streamed = False
-        response_streamed = False
-
-        async for chunk in self.orchestrator.astream(
+    ) -> OrchestratorDecision:
+        message = await self.orchestrator.ainvoke(
             _orchestrator_messages(state, call_count)
-        ):
-            aggregate = chunk if aggregate is None else aggregate + chunk
-            chunk_has_tool_call = bool(chunk.tool_call_chunks or chunk.tool_calls)
-            if chunk_has_tool_call:
-                if parser.has_streamable_response or response_streamed:
-                    raise RuntimeError(
-                        "orchestrator emitted a tool call after starting a user response"
-                    )
-                saw_tool_call = True
-
-            text = _content_to_text(chunk.content)
-            if not text or saw_tool_call:
-                continue
-
-            previous_type = parser.decision_type
-            deltas = parser.feed(text)
-            if previous_type is None and parser.decision_type is not None:
-                writer(
-                    {
-                        "kind": "decision_header",
-                        "decision_type": parser.decision_type,
-                    }
-                )
-                header_streamed = True
-            for delta in deltas:
-                writer({"kind": "response_delta", "delta": delta})
-                response_streamed = True
-
-        if aggregate is None:
-            raise ValueError("orchestrator returned no message chunks")
-        if aggregate.tool_calls:
-            return (
-                decision_from_ai_message(
-                    aggregate,
-                    has_tool_results=bool(state.get("tool_results")),
-                ),
-                False,
-                False,
-            )
-        if saw_tool_call:
-            raise ValueError("orchestrator returned incomplete tool call chunks")
-
-        decision = parser.finish()
-        if not header_streamed:
-            writer({"kind": "decision_header", "decision_type": decision.type})
-            header_streamed = True
-        return decision, header_streamed, response_streamed
+        )
+        if not isinstance(message, AIMessage):
+            raise TypeError("orchestrator returned a non-AI message")
+        return decision_from_ai_message(
+            message,
+            has_successful_tool_results=_has_successful_tool_result(state),
+        )
 
     def _validate_decision_budget(
         self,
@@ -401,7 +347,12 @@ class AgentRuntime:
                 execution = ToolExecutionResult(
                     tool_name=call.name,
                     ok=False,
-                    error=ToolError(code="invalid_input", message=str(exc)),
+                    error=ToolError(
+                        code="invalid_input",
+                        message=str(exc),
+                        retryable=True,
+                        recommended_action="replan_arguments",
+                    ),
                 )
             else:
                 if applied_memory_ids:
@@ -439,7 +390,12 @@ class AgentRuntime:
                         execution = ToolExecutionResult(
                             tool_name=call.name,
                             ok=False,
-                            error=ToolError(code="invalid_input", message=str(exc)),
+                            error=ToolError(
+                                code="invalid_input",
+                                message=str(exc),
+                                retryable=True,
+                                recommended_action="replan_arguments",
+                            ),
                         )
                     except Exception as exc:  # defensive orchestration boundary
                         execution = ToolExecutionResult(
@@ -1338,7 +1294,12 @@ def _orchestrator_messages(
     call_count: int,
 ) -> list[SystemMessage | HumanMessage | AIMessage | ToolMessage]:
     messages: list[SystemMessage | HumanMessage | AIMessage | ToolMessage] = [
-        SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT)
+        SystemMessage(
+            content=build_orchestrator_system_prompt(
+                tool_waves=state.get("tool_waves", []),
+                tool_results=state.get("tool_results", []),
+            )
+        )
     ]
     for item in state.get("history", []):
         content = item.get("content", "")
@@ -1350,7 +1311,7 @@ def _orchestrator_messages(
             messages.append(AIMessage(content=content))
     messages.append(
         HumanMessage(
-            content=build_orchestrator_input(
+            content=build_orchestrator_user_prompt(
                 message=state["message"],
                 tool_wave_count=state.get("tool_wave_count", 0),
                 orchestrator_call_count=call_count,
@@ -1569,6 +1530,13 @@ def _latest_successful_tool_output(
     return None
 
 
+def _has_successful_tool_result(state: AgentState) -> bool:
+    return any(
+        bool(result.get("execution", {}).get("ok"))
+        for result in state.get("tool_results", [])
+    )
+
+
 def _catalog_facets_fallback_answer(output: dict[str, Any]) -> str:
     facet_labels = {
         "brand": "品牌",
@@ -1693,21 +1661,3 @@ def _context_event(state: AgentState) -> dict[str, Any]:
         order=state["order"].model_dump(mode="json") if state.get("order") else None,
         evidence=_dump_evidence(state.get("evidence", [])),
     )
-
-
-def _chunk_text(text: str, chunk_size: int = 12) -> list[str]:
-    return [text[index : index + chunk_size] for index in range(0, len(text), chunk_size)] or [""]
-
-
-def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                parts.append(str(item.get("text") or item.get("content") or ""))
-        return "".join(parts)
-    return "" if content is None else str(content)
