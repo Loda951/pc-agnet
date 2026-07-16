@@ -21,6 +21,7 @@ import { LoginPage } from "./components/LoginPage";
 import { MobileTabBar } from "./components/MobileTabBar";
 import type { MobileTab } from "./components/MobileTabBar";
 import { Sidebar } from "./components/Sidebar";
+import { resolveOrderDisplayIds } from "./chatContext";
 import type {
   AuthSession,
   BoundaryClassification,
@@ -485,6 +486,7 @@ export default function App() {
     }
 
     if (event.type === "context") {
+      const { currentTurnOrderId } = resolveOrderDisplayIds(event.order);
       if (event.boundary) {
         setBoundary(event.boundary);
       }
@@ -499,7 +501,7 @@ export default function App() {
         intent: event.intent ?? message.intent,
         evidenceCount: event.evidence.length,
         productCount: event.products.length,
-        orderId: event.order?.id ?? message.orderId,
+        orderId: currentTurnOrderId,
         products: event.boundary?.classification === "out_of_scope" ? [] : event.products,
         streamStage: "上下文已更新"
       }));
@@ -540,7 +542,10 @@ export default function App() {
     userMessage: string
   ) {
     const receivedAt = new Date().toISOString();
-    const orderId = response.order?.id ?? order?.id;
+    const { currentTurnOrderId, contextOrderId } = resolveOrderDisplayIds(
+      response.order,
+      order
+    );
     setConversationId(response.conversation_id);
     setBoundary(response.boundary);
     setEvidence(response.boundary.classification === "out_of_scope" ? [] : response.evidence);
@@ -560,7 +565,7 @@ export default function App() {
       intent: response.intent,
       evidenceCount: response.evidence.length,
       productCount: response.products.length,
-      orderId,
+      orderId: currentTurnOrderId,
       suggestedActions: response.suggested_actions,
       products: response.boundary.classification === "out_of_scope" ? [] : response.products
     }));
@@ -574,7 +579,7 @@ export default function App() {
         boundary: response.boundary,
         evidenceCount: response.evidence.length,
         productCount: response.products.length,
-        orderId,
+        orderId: currentTurnOrderId,
         suggestedActions: response.suggested_actions,
         createdAt: receivedAt
       }
@@ -585,7 +590,7 @@ export default function App() {
         requested: false,
         source: "边界分类",
         reason: response.boundary.reason,
-        orderId,
+        orderId: contextOrderId,
         updatedAt: receivedAt
       });
     } else {
