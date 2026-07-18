@@ -28,7 +28,7 @@ priority: P0
 
 ### 后端 API
 
-- 已完成：`/api/chat` 和 `/api/chat/stream`；`/api/chat/stream` 已由 `AgentRuntime.run_stream()` 输出 run/boundary/tool/context/delta/done/error SSE 事件。
+- 已完成：前端主链通过 `POST /api/chat` 获取完整 `ChatResponse`；`/api/chat/stream` 暂时保留为兼容接口，不再作为前端默认路径。
 - 已完成：`/api/catalog/search`，支持商品关键词、分类、价格、规格过滤。
 - 已完成：`/api/orders/latest` 和 `/api/orders/{order_id}`，按用户 ID 查询订单与物流。
 - 已完成：`/api/after-sales`，可创建 demo 售后工单。
@@ -97,11 +97,10 @@ priority: P0
 
 - 前端调用 `frontend/src/api.ts`，默认同源请求 `/api`，开发环境由 Vite proxy 转发到 `http://127.0.0.1:8000`。
 - `/api/chat` 接收用户问题后进入 `AgentRuntime`。
-- LangGraph 流程为 `load_context -> classify_boundary -> route_intent -> retrieve -> retrieve_knowledge -> generate -> persist`。
-- `classify_boundary` 先判断 read-only 边界；`route_intent` 使用规则识别业务意图；`retrieve` 根据意图调用商品或订单 repository。
-- `retrieve_knowledge` 将 PostgreSQL `knowledge_document` 同步到 ChromaDB 并返回 evidence。
-- `generate` 在有 LLM key 时调用 DeepSeek，否则使用后端 fallback 文案；知识类回答会携带依据。
-- `persist` 写入用户消息、助手消息、agent run、工具调用和简单记忆。
+- LangGraph 主流程为 `load_context -> orchestrate -> dispatch_decision`；需要业务事实时进入 `execute_tool_wave -> orchestrate` 循环，形成终态后经 `finalize_response/render_* -> persist_turn` 返回。
+- `orchestrate` 使用完整 `AIMessage` 选择原生 Tool Call 或直接回复；LLM 不做 token/chunk 流式输出。
+- 商品、订单、物流、政策和知识事实由只读 Tool 提供；Tool Result 可投影为 products、order 和 evidence。
+- `persist_turn` 写入用户消息、助手消息、agent run、工具调用和记忆变更。
 - 售后办理当前不由 Agent 自动执行；前端会通过聊天入口触发人工接管提示，`/api/after-sales` 保留但降级为 `409 human_handoff_required`。
 
 ## 已知问题与遗留债务
@@ -115,7 +114,7 @@ priority: P0
 - 数据质量有限：真实外设导入路径已打通，但本地环境仍需按需执行导入脚本；搜索排序还缺离线评测集。
 - 测试覆盖不足：已补 API 集成、边界分类和 RAG 回归测试；仍缺真实鉴权、权限隔离和多轮指代消解测试。
 - 错误处理较薄：LLM 超时、DeepSeek 错误、数据库异常、外部服务降级尚未形成统一错误码和用户可读策略。
-- Frontend 仍是 demo 工作台：登录、会话列表、SSE loading/error/retry/cancel 基础体验已完成；仍缺完整路由、会话管理高级操作和浏览器端验收记录。
+- Frontend 仍是 demo 工作台：登录、会话列表、完整回复的 loading/error/retry/cancel 基础体验已完成；仍缺完整路由、会话管理高级操作和浏览器端验收记录。
 
 ## 设计目标与当前实现的差距分析（对照 design.md）
 
@@ -196,13 +195,13 @@ priority: P0
 - 第一阶段已完成“技术闭环”和三项关键基础优化：read-only 边界与人工接管提示、知识库 RAG 与 evidence、真实外设数据导入与集成测试。
 - 第二阶段不应优先扩大自动写操作范围，而应把当前 demo 推进到“多用户可用、可追溯、可演示、可安全扩展”的客服工作台。
 - 当前最大风险不是推荐能力不足，而是用户身份仍由 `DEFAULT_USER_ID` 或 query `user_id` 决定；订单、会话、记忆和售后上下文在真实多用户场景下缺少可信隔离。
-- 第二阶段推荐的最小可信闭环是：真实登录态 -> 当前用户隔离 -> 流式回复 -> 商品/订单/知识依据统一展示 -> 人工接管形成真实队列或记录 -> 回归测试覆盖越权、SSE 和多轮上下文。
+- 第二阶段推荐的最小可信闭环是：真实登录态 -> 当前用户隔离 -> 完整回复 -> 商品/订单/知识依据统一展示 -> 人工接管形成真实队列或记录 -> 回归测试覆盖越权、回复失败和多轮上下文。
 
 ## 对照 feature 文档后的未完成/部分完成项优先级
 
 1. P0：真实鉴权与权限隔离。`docs/feature/收敛 read-only 边界与人工接管策略.md` 已把订单 query `user_id` 标为遗留风险，必须先补。
 2. P0：人工接管从“提示”升级为“可追踪队列”。当前 `human_handoff_required` 只改变回答和前端状态，尚未形成客服可处理记录。
-3. P0：前端 SSE 进度流与状态体验。基础版本已完成，最终回答采用完整校验后一次性发送，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
+3. P0：前端完整回复与状态体验。当前主链使用 `/api/chat` 一次性返回，历史 SSE 方案见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 4. P1：工作记忆与个性化记忆分层。上下文与记忆 M2 已完成，详见 `docs/feature/Agent 上下文与记忆 M2.md`；当前剩余项是复杂自由指代评测、跨标签页幂等和生产 token 统计。
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
@@ -225,12 +224,12 @@ priority: P0
 - 简明描述：保持第二阶段默认 read-only，但把 `human_handoff_required` 从纯提示升级为真实可追踪的人工接管请求，避免用户以为系统已经办理退款、退货或维修。
 - 需要实现的功能点：新增 `handoff_request` 或扩展售后表作为人工队列入口，保存用户、会话、订单、原因、边界分类、状态和处理备注；`/api/after-sales` 从固定 409 逐步改为创建人工接管记录并返回 `202 accepted` 或明确的队列响应；Agent 建议动作中的“转人工客服”调用该入口；前端展示接管状态、请求时间、关联订单和可取消/补充说明；保留 read-only 策略，不自动承诺退款、赔付、维修结论或订单修改；测试覆盖办理类请求不进入自动业务写操作。
 
-## P0：AI 回复 SSE 进度流与完整回复校验
+## P0：AI 完整回复与状态体验
 
-- 状态：基础版本已完成，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
+- 状态：一次性回复主链已完成；历史 SSE 实现保留为兼容能力，详见 `docs/feature/AI 回复 SSE 真流式输出与会话侧栏.md`。
 - 所属维度：优化前端展示。
-- 简明描述：把聊天体验从“等待完整回答”改为可见的事件流，让用户先看到边界判断、检索进度、依据更新和逐字回答。
-- 需要实现的功能点：后端通过 `AgentRuntime.run_stream()` 输出 `run_started`、`boundary`、`tool_call`、`context`、`delta`、`done`、`error` 等进度事件；LLM 使用非流式完整响应，原生 Tool Call 继续进入编排 loop，没有 Tool Call 的正文在 `finalize_response` 后通过单个 `delta` 一次性发送；`/api/chat/stream` 使用 POST + `StreamingResponse`；前端用 fetch reader 解析 SSE，右侧商品、订单、evidence 面板在 `context` 事件到达时更新；断流、超时、取消和重试都要有用户可理解的状态。
+- 简明描述：前端提交请求后展示统一处理中状态，等待主编排完成并返回完整、已校验的 `ChatResponse`。
+- 当前实现：前端调用 `sendChat()` 请求 `POST /api/chat`；后端通过 `AgentRuntime.run()` 执行同一份 LangGraph，完成持久化后一次性返回 answer、boundary、products、order、evidence 和 suggested actions。普通 HTTP 请求支持取消和失败重试，不消费 SSE 事件。
 
 ## P1：工作记忆与长期个性化记忆分层
 
@@ -284,7 +283,7 @@ priority: P0
 ### 第二阶段推荐实施顺序
 
 1. 先做多用户鉴权与隔离，同时补越权测试。这是所有订单、记忆和人工接管能力的安全前置。
-2. 接着做人工接管队列和 SSE 进度流，形成可演示且不假装办理业务的客服体验。
+2. 接着做人工接管队列和完整回复状态体验，形成可演示且不假装办理业务的客服体验。
 3. 然后做工作记忆、统一 evidence 和前端布局优化，让多轮推荐、订单上下文和依据展示真正可用。
 4. 再做外部图片源、推荐对比增强和 RAG 生产化，提高商品咨询质量和视觉可信度。
 5. 最后再评估 MCP 试点和模型化边界分类，避免过早引入工具平台复杂度。

@@ -80,7 +80,7 @@ export function ChatPanel({
         {messages.map((message) => (
           <MessageRow key={message.id} message={message} onProductClick={onProductClick} />
         ))}
-        {loading && !messages.some((message) => message.status === "streaming") && (
+        {loading && !messages.some((message) => message.status === "pending") && (
           <article className="message assistant pending">
             <span className="avatar">
               <Bot size={17} />
@@ -136,13 +136,13 @@ function MessageRow({ message, onProductClick }: { message: ChatMessage; onProdu
     message.role === "assistant" && message.products !== undefined && message.products.length > 0;
   const bubbleContent =
     message.content ||
-    (message.status === "streaming" ? message.streamStage || "正在处理" : message.content);
+    (message.status === "pending" ? message.streamStage || "正在处理" : message.content);
   return (
     <article
       className={`message ${message.role} ${hasProducts ? "has-products" : ""} ${
         message.status === "failed" ? "failed" : ""
       } ${
-        message.status === "streaming" ? "streaming" : ""
+        message.status === "pending" ? "pending" : ""
       }`}
     >
       <span className="avatar">
@@ -156,7 +156,7 @@ function MessageRow({ message, onProductClick }: { message: ChatMessage; onProdu
           </MarkdownContent>
         ) : (
           <p>
-            {message.status === "streaming" && !message.content && (
+            {message.status === "pending" && !message.content && (
               <Loader2 size={15} className="spin inline-icon" />
             )}
             {bubbleContent}
@@ -267,6 +267,7 @@ function statusMeta(status: ResponseStatus | "loading") {
 function messageMeta(message: ChatMessage) {
   const parts = [formatClock(message.createdAt)].filter(Boolean);
   if (message.status === "failed") parts.push("发送失败");
+  if (message.status === "pending") parts.push(message.streamStage ?? "处理中");
   if (message.status === "streaming") parts.push(message.streamStage ?? "生成中");
   if (message.status === "cancelled") parts.push("已取消");
   if (message.intent) parts.push(message.intent);

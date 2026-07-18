@@ -119,7 +119,7 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
-  status?: "sent" | "failed" | "received" | "streaming" | "cancelled";
+  status?: "sent" | "failed" | "received" | "pending" | "streaming" | "cancelled";
   streamStage?: string;
   boundary?: BoundaryClassification;
   intent?: string;

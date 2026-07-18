@@ -13,7 +13,7 @@ import {
   login,
   logout,
   restoreSession,
-  sendChatStream
+  sendChat
 } from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPanel } from "./components/ContextPanel";
@@ -21,11 +21,10 @@ import { LoginPage } from "./components/LoginPage";
 import { MobileTabBar } from "./components/MobileTabBar";
 import type { MobileTab } from "./components/MobileTabBar";
 import { Sidebar } from "./components/Sidebar";
-import { resolveOrderDisplayIds } from "./chatContext";
 import type {
   AuthSession,
   BoundaryClassification,
-  ChatStreamEvent,
+  ChatResponse,
   ChatMessage,
   ConversationDetail,
   ConversationSummary,
@@ -59,7 +58,7 @@ type SubmitOptions = {
 };
 
 export default function App() {
-  const streamAbortRef = useRef<AbortController | null>(null);
+  const requestAbortRef = useRef<AbortController | null>(null);
   const memoryRequestVersionRef = useRef(0);
   const workspaceVersionRef = useRef(0);
   const conversationListRequestVersionRef = useRef(0);
@@ -167,8 +166,8 @@ export default function App() {
   }
 
   function resetWorkspace() {
-    streamAbortRef.current?.abort();
-    streamAbortRef.current = null;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
     memoryRequestVersionRef.current += 1;
     workspaceVersionRef.current += 1;
     conversationListRequestVersionRef.current += 1;
@@ -394,20 +393,24 @@ export default function App() {
         role: "assistant",
         content: "",
         createdAt: new Date().toISOString(),
-        status: "streaming",
-        streamStage: "正在判断边界"
+        status: "pending",
+        streamStage: "正在处理"
       }
     ]);
 
     const abortController = new AbortController();
-    streamAbortRef.current = abortController;
+    requestAbortRef.current = abortController;
 
     try {
-      await sendChatStream(trimmed, requestConversationId, {
-        signal: abortController.signal,
-        timeoutMs: 60000,
-        onEvent: (event) => handleStreamEvent(event, assistantMessageId, trimmed)
-      });
+      const response = await sendChat(
+        trimmed,
+        requestConversationId,
+        abortController.signal
+      );
+      applyFinalResponse(response, assistantMessageId, trimmed);
+      if (response.memory_changes?.length) {
+        void refreshMemories();
+      }
       await refreshConversations();
     } catch (err) {
       const requestError = toRequestError(err, request);
@@ -438,114 +441,20 @@ export default function App() {
       }));
     } finally {
       setLoading(false);
-      if (streamAbortRef.current === abortController) {
-        streamAbortRef.current = null;
+      if (requestAbortRef.current === abortController) {
+        requestAbortRef.current = null;
       }
-    }
-  }
-
-  function handleStreamEvent(
-    event: ChatStreamEvent,
-    assistantMessageId: string,
-    userMessage: string
-  ) {
-    if ("conversation_id" in event && typeof event.conversation_id === "number") {
-      setConversationId(event.conversation_id);
-    }
-
-    if (event.type === "run_started") {
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        streamStage: "正在判断边界"
-      }));
-      return;
-    }
-
-    if (event.type === "boundary") {
-      setBoundary(event.boundary);
-      if (event.boundary.classification === "out_of_scope") {
-        setProducts([]);
-        setOrder(null);
-        setEvidence([]);
-      }
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        boundary: event.boundary,
-        streamStage:
-          event.boundary.classification === "in_scope_auto" ? "边界通过，正在检索" : "正在生成说明"
-      }));
-      return;
-    }
-
-    if (event.type === "tool_call") {
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        streamStage: toolCallStage(event.tool_name, event.status)
-      }));
-      return;
-    }
-
-    if (event.type === "context") {
-      const { currentTurnOrderId } = resolveOrderDisplayIds(event.order);
-      if (event.boundary) {
-        setBoundary(event.boundary);
-      }
-      setEvidence(event.boundary?.classification === "out_of_scope" ? [] : event.evidence);
-      setProducts(event.boundary?.classification === "out_of_scope" ? [] : event.products);
-      setOrder((current) => {
-        if (event.boundary?.classification === "out_of_scope") return null;
-        return event.order ?? current;
-      });
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        intent: event.intent ?? message.intent,
-        evidenceCount: event.evidence.length,
-        productCount: event.products.length,
-        orderId: currentTurnOrderId,
-        products: event.boundary?.classification === "out_of_scope" ? [] : event.products,
-        streamStage: "上下文已更新"
-      }));
-      return;
-    }
-
-    if (event.type === "delta") {
-      setResponseStatus("streaming");
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        content: `${message.content}${event.delta}`,
-        streamStage: "正在生成回答"
-      }));
-      return;
-    }
-
-    if (event.type === "done") {
-      applyFinalResponse(event.response, assistantMessageId, userMessage);
-      if (event.response.memory_changes?.length) {
-        void refreshMemories();
-      }
-      return;
-    }
-
-    if (event.type === "error") {
-      updateMessage(assistantMessageId, (message) => ({
-        ...message,
-        status: "failed",
-        content: message.content || event.message,
-        streamStage: undefined
-      }));
     }
   }
 
   function applyFinalResponse(
-    response: Extract<ChatStreamEvent, { type: "done" }>["response"],
+    response: ChatResponse,
     assistantMessageId: string,
     userMessage: string
   ) {
     const receivedAt = new Date().toISOString();
-    const { currentTurnOrderId, contextOrderId } = resolveOrderDisplayIds(
-      response.order,
-      order
-    );
+    const currentTurnOrderId = response.order?.id;
+    const contextOrderId = response.order?.id ?? order?.id;
     setConversationId(response.conversation_id);
     setBoundary(response.boundary);
     setEvidence(response.boundary.classification === "out_of_scope" ? [] : response.evidence);
@@ -616,8 +525,8 @@ export default function App() {
     void submitMessage(input);
   }
 
-  function handleCancelStream() {
-    streamAbortRef.current?.abort();
+  function handleCancelRequest() {
+    requestAbortRef.current?.abort();
   }
 
   function handleRetry() {
@@ -810,7 +719,7 @@ export default function App() {
           error={error}
           onInputChange={setInput}
           onSubmit={handleSubmit}
-          onCancel={handleCancelStream}
+          onCancel={handleCancelRequest}
           onRetry={handleRetry}
           onSuggestedAction={handleSuggestedAction}
           onProductClick={handleProductClick}
@@ -976,18 +885,6 @@ function useMediaQuery(query: string) {
   }, [query]);
 
   return matches;
-}
-
-function toolCallStage(toolName: string, status: "started" | "completed" | "error") {
-  const verb = status === "started" ? "正在" : status === "completed" ? "已完成" : "检索失败";
-  const label = toolName.includes("catalog")
-    ? "检索商品"
-    : toolName.includes("order")
-      ? "查询订单"
-      : toolName.includes("knowledge")
-        ? "检索依据"
-        : "识别意图";
-  return `${verb}${label}`;
 }
 
 function toRequestError(error: unknown, request: PendingRequest): RequestError {

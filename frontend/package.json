@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "tsc -b && vite build --config vite.config.ts",
-    "test:chat-context": "tsc --target ES2022 --module commonjs --moduleResolution node --esModuleInterop --skipLibCheck --outDir /tmp/pc-agent-chat-context-test tests/chatContext.test.ts src/chatContext.ts && node --test /tmp/pc-agent-chat-context-test/tests/chatContext.test.js",
     "preview": "vite preview --config vite.config.ts --host 0.0.0.0"
   },
   "dependencies": {

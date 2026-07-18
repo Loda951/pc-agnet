@@ -254,7 +254,6 @@ class AgentRuntime:
             try:
                 decision = await self._invoke_orchestrator_decision(state, call_count)
             except (ValidationError, ValueError, TypeError) as exc:
-<<<<<<< Updated upstream
                 reason = f"invalid_orchestrator_response:{type(exc).__name__}"
                 if _has_successful_tool_result(state):
                     decision = OrchestratorDecision(
@@ -271,15 +270,6 @@ class AgentRuntime:
                         ),
                         reason=reason,
                     )
-=======
-                decision = self._fallback_orchestrator_decision(state).model_copy(
-                    update={
-                        "reason": f"invalid_orchestrator_response:{type(exc).__name__}"
-                    }
-                )
-                state["decision_header_streamed"] = False
-                state["response_streamed"] = False
->>>>>>> Stashed changes
         else:
             decision = self._fallback_orchestrator_decision(state)
 

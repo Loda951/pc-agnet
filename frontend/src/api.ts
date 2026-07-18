@@ -212,15 +212,31 @@ export async function logout(): Promise<void> {
   }
 }
 
-export async function sendChat(message: string, conversationId?: number): Promise<ChatResponse> {
-  const response = await authorizedFetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      conversation_id: conversationId
-    })
-  });
+export async function sendChat(
+  message: string,
+  conversationId?: number,
+  signal?: AbortSignal
+): Promise<ChatResponse> {
+  let response: Response;
+  try {
+    response = await authorizedFetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId
+      }),
+      signal
+    });
+  } catch (error) {
+    if (isAbortError(error) || signal?.aborted) {
+      throw new ApiError("已取消本次回答。", {
+        status: 499,
+        retryable: false
+      });
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     const detail = await parseErrorDetail(response);
