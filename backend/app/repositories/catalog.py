@@ -19,22 +19,37 @@ CATEGORY_ALIASES = {
     "mouse": "鼠标",
     "mice": "鼠标",
     "鼠标": "鼠标",
+    "游戏鼠标": "鼠标",
     "keyboard": "键盘",
     "keyboards": "键盘",
     "键盘": "键盘",
+    "机械键盘": "键盘",
     "headphone": "耳机",
     "headphones": "耳机",
     "headset": "耳机",
+    "headsets": "耳机",
+    "earphone": "耳机",
+    "earphones": "耳机",
     "耳机": "耳机",
+    "耳麦": "耳机",
+    "头戴耳机": "耳机",
+    "游戏耳机": "耳机",
     "monitor": "显示器",
     "monitors": "显示器",
+    "display": "显示器",
+    "screen": "显示器",
     "显示器": "显示器",
+    "屏幕": "显示器",
     "speaker": "音箱",
     "speakers": "音箱",
     "音箱": "音箱",
+    "音响": "音箱",
+    "蓝牙音箱": "音箱",
     "webcam": "摄像头",
     "webcams": "摄像头",
+    "camera": "摄像头",
     "摄像头": "摄像头",
+    "网络摄像头": "摄像头",
 }
 
 QUERY_STOP_WORDS = {
@@ -67,6 +82,61 @@ QUERY_STOP_WORDS = {
 
 TRUE_VALUES = {"是", "true", "yes", "1", "有", "支持", "wireless"}
 FALSE_VALUES = {"否", "false", "no", "0", "无", "不支持", "wired"}
+DB_VALUE_ALIASES = {
+    "connection_type": {
+        "wireless": {
+            "wireless",
+            "wifi",
+            "wi-fi",
+            "bluetooth",
+            "bt",
+            "无线",
+            "蓝牙",
+            "无线蓝牙",
+            "2.4g",
+            "2.4g 无线",
+            "三模",
+        },
+        "bluetooth": {"wireless", "bluetooth", "bt", "无线", "蓝牙", "无线蓝牙"},
+        "wired": {"wired", "usb", "usb-a", "usb-c", "cable", "有线", "有线连接"},
+    },
+    "wireless": {
+        "true": {"true", "yes", "1", "是", "有", "支持", "wireless", "bluetooth", "无线", "蓝牙"},
+        "false": {"false", "no", "0", "否", "无", "不支持", "wired", "有线"},
+    },
+    "microphone": {
+        "yes": {"yes", "true", "1", "是", "有", "带", "支持", "带麦", "麦克风"},
+        "no": {"no", "false", "0", "否", "无", "不带", "不支持"},
+    },
+    "backlit": {
+        "yes": {"yes", "true", "1", "是", "有", "带", "支持", "rgb", "背光", "灯光", "白光"},
+        "no": {"no", "false", "0", "无", "无背光", "不带", "不支持"},
+    },
+    "switches": {
+        "red": {"red", "red switch", "red switches", "红", "红轴", "线性红轴", "静音红轴"},
+        "blue": {"blue", "blue switch", "blue switches", "青", "青轴"},
+        "brown": {"brown", "brown switch", "brown switches", "茶", "茶轴", "段落茶轴"},
+        "magnetic": {"magnetic", "magnetic switch", "magnetic switches", "磁", "磁轴"},
+    },
+    "color": {
+        "black": {"black", "黑", "黑色"},
+        "white": {"white", "白", "白色"},
+        "silver": {"silver", "银", "银色"},
+        "gray": {"gray", "grey", "灰", "灰色"},
+        "pink": {"pink", "粉", "粉色"},
+    },
+    "resolution": {
+        "2560x1440": {"2560x1440", "2k", "1440p"},
+        "4k": {"4k", "3840x2160"},
+        "1080p": {"1080p", "1080p hdr", "1920x1080", "full hd", "fhd"},
+    },
+    "refresh_rate": {
+        "144hz": {"144hz", "144 hz", "144赫兹"},
+        "165hz": {"165hz", "165 hz", "165赫兹"},
+        "240hz": {"240hz", "240 hz", "240赫兹"},
+        "75hz": {"75hz", "75 hz", "75赫兹"},
+    },
+}
 MAX_CANDIDATE_PAGES = 50
 
 
@@ -111,7 +181,6 @@ class CatalogRepository:
         )
         return [product for _, product in ranked_products[: request.limit]]
 
-
     async def list_facets(
         self,
         *,
@@ -141,9 +210,7 @@ class CatalogRepository:
             elif facet == "spec_value":
                 if normalized_spec_key:
                     values = [
-                        value
-                        for key, value in specs.items()
-                        if key.lower() == normalized_spec_key
+                        value for key, value in specs.items() if key.lower() == normalized_spec_key
                     ]
                 else:
                     values = list(specs.values())
@@ -171,9 +238,7 @@ class CatalogRepository:
             .where(Sku.status == 1, Spu.status == 1)
         )
         if category_terms := _category_terms(category):
-            stmt = stmt.where(
-                or_(*(Category.name.ilike(f"%{term}%") for term in category_terms))
-            )
+            stmt = stmt.where(or_(*(Category.name.ilike(f"%{term}%") for term in category_terms)))
         if brand:
             stmt = stmt.where(Brand.name.ilike(f"%{brand}%"))
         if min_price is not None:
@@ -181,6 +246,7 @@ class CatalogRepository:
         if max_price is not None:
             stmt = stmt.where(Sku.price <= max_price)
         return (await self.session.execute(stmt)).all()
+
     async def _fetch_candidate_page(
         self,
         request: ProductSearchRequest,
@@ -264,9 +330,7 @@ def _catalog_search_statement(
             )
         stmt = stmt.where(or_(*conditions))
     if category_terms := _category_terms(request.category):
-        stmt = stmt.where(
-            or_(*(Category.name.ilike(f"%{term}%") for term in category_terms))
-        )
+        stmt = stmt.where(or_(*(Category.name.ilike(f"%{term}%") for term in category_terms)))
     if request.min_price is not None:
         stmt = stmt.where(Sku.price >= request.min_price)
     if request.max_price is not None:
@@ -292,9 +356,7 @@ def _take_eligible_products(
     }
     eligible: list[ProductCard] = []
     for product in products:
-        haystack = " ".join(
-            [product.title, product.category, *product.specs.values()]
-        ).lower()
+        haystack = " ".join([product.title, product.category, *product.specs.values()]).lower()
         if any(term in haystack for term in usage_terms):
             continue
         eligible.append(product)
@@ -374,24 +436,65 @@ def _matches_single_filter(specs: dict[str, str], key: str, expected: str) -> bo
     key = key.lower()
     expected_lower = expected.lower()
 
-    if key in {"connection_type", "wireless"} and expected_lower in {"wireless", "无线", "是"}:
+    if key in {"connection_type", "wireless"} and expected_lower in {
+        "wireless",
+        "bluetooth",
+        "无线",
+        "蓝牙",
+        "是",
+        "true",
+        "yes",
+    }:
         return _is_wireless_match(normalized_specs)
-    if key in {"connection_type", "wireless"} and expected_lower in {"wired", "有线", "否"}:
+    if key in {"connection_type", "wireless"} and expected_lower in {
+        "wired",
+        "有线",
+        "否",
+        "false",
+        "no",
+    }:
         return _is_wired_match(normalized_specs)
 
     actual = normalized_specs.get(key)
     if actual is None:
         return False
-    return expected_lower in actual
+    return _value_matches_aliases(key, actual, expected_lower)
+
+
+def _value_matches_aliases(key: str, actual: str, expected: str) -> bool:
+    expected_aliases = _db_value_aliases(key, expected)
+    actual_aliases = _db_value_aliases(key, actual)
+    if expected_aliases & actual_aliases:
+        return True
+    return any(alias in actual for alias in expected_aliases)
+
+
+def _db_value_aliases(key: str, value: str) -> set[str]:
+    normalized = value.strip().lower()
+    compact = normalized.replace(" ", "")
+    aliases = {normalized, compact}
+    for canonical, values in DB_VALUE_ALIASES.get(key, {}).items():
+        lowered_values = {item.lower() for item in values}
+        compact_values = {item.replace(" ", "") for item in lowered_values}
+        if normalized == canonical or normalized in lowered_values or compact in compact_values:
+            aliases.add(canonical)
+            aliases.update(lowered_values)
+            aliases.update(compact_values)
+            break
+    return aliases
 
 
 def _is_wireless_match(specs: dict[str, str]) -> bool:
     connection = specs.get("connection_type", "")
     wireless = specs.get("wireless", "")
-    return "wireless" in connection or wireless in TRUE_VALUES
+    return _value_matches_aliases("connection_type", connection, "wireless") or (
+        _value_matches_aliases("wireless", wireless, "true")
+    )
 
 
 def _is_wired_match(specs: dict[str, str]) -> bool:
     connection = specs.get("connection_type", "")
     wireless = specs.get("wireless", "")
-    return "wired" in connection or wireless in FALSE_VALUES
+    return _value_matches_aliases("connection_type", connection, "wired") or (
+        _value_matches_aliases("wireless", wireless, "false")
+    )

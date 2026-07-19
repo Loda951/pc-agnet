@@ -13,6 +13,15 @@
 - 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
 - `policy.search` / `knowledge.search` 已成为 AgentRuntime 的知识工具主链；上下文与记忆 M2 复用该链路，不再维护独立的 `knowledge.retrieve` 编排旁路。
 
+## ä¸»æµç¨å¥åå»ºè®®ï¼query-first
+
+- ä¸»æµç¨é¦è¦è´è´£éå¯¹ toolï¼é»è®¤åªä¼  `query`ï¼ä¸å¼ºè¡å¡«å `category`ã`facet`ã`filters`ã`comparison_fields` ç­å¤æå­æ®µã
+- `catalog.search`ï¼ä¼åä¼  `{"query":"ç¨æ·åè¯","limit":3}`ï¼ç±»ç®ãåçãé¢ç®ãè§æ ¼ç± tool åé¨ `ProductQueryPlan` è§£æå¹¶è¿ç½ååæ ¡éªã
+- `catalog.compare`ï¼ä¼åä¼  `query`ï¼åªæå½ä¸ä¸æå·²ææç¡® SKU æ¶æä¼  `sku_ids`ã
+- `catalog.facets`ï¼å·²æ¯æ query-firstï¼tool ä¼ä» `query` æ¨æ­ `facet`ã`category`ã`brand` å `spec_key`ï¼ä¸»æµç¨ä¸éè¦èªå·±ç `facet`ã
+- `order.lookup`ï¼`user_id` åªè½ç± runtime æ³¨å¥ï¼å·²æ¯æä» `query` ä¸­æåæç¡®é¿æ°å­è®¢åå·ï¼ä½å¦æä¸»æµç¨å·²ç¨³å®æ¿å° `order_id`ï¼å¯ä»¥ç´æ¥ä¼  `order_id`ã
+- `policy.search` / `knowledge.search`ï¼ä¿æ query-only æ£ç´¢ã
+
 ## ToolRegistry
 
 入口：
@@ -659,4 +668,25 @@ cd backend
 ```text
 134 passed, 29 skipped
 All checks passed
+```
+
+## 主流程接入注意事项（2026-07-20 更新）
+
+- 商品类 tool 的公开入参尽量只传用户原始 `query` 和 `limit`；`catalog_search`、`catalog_compare`、`catalog_facets` 内部会做结构化解析、品牌/品类/规格中英文归一化、白名单校验和必要 fallback。
+- 主流程不要自己生成 SQL，也不要把中文 key（例如“连接方式”“颜色”）传给商品 tool；如果外部 LLM 传错 schema，应优先只保留 `query` 重新调用。
+- `catalog_search` 的业务空结果和不支持查询都会以 `ok=true` 返回，主流程需要读取 `diagnostics[0].code` 或 `query_plan.error_type` 区分：`empty_result` 表示条件合法但无商品，`unsupported_query` 表示当前目录字段不支持，`invalid_catalog_plan` 表示 LLM planner 失败后已使用规则 fallback。
+- 白名单是按品类收紧的：例如当前数据库的显示器没有 `connection_type` 字段，所以“蓝牙显示器”会返回 `unsupported_query`，不应被主流程解释成“系统错误”或“库存为 0”。
+- `catalog_facets` 用于回答“你们卖哪些品牌/品类/规格选项”，例如“你们卖哪些品牌的鼠标”“键盘有哪些轴体”“音箱功率有哪些档位”；不要用 `catalog_search` 代替这类元数据问题。
+- `catalog_compare` 可以直接传自然语言对比 query；如果 LLM planner 把可支持的品牌/品类对比误判为 unsupported，tool 内部会规则 fallback，并通过 `diagnostics` 标出。
+- 主流程最终回答里注意销量语义：`sku_sales_count` 是 SKU 级销量，`sales_count` 是 SPU 级聚合销量；比较颜色/版本销量时只能依据 `sku_sales_count`。
+- 订单 tool 仍只需要主流程传 `order_id`（有明确订单号时）或 `query`；`user_id` 由 runtime 注入，主流程不要让外部 LLM 提供或覆盖用户身份。
+
+当前真实评测覆盖：5 类 × 5 个口语化中文 case，共 25 个，覆盖推荐、品牌/预算/颜色/连接方式、facets、compare、empty/unsupported 诊断。
+
+当前验收结果：
+
+```text
+Real LLM + PostgreSQL catalog eval: 25 passed, 0 failed
+Targeted backend tests: 204 passed
+Ruff: All checks passed
 ```
