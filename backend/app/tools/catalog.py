@@ -618,6 +618,7 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if plan.category and plan.category.lower() not in ALLOWED_CATEGORIES:
         raise ValueError(f"unsupported category: {plan.category}")
 
+    plan.filters = _normalize_catalog_filters(plan.filters)
     unknown_filters = {key for key in plan.filters if key.lower() not in ALLOWED_FILTERS}
     if unknown_filters:
         raise ValueError(f"unsupported catalog filters: {', '.join(sorted(unknown_filters))}")
@@ -652,6 +653,52 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     plan.brands = [brand.strip() for brand in plan.brands if brand.strip()]
     plan.keywords = [keyword.strip() for keyword in plan.keywords if keyword.strip()]
     return plan
+
+
+def _normalize_catalog_filters(filters: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in filters.items():
+        key = _normalize_filter_key(str(raw_key))
+        value = _normalize_filter_value(key, str(raw_value))
+        normalized[key] = value
+    return normalized
+
+
+def _normalize_filter_key(key: str) -> str:
+    normalized = key.strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "connection": "connection_type",
+        "connectivity": "connection_type",
+        "wireless": "connection_type",
+        "wired": "connection_type",
+        "连接": "connection_type",
+        "连接方式": "connection_type",
+        "无线": "connection_type",
+        "有线": "connection_type",
+        "dpi": "max_dpi",
+        "分辨率": "resolution",
+        "刷新率": "refresh_rate",
+        "轴": "switches",
+        "轴体": "switches",
+        "颜色": "color",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _normalize_filter_value(key: str, value: str) -> str:
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if key == "connection_type":
+        if lowered in {"wireless", "wifi", "bluetooth", "无线"}:
+            return "Wireless"
+        if lowered in {"wired", "usb", "cable", "有线"}:
+            return "Wired"
+    if key == "wireless":
+        if lowered in {"true", "yes", "1", "wireless", "是", "无线"}:
+            return "true"
+        if lowered in {"false", "no", "0", "wired", "否", "有线"}:
+            return "false"
+    return stripped
 
 
 def validate_catalog_compare_plan(plan: CatalogComparePlan | dict) -> CatalogComparePlan:

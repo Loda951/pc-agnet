@@ -751,6 +751,26 @@ async def test_catalog_search_falls_back_for_category_invalid_llm_filter(
 
 
 @pytest.mark.asyncio
+async def test_catalog_search_normalizes_localized_filter_key_and_value(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":[],"filters":{"\u8fde\u63a5\u65b9\u5f0f":"\u65e0\u7ebf"},'
+        '"keywords":["mouse"],"sort":"recommend",'
+        '"supported":true,"unsupported_reason":null}'
+    )
+    async with db_session_factory() as session:
+        result = await CatalogToolService(
+            session,
+            planner=LLMCatalogQueryPlanner(chat),
+        ).search(CatalogSearchInput(query="Recommend a wireless mouse", limit=3))
+
+    assert result.result_type == "products"
+    assert result.query_plan["planner"] == "llm"
+    assert result.query_plan["filters"] == {"connection_type": "Wireless"}
+
+
+@pytest.mark.asyncio
 async def test_catalog_search_falls_back_when_planner_fails(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
