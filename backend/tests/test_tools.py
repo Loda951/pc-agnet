@@ -314,6 +314,21 @@ def test_all_public_input_models_forbid_unknown_fields() -> None:
         assert schema.get("additionalProperties") is False
 
 
+def test_catalog_public_schemas_are_query_first() -> None:
+    provider = DefaultToolContractProvider()
+    search = provider.get_contract("catalog_search")
+    facets = provider.get_contract("catalog_facets")
+    assert search is not None
+    assert facets is not None
+
+    search_fields = set(search.public_input_model.model_json_schema()["properties"])
+    facet_fields = set(facets.public_input_model.model_json_schema()["properties"])
+
+    assert search_fields == {"query", "limit"}
+    assert facet_fields == {"query", "limit"}
+    assert search.internal_input_model is CatalogSearchInput
+
+
 def test_tool_catalog_rejects_duplicate_names_and_missing_handler() -> None:
     contract = DefaultToolContractProvider().get_contract("catalog_search")
     assert contract is not None
@@ -782,6 +797,43 @@ async def test_catalog_facets_returns_mouse_brands(
 
 
 @pytest.mark.asyncio
+async def test_catalog_facets_infers_brand_facet_from_query_only(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
+            "catalog.facets",
+            {"query": "what mouse brands do you sell"},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "facets"
+    assert result.output["facet"] == "brand"
+    assert result.output["category"] == "mouse"
+    values = {item["value"] for item in result.output["items"]}
+    assert {"Logitech", "Razer"} <= values
+
+
+@pytest.mark.asyncio
+async def test_catalog_facets_infers_category_facet_from_query_only(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
+            "catalog.facets",
+            {"query": "what peripheral categories does Razer sell"},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "facets"
+    assert result.output["facet"] == "category"
+    assert result.output["brand"] == "Razer"
+    assert result.output["items"]
+
+
+@pytest.mark.asyncio
 async def test_catalog_facets_returns_spec_values(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
@@ -944,6 +996,47 @@ async def test_order_lookup_returns_candidates_or_single_order_with_user_isolati
     assert isolated.ok
     assert isolated.output is not None
     assert isolated.output["result_type"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_order_lookup_extracts_order_id_from_query(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
+
+    async with db_session_factory() as session:
+        executor = RegistryToolExecutor(session, TOOL_TEST_SETTINGS)
+        result = await executor.execute(
+            contract,
+            {"query": "please check order 202607020001"},
+            {"user_id": 1},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "single_order"
+    assert result.output["order"]["id"] == 202607020001
+
+
+@pytest.mark.asyncio
+async def test_order_lookup_query_without_order_id_returns_candidates(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    contract = DefaultToolContractProvider().get_contract("order_lookup")
+    assert contract is not None
+
+    async with db_session_factory() as session:
+        executor = RegistryToolExecutor(session, TOOL_TEST_SETTINGS)
+        result = await executor.execute(
+            contract,
+            {"query": "show my recent orders"},
+            {"user_id": 1},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "order_candidates"
 
 
 @pytest.mark.asyncio

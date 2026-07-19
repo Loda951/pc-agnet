@@ -13,6 +13,15 @@
 - 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
 - `policy.search` / `knowledge.search` 已成为 AgentRuntime 的知识工具主链；上下文与记忆 M2 复用该链路，不再维护独立的 `knowledge.retrieve` 编排旁路。
 
+## ä¸»æµç¨å¥åå»ºè®®ï¼query-first
+
+- ä¸»æµç¨é¦è¦è´è´£éå¯¹ toolï¼é»è®¤åªä¼  `query`ï¼ä¸å¼ºè¡å¡«å `category`ã`facet`ã`filters`ã`comparison_fields` ç­å¤æå­æ®µã
+- `catalog.search`ï¼ä¼åä¼  `{"query":"ç¨æ·åè¯","limit":3}`ï¼ç±»ç®ãåçãé¢ç®ãè§æ ¼ç± tool åé¨ `ProductQueryPlan` è§£æå¹¶è¿ç½ååæ ¡éªã
+- `catalog.compare`ï¼ä¼åä¼  `query`ï¼åªæå½ä¸ä¸æå·²ææç¡® SKU æ¶æä¼  `sku_ids`ã
+- `catalog.facets`ï¼å·²æ¯æ query-firstï¼tool ä¼ä» `query` æ¨æ­ `facet`ã`category`ã`brand` å `spec_key`ï¼ä¸»æµç¨ä¸éè¦èªå·±ç `facet`ã
+- `order.lookup`ï¼`user_id` åªè½ç± runtime æ³¨å¥ï¼å·²æ¯æä» `query` ä¸­æåæç¡®é¿æ°å­è®¢åå·ï¼ä½å¦æä¸»æµç¨å·²ç¨³å®æ¿å° `order_id`ï¼å¯ä»¥ç´æ¥ä¼  `order_id`ã
+- `policy.search` / `knowledge.search`ï¼ä¿æ query-only æ£ç´¢ã
+
 ## ToolRegistry
 
 入口：

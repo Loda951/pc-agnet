@@ -126,6 +126,7 @@ class OrderLookupInput(BaseModel):
 
     user_id: int
     order_id: int | None = None
+    query: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=5, ge=1, le=20)
 
 

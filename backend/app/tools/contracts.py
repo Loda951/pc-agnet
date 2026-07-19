@@ -35,10 +35,25 @@ class ToolRuntimeContext(BaseModel):
     user_id: int
 
 
+class CatalogSearchPublicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    limit: int = Field(default=3, ge=1, le=20)
+
+
+class CatalogFacetPublicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
 class OrderLookupPublicInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_id: int | None = None
+    query: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=5, ge=1, le=20)
 
 
@@ -317,7 +332,7 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
                 "and specification facts. Use catalog_compare instead for product-versus-"
                 "product comparisons. Do not use this tool for policies or order data."
             ),
-            public_input_model=CatalogSearchInput,
+            public_input_model=CatalogSearchPublicInput,
             internal_input_model=CatalogSearchInput,
             output_model=CatalogSearchOutput,
             timeout_seconds=15.0,
@@ -341,10 +356,11 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             description=(
                 "List catalog metadata and counts such as available brands in a category, "
                 "product categories sold by a brand, specification keys, or available values "
-                "for a specification. Use this for questions like which mouse brands are sold "
-                "or what monitor refresh rates are available. Do not use it for product lists."
+                "for a specification. Query-first usage is supported: pass the user utterance "
+                "and the tool will infer facet, category, brand, and spec_key when possible. "
+                "Do not use it for product lists."
             ),
-            public_input_model=CatalogFacetInput,
+            public_input_model=CatalogFacetPublicInput,
             internal_input_model=CatalogFacetInput,
             output_model=CatalogFacetOutput,
             timeout_seconds=8.0,
@@ -353,9 +369,10 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             llm_name="order_lookup",
             registry_name="order.lookup",
             description=(
-                "Look up the authenticated user's recent orders or one explicit order. The "
-                "runtime injects the authenticated user_id; never ask the model to provide or "
-                "override user identity."
+                "Look up the authenticated user's recent orders or one explicit order. Pass "
+                "order_id only when it is explicit; otherwise pass query and the tool can extract "
+                "a clear order number. Runtime injects user_id; never ask the model to provide "
+                "or override user identity."
             ),
             public_input_model=OrderLookupPublicInput,
             internal_input_model=OrderLookupInput,

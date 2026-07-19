@@ -1090,17 +1090,45 @@ def _brands_for_item(item: str, brands: list[str]) -> list[str]:
 def _normalize_facet_request(request: CatalogFacetInput) -> CatalogFacetInput:
     data = request.model_dump(mode="python")
     query = request.query.lower()
-    if request.facet == "brand" and _asks_for_categories(query):
-        data["facet"] = "category"
+    inferred_facet = _infer_facet_from_text(query)
+    if inferred_facet:
+        data["facet"] = inferred_facet
     if not request.category:
         if category := _infer_category_from_text(query):
             data["category"] = category
+    if not request.brand:
+        if brand := _infer_brand_from_text(query):
+            data["brand"] = brand
     if not request.spec_key:
         if spec_key := _infer_spec_key_from_text(query):
             data["spec_key"] = spec_key
-            if request.facet == "brand":
+            if inferred_facet is None and request.facet == "brand":
                 data["facet"] = "spec_value"
     return CatalogFacetInput.model_validate(data)
+
+
+def _infer_facet_from_text(query: str) -> str | None:
+    if _asks_for_spec_values(query):
+        return "spec_value"
+    if _asks_for_spec_keys(query):
+        return "spec_key"
+    if _asks_for_categories(query):
+        return "category"
+    if _asks_for_brands(query):
+        return "brand"
+    return None
+
+
+def _asks_for_brands(query: str) -> bool:
+    brand_terms = {
+        "brand",
+        "brands",
+        "maker",
+        "manufacturers",
+        "牌子",
+        "品牌",
+    }
+    return any(term in query for term in brand_terms)
 
 
 def _asks_for_categories(query: str) -> bool:
@@ -1109,11 +1137,47 @@ def _asks_for_categories(query: str) -> bool:
         "categories",
         "type",
         "types",
+        "product line",
+        "peripheral",
+        "peripherals",
         "品类",
         "类目",
         "类型",
+        "外设",
     }
-    return any(term in query for term in category_terms)
+    return any(term in query for term in category_terms) and not _asks_for_spec_values(query)
+
+
+def _asks_for_spec_keys(query: str) -> bool:
+    spec_key_terms = {
+        "spec",
+        "specs",
+        "specification",
+        "specifications",
+        "parameter",
+        "parameters",
+        "filter",
+        "filters",
+        "规格",
+        "参数",
+        "筛选",
+    }
+    return any(term in query for term in spec_key_terms) and not _asks_for_spec_values(query)
+
+
+def _asks_for_spec_values(query: str) -> bool:
+    value_terms = {
+        "available",
+        "values",
+        "options",
+        "哪些",
+        "可选",
+        "有什么",
+        "有哪",
+    }
+    return _infer_spec_key_from_text(query) is not None and any(
+        term in query for term in value_terms
+    )
 
 
 def _infer_category_from_text(query: str) -> str | None:
@@ -1126,14 +1190,52 @@ def _infer_category_from_text(query: str) -> str | None:
     return None
 
 
+KNOWN_BRANDS = (
+    "Logitech",
+    "Razer",
+    "SteelSeries",
+    "Pulsar",
+    "Keychron",
+    "Akko",
+    "Wooting",
+    "HyperX",
+    "Sony",
+    "AOC",
+    "ASUS",
+    "Dell",
+    "LG",
+    "Edifier",
+    "JBL",
+    "Bose",
+    "Creative",
+    "Elgato",
+    "AVerMedia",
+)
+
+
+def _infer_brand_from_text(query: str) -> str | None:
+    lowered = query.lower()
+    for brand in KNOWN_BRANDS:
+        if brand.lower() in lowered:
+            return brand
+    return None
+
+
 def _infer_spec_key_from_text(query: str) -> str | None:
     aliases = {
         "refresh_rate": {"refresh", "hz", "刷新率"},
         "resolution": {"resolution", "2k", "4k", "分辨率"},
-        "switches": {"switch", "switches", "轴", "轴体"},
-        "connection_type": {"wireless", "wired", "connection", "无线", "有线", "连接"},
+        "switches": {"switch", "switches", "axis", "轴", "轴体"},
+        "connection_type": {
+            "wireless",
+            "wired",
+            "connection",
+            "无线",
+            "有线",
+            "连接",
+        },
         "max_dpi": {"dpi"},
-        "color": {"color", "颜色"},
+        "color": {"color", "colour", "颜色"},
     }
     for key, terms in aliases.items():
         if any(term in query for term in terms):
