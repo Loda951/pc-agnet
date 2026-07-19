@@ -256,7 +256,11 @@ class RuleBasedCatalogQueryPlanner:
             excluded_usage = [item for item in excluded_usage if item != usage]
         return ProductQueryPlan(
             query=request.query,
-            category=request.category or parsed.category,
+            category=(
+                request.category
+                or parsed.category
+                or _infer_category_from_text(request.query.lower())
+            ),
             brands=selected_brands,
             excluded_brands=excluded_brands,
             excluded_usage=excluded_usage,
@@ -982,8 +986,14 @@ def _filters_from_query(query: str) -> dict[str, str]:
     elif any(term in lowered for term in {"wired", "usb", "usb-a", "usb-c", "cable", "有线"}):
         filters["connection_type"] = "Wired"
 
+    if color := _color_from_query(lowered):
+        filters["color"] = color
     if match := re.search(r"(\d{2,3})\s*(?:hz|赫兹)", lowered):
         filters["refresh_rate"] = f"{match.group(1)}Hz"
+    if match := re.search(r"(\d{2,3})\s*fps", lowered):
+        filters["frame_rate"] = f"{match.group(1)}fps"
+    if match := re.search(r"(\d{1,4})\s*w\b", lowered):
+        filters["power_w"] = f"{match.group(1)}W"
     if any(term in lowered for term in {"2k", "1440p"}):
         filters["resolution"] = "2560x1440"
     elif "4k" in lowered:
@@ -1006,6 +1016,26 @@ def _filters_from_query(query: str) -> dict[str, str]:
         filters["backlit"] = "Yes"
 
     return filters
+
+
+def _color_from_query(lowered_query: str) -> str | None:
+    color_terms = (
+        ("black", "Black"),
+        ("white", "White"),
+        ("silver", "Silver"),
+        ("gray", "Gray"),
+        ("grey", "Gray"),
+        ("pink", "Pink"),
+        ("黑色", "黑色"),
+        ("白色", "白色"),
+        ("银色", "银色"),
+        ("灰色", "灰色"),
+        ("粉色", "粉色"),
+    )
+    for term, color in color_terms:
+        if term in lowered_query:
+            return color
+    return None
 
 
 def _max_price_from_query(query: str) -> Decimal | None:

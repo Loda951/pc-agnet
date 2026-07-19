@@ -56,6 +56,41 @@ PLANNER_GOLDEN_CASES = [
             "filters": {"connection_type": "Wireless", "microphone": "Yes"},
         },
     ),
+    (
+        "bluetooth speaker",
+        {
+            "category": "speaker",
+            "filters": {"connection_type": "Wireless"},
+        },
+    ),
+    (
+        "20W speaker",
+        {
+            "category": "speaker",
+            "filters": {"power_w": "20W"},
+        },
+    ),
+    (
+        "webcam 1080p 60fps with microphone",
+        {
+            "category": "webcam",
+            "filters": {"resolution": "1080p", "frame_rate": "60fps", "microphone": "Yes"},
+        },
+    ),
+    (
+        "black webcam",
+        {
+            "category": "webcam",
+            "filters": {"color": "Black"},
+        },
+    ),
+    (
+        "USB-C wired mouse",
+        {
+            "category": "mouse",
+            "filters": {"connection_type": "Wired"},
+        },
+    ),
 ]
 
 
