@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,6 +19,14 @@ class ToolExecutionResult(BaseModel):
     ok: bool
     output: dict | None = None
     error: ToolError | None = None
+
+
+class ToolDiagnostic(BaseModel):
+    code: str
+    severity: Literal["info", "warning", "error"] = "info"
+    message: str
+    recommended_action: str = "use_result"
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class CatalogPreferenceDefaults(BaseModel):
@@ -58,6 +66,7 @@ class CatalogSearchOutput(BaseModel):
     products: list[ProductCard] = Field(default_factory=list)
     ranking_strategy: str
     query_plan: dict = Field(default_factory=dict)
+    diagnostics: list[ToolDiagnostic] = Field(default_factory=list)
 
 
 class CatalogCompareInput(BaseModel):
@@ -90,6 +99,7 @@ class CatalogCompareOutput(BaseModel):
     comparison_fields: list[str] = Field(default_factory=list)
     missing_fields: dict[int, list[str]] = Field(default_factory=dict)
     query_plan: dict = Field(default_factory=dict)
+    diagnostics: list[ToolDiagnostic] = Field(default_factory=list)
 
 
 class CatalogFacetInput(BaseModel):
@@ -119,6 +129,7 @@ class CatalogFacetOutput(BaseModel):
     brand: str | None = None
     spec_key: str | None = None
     query_plan: dict = Field(default_factory=dict)
+    diagnostics: list[ToolDiagnostic] = Field(default_factory=list)
 
 
 class OrderLookupInput(BaseModel):

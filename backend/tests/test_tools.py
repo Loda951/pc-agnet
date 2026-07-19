@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -237,6 +238,17 @@ class FakeChatModel:
     async def ainvoke(self, messages):
         self.calls.append(messages)
         return FakeChatResponse(self.content)
+
+
+class SequenceFakeChatModel:
+    def __init__(self, contents: list[str]):
+        self.contents = list(contents)
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        content = self.contents.pop(0)
+        return FakeChatResponse(content)
 
 
 @pytest.mark.asyncio
@@ -637,6 +649,105 @@ async def test_rule_catalog_planner_fills_missing_fields_from_typed_preferences(
 
 
 @pytest.mark.asyncio
+async def test_llm_catalog_planner_fills_missing_high_confidence_query_constraints() -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":["Logitech"],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(query="wireless mouse under 300 from Logitech", limit=3)
+    )
+
+    assert plan.category == "mouse"
+    assert plan.brands == ["Logitech"]
+    assert plan.max_price == 300
+    assert plan.filters["connection_type"] == "Wireless"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_fills_missing_localized_query_constraints() -> None:
+    chat = FakeChatModel(
+        '{"category":"keyboard","brands":[],"filters":{"switches":"红轴"},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query="三模键盘 红轴", limit=3))
+    validated = validate_product_query_plan(plan)
+
+    assert validated.category == "keyboard"
+    assert validated.filters["connection_type"] == "Wireless"
+    assert validated.filters["switches"] == "红轴"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_coerces_filter_values_before_validation() -> None:
+    chat = FakeChatModel(
+        '{"category":"webcam","brands":[],"filters":{"frame_rate":60,'
+        '"microphone":true},"keywords":[],"sort":"recommend",'
+        '"supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(query="webcam 1080p 60fps with microphone", limit=3)
+    )
+    validated = validate_product_query_plan(plan)
+
+    assert validated.filters["frame_rate"] == "60fps"
+    assert validated.filters["microphone"] == "Yes"
+    assert validated.filters["resolution"] == "1080p"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_maps_false_connection_type_to_wired() -> None:
+    chat = FakeChatModel(
+        '{"category":"mouse","brands":[],"filters":{"connection_type":false},'
+        '"keywords":[],"sort":"recommend","supported":true,'
+        '"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query="USB-C 有线鼠标", limit=3))
+    validated = validate_product_query_plan(plan)
+
+    assert validated.filters["connection_type"] == "Wired"
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_retries_with_validation_error_feedback() -> None:
+    chat = SequenceFakeChatModel(
+        [
+            '{"category":"mouse","brands":[],"filters":{"refresh_rate":"144Hz"},'
+            '"keywords":[],"sort":"recommend","supported":true,'
+            '"unsupported_reason":null}',
+            '{"category":"monitor","brands":[],"filters":{"refresh_rate":"144Hz"},'
+            '"keywords":[],"sort":"recommend","supported":true,'
+            '"unsupported_reason":null}',
+        ]
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query="144Hz monitor", limit=3))
+
+    assert plan.category == "monitor"
+    assert plan.filters["refresh_rate"] == "144Hz"
+    assert len(chat.calls) == 2
+    retry_payload = json.loads(chat.calls[1][1].content)
+    feedback = retry_payload["validation_feedback"]
+    assert "unsupported filters for mouse: refresh_rate" in feedback["error"]
+    assert feedback["received_category"] == "mouse"
+    assert "refresh_rate" not in feedback["allowed_filters_for_received_category"]
+    assert feedback["normalization_hints"]["蓝牙"] == {
+        "key": "connection_type",
+        "value": "Wireless",
+    }
+    assert retry_payload["retry_instruction"].startswith("Return corrected JSON only")
+
+
+@pytest.mark.asyncio
 async def test_llm_catalog_planner_keeps_current_conditions_over_preferences() -> None:
     chat = FakeChatModel(
         '{"category":"mouse","brands":["Razer"],"max_price":800,'
@@ -747,7 +858,10 @@ async def test_catalog_search_falls_back_for_category_invalid_llm_filter(
 
     assert result.result_type == "products"
     assert result.query_plan["planner"] == "rule_based_fallback"
+    assert result.query_plan["error_type"] == "invalid_catalog_plan"
     assert "unsupported filters for mouse" in result.query_plan["fallback_reason"]
+    assert result.diagnostics[0].code == "invalid_catalog_plan"
+    assert result.diagnostics[0].recommended_action == "use_result_with_caution"
 
 
 @pytest.mark.asyncio
@@ -776,6 +890,8 @@ async def test_catalog_search_normalizes_localized_filter_key_and_value(
             }
         ]
     }
+    assert result.query_plan["error_type"] == "normalization_applied"
+    assert result.diagnostics[0].code == "normalization_applied"
 
 
 @pytest.mark.parametrize(
@@ -822,6 +938,7 @@ def test_catalog_filter_alias_still_respects_category_whitelist() -> None:
         ("keyboard", "轴体", "红", {"switches": "红轴"}),
         ("keyboard", "背光", "有", {"backlit": "Yes"}),
         ("mouse", "颜色", "黑", {"color": "黑色"}),
+        ("speaker", "power_w", "30W", {"power_w": "30"}),
     ],
 )
 def test_catalog_filter_values_are_normalized(
@@ -842,6 +959,44 @@ def test_catalog_filter_values_are_normalized(
     }
 
 
+def test_catalog_search_prompt_contains_compact_enum_guidance() -> None:
+    prompt = catalog_tools._catalog_planner_system_prompt()
+
+    assert 'connection_type: Wireless covers wireless' in prompt
+    assert 'speaker power_w examples: "20", "30", "40", "50"' in prompt
+    assert 'not "30W"' in prompt
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected"),
+    [
+        ("罗技", "Logitech"),
+        ("雷蛇", "Razer"),
+        ("赛睿", "SteelSeries"),
+        ("脉冲星", "Pulsar"),
+        ("凯酷", "Keychron"),
+        ("艾酷", "Akko"),
+        ("极度未知", "HyperX"),
+        ("索尼", "Sony"),
+        ("冠捷", "AOC"),
+        ("华硕", "ASUS"),
+        ("戴尔", "Dell"),
+        ("乐金", "LG"),
+        ("漫步者", "Edifier"),
+        ("博士", "Bose"),
+        ("创新", "Creative"),
+        ("爱乐图", "Elgato"),
+        ("圆刚", "AVerMedia"),
+    ],
+)
+def test_catalog_brand_aliases_are_normalized(alias: str, expected: str) -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(query=f"{alias}无线鼠标", category="mouse", brands=[alias])
+    )
+
+    assert plan.brands == [expected]
+
+
 @pytest.mark.asyncio
 async def test_catalog_search_falls_back_when_planner_fails(
     db_session_factory: Callable[[], AsyncSession],
@@ -853,7 +1008,9 @@ async def test_catalog_search_falls_back_when_planner_fails(
 
     assert result.result_type == "products"
     assert result.query_plan["planner"] == "rule_based_fallback"
+    assert result.query_plan["error_type"] == "invalid_catalog_plan"
     assert "planner unavailable" in result.query_plan["fallback_reason"]
+    assert result.diagnostics[0].code == "invalid_catalog_plan"
 
 
 @pytest.mark.asyncio
@@ -868,6 +1025,24 @@ async def test_catalog_search_returns_unsupported_query(
     assert result.result_type == "empty"
     assert result.ranking_strategy == "unsupported_query"
     assert result.query_plan["supported"] is False
+    assert result.query_plan["error_type"] == "unsupported_query"
+    assert result.diagnostics[0].code == "unsupported_query"
+    assert result.diagnostics[0].recommended_action == "explain_unsupported_query"
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_empty_result_has_stable_diagnostics(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query="mouse", brand="NoSuchBrand", limit=3)
+        )
+
+    assert result.result_type == "empty"
+    assert result.query_plan["error_type"] == "empty_result"
+    assert result.diagnostics[0].code == "empty_result"
+    assert result.diagnostics[0].recommended_action == "relax_filters_or_ask_followup"
 
 
 @pytest.mark.asyncio

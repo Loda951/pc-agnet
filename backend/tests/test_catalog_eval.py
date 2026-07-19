@@ -67,7 +67,7 @@ PLANNER_GOLDEN_CASES = [
         "20W speaker",
         {
             "category": "speaker",
-            "filters": {"power_w": "20W"},
+            "filters": {"power_w": "20"},
         },
     ),
     (
@@ -85,10 +85,11 @@ PLANNER_GOLDEN_CASES = [
         },
     ),
     (
-        "USB-C wired mouse",
+        "有 300 块以内的罗技无线鼠标吗",
         {
             "category": "mouse",
-            "filters": {"connection_type": "Wired"},
+            "brands": ["Logitech"],
+            "filters": {"connection_type": "Wireless"},
         },
     ),
 ]
@@ -154,6 +155,28 @@ def test_catalog_facet_planner_golden_cases(query: str, expected: dict) -> None:
             assert actual == expected_value
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_category"),
+    [
+        ("鼠标", "mouse"),
+        ("游戏鼠标", "mouse"),
+        ("机械键盘", "keyboard"),
+        ("耳麦", "headset"),
+        ("头戴耳机", "headset"),
+        ("屏幕", "monitor"),
+        ("音响", "speaker"),
+        ("蓝牙音箱", "speaker"),
+        ("网络摄像头", "webcam"),
+    ],
+)
+def test_catalog_category_aliases_are_canonicalized(
+    query: str, expected_category: str
+) -> None:
+    plan = validate_product_query_plan(ProductQueryPlan(query=query, category=query))
+
+    assert plan.category == expected_category
+
+
 def test_catalog_product_plan_to_search_request_preserves_structured_filters() -> None:
     plan = validate_product_query_plan(
         ProductQueryPlan(
@@ -175,6 +198,59 @@ def test_catalog_product_plan_to_search_request_preserves_structured_filters() -
     assert request.limit == 3
     assert "Logitech" in request.query
     assert "recommend" not in request.query.lower()
+
+
+def test_llm_product_plan_avoids_overconstrained_model_keyword_prefilter() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="144Hz 2K monitor",
+            category="monitor",
+            filters={"refresh_rate": "144Hz", "resolution": "2560x1440"},
+            keywords=["144Hz", "2K"],
+            planner="llm",
+            limit=3,
+        )
+    )
+
+    request = _plan_to_product_search(plan)
+
+    assert request.query == ""
+    assert request.category == "monitor"
+    assert request.filters == {"refresh_rate": "144Hz", "resolution": "2560x1440"}
+
+
+def test_llm_product_plan_avoids_numeric_spec_keyword_prefilter() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="30W bluetooth speaker",
+            category="speaker",
+            filters={"power_w": "30W", "connection_type": "bluetooth"},
+            keywords=["speaker"],
+            planner="llm",
+            limit=3,
+        )
+    )
+
+    request = _plan_to_product_search(plan)
+
+    assert request.query == ""
+    assert request.category == "speaker"
+    assert request.filters == {"power_w": "30", "connection_type": "Wireless"}
+
+
+def test_product_plan_prunes_redundant_connection_value_from_type_filter() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="wireless headset with microphone",
+            category="headset",
+            filters={"type": "wireless", "microphone": "Yes", "connection_type": "Wireless"},
+            planner="llm",
+            limit=3,
+        )
+    )
+
+    assert plan.filters == {"microphone": "Yes", "connection_type": "Wireless"}
+    assert plan.normalization_debug["pruned_filters"] == [{"key": "type", "value": "wireless"}]
 
 
 def test_rule_based_product_plan_avoids_overconstrained_sql_prefilter() -> None:
