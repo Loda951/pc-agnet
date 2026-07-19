@@ -229,14 +229,17 @@ class RuleBasedCatalogQueryPlanner:
             if defaults.connection_type is not None
             else {}
         )
-        filters = {**default_filters, **parsed.filters, **request.filters}
+        inferred_filters = _filters_from_query(request.query)
+        inferred_max_price = _max_price_from_query(request.query)
+        filters = {**default_filters, **inferred_filters, **parsed.filters, **request.filters}
         unsupported_reason = _unsupported_reason(request.query)
         explicit_brands = request.brands or ([request.brand] if request.brand else [])
         excluded_brands = _dedupe_keep_order(
             [*defaults.excluded_brands, *request.excluded_brands]
         )
         requested_exclusions = {item.lower() for item in request.excluded_brands}
-        selected_brands = explicit_brands or defaults.brands
+        inferred_brands = _infer_brands_from_text(request.query)
+        selected_brands = explicit_brands or inferred_brands or defaults.brands
         selected_brands = [
             brand for brand in selected_brands if brand.lower() not in requested_exclusions
         ]
@@ -269,6 +272,8 @@ class RuleBasedCatalogQueryPlanner:
                 if request.max_price is not None
                 else parsed.max_price
                 if parsed.max_price is not None
+                else inferred_max_price
+                if inferred_max_price is not None
                 else defaults.max_price
             ),
             filters=filters,
@@ -634,8 +639,10 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if isinstance(plan, dict):
         plan = ProductQueryPlan.model_validate(plan)
 
-    if plan.category and plan.category.lower() not in ALLOWED_CATEGORIES:
+    normalized_category = _canonical_category(plan.category)
+    if normalized_category and normalized_category.lower() not in ALLOWED_CATEGORIES:
         raise ValueError(f"unsupported category: {plan.category}")
+    plan.category = normalized_category
 
     plan.filters, normalization_debug = _normalize_catalog_filters_with_debug(plan.filters)
     if normalization_debug:
@@ -644,7 +651,7 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if unknown_filters:
         raise ValueError(f"unsupported catalog filters: {', '.join(sorted(unknown_filters))}")
 
-    normalized_category = _canonical_category(plan.category)
+    normalized_category = plan.category
     if normalized_category and normalized_category in CATEGORY_FILTERS:
         disallowed_for_category = {
             key for key in plan.filters if key.lower() not in CATEGORY_FILTERS[normalized_category]
@@ -902,6 +909,57 @@ def _filter_brands(products: list[ProductCard], brands: list[str]) -> list[Produ
         for product in products
         if any(brand in product.brand.lower() for brand in lowered)
     ]
+
+
+def _filters_from_query(query: str) -> dict[str, str]:
+    lowered = query.lower()
+    filters: dict[str, str] = {}
+    if any(term in lowered for term in {"wireless", "wifi", "bluetooth", "无线"}):
+        filters["connection_type"] = "Wireless"
+    elif any(term in lowered for term in {"wired", "usb", "cable", "有线"}):
+        filters["connection_type"] = "Wired"
+
+    if match := re.search(r"(\d{2,3})\s*(?:hz|赫兹)", lowered):
+        filters["refresh_rate"] = f"{match.group(1)}Hz"
+    if any(term in lowered for term in {"2k", "1440p"}):
+        filters["resolution"] = "2560x1440"
+    elif "4k" in lowered:
+        filters["resolution"] = "4K"
+    elif "1080p" in lowered:
+        filters["resolution"] = "1080p"
+
+    if any(term in lowered for term in {"red switch", "red switches", "红轴"}):
+        filters["switches"] = "Red"
+    elif any(term in lowered for term in {"blue switch", "blue switches", "青轴"}):
+        filters["switches"] = "Blue"
+    elif any(term in lowered for term in {"brown switch", "brown switches", "茶轴"}):
+        filters["switches"] = "Brown"
+    elif any(term in lowered for term in {"magnetic switch", "magnetic switches", "磁轴"}):
+        filters["switches"] = "Magnetic"
+
+    if any(term in lowered for term in {"microphone", "mic", "麦克风", "带麦"}):
+        filters["microphone"] = "Yes"
+    if any(term in lowered for term in {"backlit", "rgb", "背光", "灯光"}):
+        filters["backlit"] = "Yes"
+
+    return filters
+
+
+def _max_price_from_query(query: str) -> Decimal | None:
+    lowered = query.lower().replace(",", "")
+    patterns = (
+        r"(?:under|below|within|less than|<=|no more than)\s*(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*(?:元|rmb|cny|usd|dollars?)?\s*(?:以内|以下|以下的|预算内)",
+    )
+    for pattern in patterns:
+        if match := re.search(pattern, lowered):
+            return Decimal(match.group(1))
+    return None
+
+
+def _infer_brands_from_text(query: str) -> list[str]:
+    lowered = query.lower()
+    return [brand for brand in KNOWN_BRANDS if brand.lower() in lowered]
 
 
 def _unsupported_reason(query: str) -> str | None:
