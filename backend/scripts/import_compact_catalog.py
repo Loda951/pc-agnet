@@ -102,7 +102,7 @@ def build_compact_catalog() -> list[ImportedProduct]:
         for brand_index, brand in enumerate(template.brands):
             for product_index, line in enumerate(template.product_lines[:PRODUCTS_PER_BRAND]):
                 spu_title = _spu_title(template, brand, line, product_index)
-                sales_count = _sales_count(category_index, brand_index, product_index)
+                sales_count = _sku_sales_count(category_index, brand_index, product_index)
                 for sku_index in range(SKUS_PER_PRODUCT):
                     attributes = _attributes_for_category(template.category, sku_index)
                     sku_title = f"{spu_title} {VARIANT_LABELS[sku_index]}"
@@ -179,7 +179,7 @@ def _stock(
     return 20 + ((category_index * 17 + brand_index * 11 + product_index * 7 + sku_index * 5) % 180)
 
 
-def _sales_count(category_index: int, brand_index: int, product_index: int) -> int:
+def _sku_sales_count(category_index: int, brand_index: int, product_index: int) -> int:
     return 80 + category_index * 320 + brand_index * 73 + product_index * 19
 
 

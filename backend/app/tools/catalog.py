@@ -131,7 +131,14 @@ CATEGORY_FILTERS = {
     },
 }
 ALLOWED_SORTS = {"recommend", "sales", "price_asc", "price_desc", "stock"}
-BASE_COMPARISON_FIELDS = {"price", "stock", "brand", "category", "sales_count"}
+BASE_COMPARISON_FIELDS = {
+    "price",
+    "stock",
+    "brand",
+    "category",
+    "sku_sales_count",
+    "sales_count",
+}
 UNSUPPORTED_QUERY_PATTERNS = {
     "growth": "current catalog data has no time-series sales history",
     "month over month": "current catalog data has no time-series sales history",
@@ -538,6 +545,7 @@ class CatalogToolService:
                 category=category.name,
                 price=sku.price,
                 stock=sku.stock,
+                sku_sales_count=sku.sales_count,
                 sales_count=spu.sales_count,
                 specs={str(key): str(value) for key, value in (sku.specs_json or {}).items()}
                 | attributes.get(sku.id, {}),
@@ -827,13 +835,13 @@ Allowed JSON fields:
 - unsupported_reason: string or null
 
 Allowed comparison fields:
-price, stock, brand, category, sales_count, backlit, channels, color,
+price, stock, brand, category, sku_sales_count, sales_count, backlit, channels, color,
 connection_type, enclosure_type, field_of_view, frame_rate, frequency_response,
 hand_orientation, max_dpi, microphone, panel_type, power_w, refresh_rate,
 resolution, response_time_ms, size_inch, style, switches, tenkeyless,
 tracking_method, type, weight_g, wireless.
 
-For FPS mouse comparisons, prefer fields: price, stock, sales_count,
+For FPS mouse comparisons, prefer fields: price, stock, sku_sales_count, sales_count,
 connection_type, max_dpi, weight_g, hand_orientation.
 
 Set supported=false when the user asks for analytics not available in catalog
@@ -996,8 +1004,20 @@ def _comparison_fields_from_query(query: str) -> list[str]:
         fields.append("resolution")
     if any(term in lowered for term in {"mic", "microphone", "麦克风"}):
         fields.append("microphone")
+    if any(term in lowered for term in {"sales", "sales count", "销量"}):
+        fields.extend(["sku_sales_count", "sales_count"])
     if "fps" in lowered:
-        fields.extend(["price", "stock", "sales_count", "connection_type", "max_dpi", "weight_g"])
+        fields.extend(
+            [
+                "price",
+                "stock",
+                "sku_sales_count",
+                "sales_count",
+                "connection_type",
+                "max_dpi",
+                "weight_g",
+            ]
+        )
     return _dedupe_keep_order(fields)
 
 

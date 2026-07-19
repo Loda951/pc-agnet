@@ -76,6 +76,7 @@ class ProductComparisonItem(BaseModel):
     category: str
     price: Decimal
     stock: int
+    sku_sales_count: int = 0
     sales_count: int = 0
     specs: dict[str, str] = Field(default_factory=dict)
     image_url: str | None = None

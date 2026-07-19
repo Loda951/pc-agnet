@@ -162,8 +162,8 @@ ORCHESTRATOR_BASE_PROMPT = f"""
 - 结构化查询成功但为空，表示当前商城数据没有匹配项；不得改用文档或模型常识补造商品。
 - 文档检索成功但为空，表示没有足够文档依据；不得凭模型记忆补写商城政策。
 - catalog_facets.count 是目录中的 SKU 记录数，不是库存件数或销量。
-- catalog 商品的 sales_count 是 SPU 级聚合值；同一 SPU 的多个 SKU/颜色可能显示相同值，
-  不得声称每个颜色或版本分别售出了该数量。
+- catalog 商品的 sku_sales_count 是当前 SKU 的销量；sales_count 是该 SPU 下所有 SKU
+  的总销量。同一 SPU 的多个 SKU/颜色会显示相同的 sales_count，不得把它当成单个版本销量。
 </fact_sources>
 
 <memory_policy>

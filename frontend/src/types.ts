@@ -6,6 +6,8 @@ export type ProductCard = {
   category: string;
   price: string;
   stock: number;
+  sku_sales_count: number;
+  sales_count: number;
   specs: Record<string, string>;
   image_url?: string | null;
 };

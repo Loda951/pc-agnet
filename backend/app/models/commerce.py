@@ -129,6 +129,7 @@ class Sku(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     stock: Mapped[int] = mapped_column(default=0, server_default="0")
+    sales_count: Mapped[int] = mapped_column(default=0, server_default="0")
     specs_json: Mapped[dict | None] = mapped_column(JSONB)
     image_url: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[int] = mapped_column(default=1, server_default="1")

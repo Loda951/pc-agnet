@@ -194,14 +194,13 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
             sub_title=f"{product.category} 热门款，本地 demo 数据",
             detail_html=f"<p>{product.spu_title}，适合电商客服推荐与参数问答。</p>",
             status=1,
-            sales_count=max(product.sales_count, 0),
+            sales_count=0,
         )
         session.add(spu)
         await session.flush()
     else:
         spu.brand_id = brand.id
         spu.status = 1
-        spu.sales_count = max(spu.sales_count or 0, product.sales_count)
 
     sku = (
         await session.execute(
@@ -214,17 +213,20 @@ async def _upsert_product(session, product: ImportedProduct) -> Sku:
             title=product.sku_title,
             price=product.price_cny,
             stock=product.stock,
+            sales_count=max(product.sales_count, 0),
             specs_json=product.specs,
             image_url=None,
             status=1,
         )
         session.add(sku)
-        await session.flush()
     else:
         sku.price = product.price_cny
         sku.stock = max(sku.stock, product.stock)
+        sku.sales_count = max(product.sales_count, 0)
         sku.specs_json = product.specs
         sku.status = 1
+
+    await session.flush()
 
     for attr_name, attr_value in product.attributes.items():
         is_spec, is_filter = attribute_flags(attr_name)

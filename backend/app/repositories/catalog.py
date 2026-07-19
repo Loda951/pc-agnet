@@ -205,6 +205,7 @@ class CatalogRepository:
                     category=category.name,
                     price=Decimal(sku.price),
                     stock=sku.stock,
+                    sku_sales_count=sku.sales_count,
                     sales_count=spu.sales_count,
                     specs=specs,
                     image_url=sku.image_url,

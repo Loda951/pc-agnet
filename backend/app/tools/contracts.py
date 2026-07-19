@@ -313,9 +313,9 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             registry_name="catalog.search",
             description=(
                 "Search the current PC peripheral catalog for product recommendations, "
-                "category, brand, budget, connection type, stock, price, and specification "
-                "facts. Use catalog_compare instead for product-versus-product comparisons. "
-                "Do not use this tool for policies or order data."
+                "category, brand, budget, connection type, stock, price, SKU/SPU sales counts, "
+                "and specification facts. Use catalog_compare instead for product-versus-"
+                "product comparisons. Do not use this tool for policies or order data."
             ),
             public_input_model=CatalogSearchInput,
             internal_input_model=CatalogSearchInput,
@@ -327,8 +327,8 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             registry_name="catalog.compare",
             description=(
                 "Compare PC peripheral products or explicit SKU IDs using catalog facts such "
-                "as price, stock, brand, category, sales count, and specifications. Return "
-                "comparison evidence only; do not make final purchase promises."
+                "as price, stock, brand, category, SKU/SPU sales counts, and specifications. "
+                "Return comparison evidence only; do not make final purchase promises."
             ),
             public_input_model=CatalogCompareInput,
             internal_input_model=CatalogCompareInput,

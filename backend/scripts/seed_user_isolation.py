@@ -387,6 +387,7 @@ async def _get_or_create_sku(session: AsyncSession) -> Sku:
             title=SKU_TITLE,
             price=Decimal("129.00"),
             stock=999,
+            sales_count=0,
             specs_json={"connection_type": "有线", "color": "测试黑"},
             status=1,
         )
