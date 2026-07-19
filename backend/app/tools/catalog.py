@@ -195,11 +195,9 @@ class CatalogComparePlan(BaseModel):
 
 
 class CatalogQueryPlanner(Protocol):
-    async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
-        ...
+    async def plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan: ...
 
-    async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
-        ...
+    async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan: ...
 
 
 class FacetQueryPlan(BaseModel):
@@ -234,9 +232,7 @@ class RuleBasedCatalogQueryPlanner:
         filters = {**default_filters, **inferred_filters, **parsed.filters, **request.filters}
         unsupported_reason = _unsupported_reason(request.query)
         explicit_brands = request.brands or ([request.brand] if request.brand else [])
-        excluded_brands = _dedupe_keep_order(
-            [*defaults.excluded_brands, *request.excluded_brands]
-        )
+        excluded_brands = _dedupe_keep_order([*defaults.excluded_brands, *request.excluded_brands])
         requested_exclusions = {item.lower() for item in request.excluded_brands}
         inferred_brands = _infer_brands_from_text(request.query)
         selected_brands = explicit_brands or inferred_brands or defaults.brands
@@ -249,9 +245,7 @@ class RuleBasedCatalogQueryPlanner:
             if brand.lower() in requested_exclusions
             or brand.lower() not in {item.lower() for item in explicit_brands}
         ]
-        excluded_usage = _dedupe_keep_order(
-            [*defaults.excluded_usage, *request.excluded_usage]
-        )
+        excluded_usage = _dedupe_keep_order([*defaults.excluded_usage, *request.excluded_usage])
         inferred_usage = _usage_from_query(request.query)
         if inferred_usage in request.excluded_usage:
             inferred_usage = None
@@ -277,9 +271,7 @@ class RuleBasedCatalogQueryPlanner:
                 else defaults.max_price
             ),
             filters=filters,
-            keywords=_dedupe_keep_order(
-                [*request.keywords, *([usage] if usage else [])]
-            ),
+            keywords=_dedupe_keep_order([*request.keywords, *([usage] if usage else [])]),
             usage_scenario=usage,
             sort=request.sort,
             limit=request.limit,
@@ -409,16 +401,13 @@ class CatalogToolService:
         product_request = _plan_to_product_search(plan)
         products = await CatalogRepository(self.session).search_products(product_request)
         products = _filter_brands(products, plan.brands)
-        products = _filter_excluded_preferences(
-            products, plan.excluded_brands, plan.excluded_usage
-        )
+        products = _filter_excluded_preferences(products, plan.excluded_brands, plan.excluded_usage)
         return CatalogSearchOutput(
             result_type="products" if products else "empty",
             products=products[: request.limit],
             ranking_strategy="match_score_sales_stock_price",
             query_plan=plan.model_dump(mode="json"),
         )
-
 
     async def facets(self, request: CatalogFacetInput) -> CatalogFacetOutput:
         plan = _facet_query_plan(request)
@@ -496,9 +485,7 @@ class CatalogToolService:
                 product.title,
             ),
         )
-        matched = [
-            product for product in ranked if _compare_term_score(product, wanted_terms) > 0
-        ]
+        matched = [product for product in ranked if _compare_term_score(product, wanted_terms) > 0]
         return matched or ranked, plan
 
     async def _compare_candidates_from_plan(
@@ -542,9 +529,7 @@ class CatalogToolService:
                     product.title,
                 ),
             )
-            matched = [
-                product for product in ranked if _compare_term_score(product, [item]) > 0
-            ]
+            matched = [product for product in ranked if _compare_term_score(product, [item]) > 0]
             for product in (matched or ranked)[:per_item_limit]:
                 if product.sku_id in seen_sku_ids:
                     continue
@@ -867,6 +852,12 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         # queries, repeating localized category/usage words as title keywords can
         # eliminate every alternative before the post-retrieval exclusion pass.
         query_parts = [*plan.brands]
+    elif plan.planner.startswith("rule_based") and _has_structured_catalog_constraints(plan):
+        query_parts = [
+            *plan.brands,
+            *_product_keywords(plan),
+            *_safe_query_prefilter_keywords(plan),
+        ]
     elif plan.planner.startswith("rule_based"):
         query_parts = [plan.query, *plan.keywords]
     else:
@@ -884,6 +875,77 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         excluded_usage=plan.excluded_usage,
         limit=min(20, max(12, plan.limit * 4)) if has_exclusions else plan.limit,
     )
+
+
+def _has_structured_catalog_constraints(plan: ProductQueryPlan) -> bool:
+    return bool(
+        plan.category
+        or plan.brands
+        or plan.filters
+        or plan.min_price is not None
+        or plan.max_price is not None
+    )
+
+
+def _safe_query_prefilter_keywords(plan: ProductQueryPlan) -> list[str]:
+    ignored = {
+        "recommend",
+        "recommendation",
+        "find",
+        "show",
+        "with",
+        "from",
+        "under",
+        "below",
+        "within",
+        "less",
+        "than",
+        "no",
+        "more",
+        "budget",
+        "wireless",
+        "wired",
+        "bluetooth",
+        "wifi",
+        "usb",
+        "usb-a",
+        "usb-c",
+        "switch",
+        "switches",
+        "red",
+        "blue",
+        "brown",
+        "magnetic",
+        "microphone",
+        "mic",
+        "backlit",
+        "rgb",
+        "2k",
+        "4k",
+        "1080p",
+        "1440p",
+        "fps",
+        "gaming",
+        "office",
+        "mouse",
+        "keyboard",
+        "headset",
+        "headphone",
+        "monitor",
+        "speaker",
+        "webcam",
+    }
+    ignored.update(brand.lower() for brand in plan.brands)
+    keywords: list[str] = []
+    for token in re.findall(r"[a-z0-9][a-z0-9+.-]*", plan.query.lower()):
+        if token in ignored or token.isdigit() or re.fullmatch(r"\d{2,3}hz", token):
+            continue
+        if _canonical_category(token) in CATEGORY_FILTERS:
+            continue
+        if any(token in str(value).lower() for value in plan.filters.values()):
+            continue
+        keywords.append(token)
+    return _dedupe_keep_order(keywords)
 
 
 def _compare_plan_to_product_query_plan(plan: CatalogComparePlan) -> ProductQueryPlan:
@@ -905,18 +967,19 @@ def _filter_brands(products: list[ProductCard], brands: list[str]) -> list[Produ
         return products
     lowered = [brand.lower() for brand in brands]
     return [
-        product
-        for product in products
-        if any(brand in product.brand.lower() for brand in lowered)
+        product for product in products if any(brand in product.brand.lower() for brand in lowered)
     ]
 
 
 def _filters_from_query(query: str) -> dict[str, str]:
     lowered = query.lower()
     filters: dict[str, str] = {}
-    if any(term in lowered for term in {"wireless", "wifi", "bluetooth", "无线"}):
+    if any(
+        term in lowered
+        for term in {"wireless", "wifi", "bluetooth", "无线", "蓝牙", "三模", "2.4g"}
+    ):
         filters["connection_type"] = "Wireless"
-    elif any(term in lowered for term in {"wired", "usb", "cable", "有线"}):
+    elif any(term in lowered for term in {"wired", "usb", "usb-a", "usb-c", "cable", "有线"}):
         filters["connection_type"] = "Wired"
 
     if match := re.search(r"(\d{2,3})\s*(?:hz|赫兹)", lowered):
@@ -1150,9 +1213,7 @@ def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
         ]
     if overrides.get("usage_scenario"):
         plan.usage_scenario = overrides["usage_scenario"]
-        plan.keywords = _dedupe_keep_order(
-            [*plan.keywords, str(overrides["usage_scenario"])]
-        )
+        plan.keywords = _dedupe_keep_order([*plan.keywords, str(overrides["usage_scenario"])])
 
 
 def _apply_preference_defaults(plan: ProductQueryPlan, defaults: dict) -> None:
@@ -1317,13 +1378,9 @@ def _brands_for_item(item: str, brands: list[str]) -> list[str]:
 
 def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
     normalized_request = _normalize_facet_request(request)
-    filters, normalization_debug = _normalize_catalog_filters_with_debug(
-        normalized_request.filters
-    )
+    filters, normalization_debug = _normalize_catalog_filters_with_debug(normalized_request.filters)
     spec_key = (
-        _normalize_filter_key(normalized_request.spec_key)
-        if normalized_request.spec_key
-        else None
+        _normalize_filter_key(normalized_request.spec_key) if normalized_request.spec_key else None
     )
     category = _canonical_category(normalized_request.category)
     plan = FacetQueryPlan(
@@ -1347,8 +1404,8 @@ def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
     unknown_filters = {key for key in plan.filters if key.lower() not in ALLOWED_FILTERS}
     if unknown_filters:
         plan.supported = False
-        plan.unsupported_reason = (
-            "unsupported catalog filters: " + ", ".join(sorted(unknown_filters))
+        plan.unsupported_reason = "unsupported catalog filters: " + ", ".join(
+            sorted(unknown_filters)
         )
         return plan
 
@@ -1367,9 +1424,8 @@ def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
         disallowed_filters = {key for key in plan.filters if key.lower() not in allowed}
         if disallowed_filters:
             plan.supported = False
-            plan.unsupported_reason = (
-                f"unsupported filters for {category}: "
-                + ", ".join(sorted(disallowed_filters))
+            plan.unsupported_reason = f"unsupported filters for {category}: " + ", ".join(
+                sorted(disallowed_filters)
             )
             return plan
         if spec_key and spec_key.lower() not in allowed:

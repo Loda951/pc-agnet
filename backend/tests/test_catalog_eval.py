@@ -142,6 +142,45 @@ def test_catalog_product_plan_to_search_request_preserves_structured_filters() -
     assert "recommend" not in request.query.lower()
 
 
+def test_rule_based_product_plan_avoids_overconstrained_sql_prefilter() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="144Hz 2K monitor",
+            category="monitor",
+            filters={"refresh_rate": "144Hz", "resolution": "2560x1440"},
+            planner="rule_based",
+            limit=3,
+        )
+    )
+
+    request = _plan_to_product_search(plan)
+
+    assert request.query == ""
+    assert request.category == "monitor"
+    assert request.filters == {"refresh_rate": "144Hz", "resolution": "2560x1440"}
+
+
+def test_rule_based_product_plan_keeps_brand_as_safe_prefilter() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="wireless mouse under 300 from Logitech",
+            category="mouse",
+            brands=["Logitech"],
+            max_price=Decimal("300"),
+            filters={"connection_type": "Wireless"},
+            planner="rule_based",
+            limit=3,
+        )
+    )
+
+    request = _plan_to_product_search(plan)
+
+    assert request.query == "Logitech"
+    assert request.category == "mouse"
+    assert request.max_price == Decimal("300")
+    assert request.filters == {"connection_type": "Wireless"}
+
+
 def test_catalog_product_plan_rejects_sql_injection_like_filter_key() -> None:
     with pytest.raises(ValueError, match="unsupported catalog filters"):
         validate_product_query_plan(
@@ -171,6 +210,7 @@ def test_catalog_product_plan_rejects_sql_injection_like_filter_key() -> None:
         ({"refresh_rate": "144 赫兹"}, "refresh_rate", "144Hz"),
         ({"refresh_rate": "75Hz"}, "refresh_rate", "75Hz"),
         ({"microphone": "带麦"}, "microphone", "Yes"),
+        ({"microphone": "是"}, "microphone", "Yes"),
         ({"backlit": "无背光"}, "backlit", "No"),
         ({"backlit": "白光"}, "backlit", "Yes"),
     ],
