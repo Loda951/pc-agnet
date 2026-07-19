@@ -1,10 +1,9 @@
-
 from decimal import Decimal
 
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.repositories.catalog import _catalog_search_statement
+from app.repositories.catalog import _catalog_search_statement, _matches_single_filter
 from app.schemas.catalog import ProductSearchRequest
 from app.tools.catalog import (
     ProductQueryPlan,
@@ -152,6 +151,33 @@ def test_catalog_product_plan_rejects_sql_injection_like_filter_key() -> None:
                 filters={"sku.price); drop table sku; --": "1"},
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("specs", "key", "expected"),
+    [
+        ({"connection_type": "蓝牙"}, "connection_type", "Wireless"),
+        ({"connection_type": "Bluetooth"}, "connection_type", "无线"),
+        ({"connection_type": "有线连接"}, "connection_type", "Wired"),
+        ({"wireless": "是"}, "wireless", "true"),
+        ({"switches": "线性红轴"}, "switches", "Red"),
+        ({"color": "黑色"}, "color", "Black"),
+        ({"resolution": "2K"}, "resolution", "2560x1440"),
+        ({"refresh_rate": "144 赫兹"}, "refresh_rate", "144Hz"),
+        ({"microphone": "带麦"}, "microphone", "Yes"),
+    ],
+)
+def test_catalog_db_value_aliases_match_mixed_language_specs(
+    specs: dict[str, str], key: str, expected: str
+) -> None:
+    assert _matches_single_filter(specs, key, expected)
+
+
+def test_catalog_db_value_aliases_do_not_cross_match_unrelated_values() -> None:
+    assert not _matches_single_filter(
+        {"connection_type": "有线连接"}, "connection_type", "Wireless"
+    )
+    assert not _matches_single_filter({"switches": "青轴"}, "switches", "Red")
 
 
 def test_catalog_search_sql_contains_expected_joins_filters_and_ordering() -> None:
