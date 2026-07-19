@@ -770,6 +770,42 @@ async def test_catalog_search_normalizes_localized_filter_key_and_value(
     assert result.query_plan["filters"] == {"connection_type": "Wireless"}
 
 
+@pytest.mark.parametrize(
+    ("category", "raw_key", "expected_key"),
+    [
+        ("mouse", "重量", "weight_g"),
+        ("keyboard", "轴体", "switches"),
+        ("headset", "麦克风", "microphone"),
+        ("monitor", "刷新率", "refresh_rate"),
+        ("speaker", "功率", "power_w"),
+        ("webcam", "帧率", "frame_rate"),
+    ],
+)
+def test_catalog_filter_aliases_cover_common_category_specs(
+    category: str, raw_key: str, expected_key: str
+) -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="find products",
+            category=category,
+            filters={raw_key: "demo"},
+        )
+    )
+
+    assert plan.filters == {expected_key: "demo"}
+
+
+def test_catalog_filter_alias_still_respects_category_whitelist() -> None:
+    with pytest.raises(ValueError, match="unsupported filters for mouse"):
+        validate_product_query_plan(
+            ProductQueryPlan(
+                query="find mouse",
+                category="mouse",
+                filters={"刷新率": "144Hz"},
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_catalog_search_falls_back_when_planner_fails(
     db_session_factory: Callable[[], AsyncSession],
