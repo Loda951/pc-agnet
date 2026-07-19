@@ -180,6 +180,15 @@ Stable error codes exposed to orchestrator:
 - 不直接承诺商品一定可买，最终库存以下单页为准。
 - 无结果时返回 `result_type = "empty"`。
 
+## 销量字段语义
+
+- `sku_sales_count` 表示 SKU 级销量，用于比较不同颜色、版本或具体 SKU 的热度。
+- `sku_sales_count_scope` 固定为 `sku`，明确该销量属于当前 SKU。
+- `sales_count` 保留为 SPU 级汇总销量，表示同一个 SPU 系列下所有 SKU 的汇总。
+- `sales_count_scope` 固定为 `spu`，不能用 `sales_count` 判断某个颜色或版本卖得更好。
+- 当用户问“哪个版本/颜色销量更高”时，主流程应优先使用 `sku_sales_count`；如果只有 `sales_count` 而没有 SKU 级销量，则不应做 SKU 热度比较。
+- 当前推荐排序和 compare 召回已改为优先使用 `sku_sales_count`，不再用 SPU 汇总销量代替 SKU 销量。
+
 ## catalog.compare
 
 用途：

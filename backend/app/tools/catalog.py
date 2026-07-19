@@ -512,7 +512,7 @@ class CatalogToolService:
                 products,
                 key=lambda product: (
                     -_compare_term_score(product, [item]),
-                    -product.sales_count,
+                    -product.sku_sales_count,
                     0 if product.stock > 0 else 1,
                     product.price,
                     product.title,
@@ -840,6 +840,9 @@ connection_type, enclosure_type, field_of_view, frame_rate, frequency_response,
 hand_orientation, max_dpi, microphone, panel_type, power_w, refresh_rate,
 resolution, response_time_ms, size_inch, style, switches, tenkeyless,
 tracking_method, type, weight_g, wireless.
+
+sku_sales_count is SKU-level sales volume. sales_count is SPU-level aggregate sales volume.
+Do not compare color/version popularity with sales_count; use sku_sales_count for SKU popularity.
 
 For FPS mouse comparisons, prefer fields: price, stock, sku_sales_count, sales_count,
 connection_type, max_dpi, weight_g, hand_orientation.
