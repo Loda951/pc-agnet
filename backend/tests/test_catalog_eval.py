@@ -157,14 +157,22 @@ def test_catalog_product_plan_rejects_sql_injection_like_filter_key() -> None:
     ("specs", "key", "expected"),
     [
         ({"connection_type": "蓝牙"}, "connection_type", "Wireless"),
+        ({"connection_type": "2.4G 无线"}, "connection_type", "Wireless"),
+        ({"connection_type": "三模"}, "connection_type", "Wireless"),
+        ({"connection_type": "USB-C"}, "connection_type", "Wired"),
         ({"connection_type": "Bluetooth"}, "connection_type", "无线"),
         ({"connection_type": "有线连接"}, "connection_type", "Wired"),
         ({"wireless": "是"}, "wireless", "true"),
         ({"switches": "线性红轴"}, "switches", "Red"),
+        ({"switches": "静音红轴"}, "switches", "Red"),
+        ({"switches": "段落茶轴"}, "switches", "Brown"),
         ({"color": "黑色"}, "color", "Black"),
         ({"resolution": "2K"}, "resolution", "2560x1440"),
         ({"refresh_rate": "144 赫兹"}, "refresh_rate", "144Hz"),
+        ({"refresh_rate": "75Hz"}, "refresh_rate", "75Hz"),
         ({"microphone": "带麦"}, "microphone", "Yes"),
+        ({"backlit": "无背光"}, "backlit", "No"),
+        ({"backlit": "白光"}, "backlit", "Yes"),
     ],
 )
 def test_catalog_db_value_aliases_match_mixed_language_specs(

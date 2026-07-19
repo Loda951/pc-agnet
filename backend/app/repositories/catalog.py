@@ -79,9 +79,11 @@ DB_VALUE_ALIASES = {
             "蓝牙",
             "无线蓝牙",
             "2.4g",
+            "2.4g 无线",
+            "三模",
         },
         "bluetooth": {"wireless", "bluetooth", "bt", "无线", "蓝牙", "无线蓝牙"},
-        "wired": {"wired", "usb", "cable", "有线", "有线连接"},
+        "wired": {"wired", "usb", "usb-a", "usb-c", "cable", "有线", "有线连接"},
     },
     "wireless": {
         "true": {"true", "yes", "1", "是", "有", "支持", "wireless", "bluetooth", "无线", "蓝牙"},
@@ -89,16 +91,16 @@ DB_VALUE_ALIASES = {
     },
     "microphone": {
         "yes": {"yes", "true", "1", "有", "带", "支持", "带麦", "麦克风"},
-        "no": {"no", "false", "0", "无", "不带", "不支持"},
+        "no": {"no", "false", "0", "否", "无", "不带", "不支持"},
     },
     "backlit": {
-        "yes": {"yes", "true", "1", "有", "带", "支持", "rgb", "背光", "灯光"},
-        "no": {"no", "false", "0", "无", "不带", "不支持"},
+        "yes": {"yes", "true", "1", "有", "带", "支持", "rgb", "背光", "灯光", "白光"},
+        "no": {"no", "false", "0", "无", "无背光", "不带", "不支持"},
     },
     "switches": {
-        "red": {"red", "red switch", "red switches", "红", "红轴", "线性红轴"},
+        "red": {"red", "red switch", "red switches", "红", "红轴", "线性红轴", "静音红轴"},
         "blue": {"blue", "blue switch", "blue switches", "青", "青轴"},
-        "brown": {"brown", "brown switch", "brown switches", "茶", "茶轴"},
+        "brown": {"brown", "brown switch", "brown switches", "茶", "茶轴", "段落茶轴"},
         "magnetic": {"magnetic", "magnetic switch", "magnetic switches", "磁", "磁轴"},
     },
     "color": {
@@ -111,12 +113,13 @@ DB_VALUE_ALIASES = {
     "resolution": {
         "2560x1440": {"2560x1440", "2k", "1440p"},
         "4k": {"4k", "3840x2160"},
-        "1080p": {"1080p", "1920x1080", "full hd", "fhd"},
+        "1080p": {"1080p", "1080p hdr", "1920x1080", "full hd", "fhd"},
     },
     "refresh_rate": {
         "144hz": {"144hz", "144 hz", "144赫兹"},
         "165hz": {"165hz", "165 hz", "165赫兹"},
         "240hz": {"240hz", "240 hz", "240赫兹"},
+        "75hz": {"75hz", "75 hz", "75赫兹"},
     },
 }
 MAX_CANDIDATE_PAGES = 50
