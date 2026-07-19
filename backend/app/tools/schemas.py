@@ -77,7 +77,9 @@ class ProductComparisonItem(BaseModel):
     price: Decimal
     stock: int
     sku_sales_count: int = 0
+    sku_sales_count_scope: Literal["sku"] = "sku"
     sales_count: int = 0
+    sales_count_scope: Literal["spu"] = "spu"
     specs: dict[str, str] = Field(default_factory=dict)
     image_url: str | None = None
 

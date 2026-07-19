@@ -103,7 +103,7 @@ class CatalogRepository:
         ranked_products.sort(
             key=lambda item: (
                 -item[0],
-                -item[1].sales_count,
+                -item[1].sku_sales_count,
                 0 if item[1].stock > 0 else 1,
                 item[1].price,
                 item[1].title,
@@ -245,7 +245,7 @@ def _catalog_search_statement(
         .join(Brand, Spu.brand_id == Brand.id)
         .join(Category, Spu.category_id == Category.id)
         .where(Sku.status == 1, Spu.status == 1)
-        .order_by(Spu.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
+        .order_by(Sku.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
         .limit(page_limit)
         .offset(offset)
     )
