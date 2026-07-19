@@ -768,6 +768,14 @@ async def test_catalog_search_normalizes_localized_filter_key_and_value(
     assert result.result_type == "products"
     assert result.query_plan["planner"] == "llm"
     assert result.query_plan["filters"] == {"connection_type": "Wireless"}
+    assert result.query_plan["normalization_debug"] == {
+        "filter_aliases": [
+            {
+                "from": {"key": "连接方式", "value": "无线"},
+                "to": {"key": "connection_type", "value": "Wireless"},
+            }
+        ]
+    }
 
 
 @pytest.mark.parametrize(
@@ -804,6 +812,34 @@ def test_catalog_filter_alias_still_respects_category_whitelist() -> None:
                 filters={"刷新率": "144Hz"},
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("category", "raw_key", "raw_value", "expected_filters"),
+    [
+        ("monitor", "刷新率", "144 赫兹", {"refresh_rate": "144Hz"}),
+        ("monitor", "分辨率", "2k", {"resolution": "2560x1440"}),
+        ("keyboard", "轴体", "红", {"switches": "红轴"}),
+        ("keyboard", "背光", "有", {"backlit": "Yes"}),
+        ("mouse", "颜色", "黑", {"color": "黑色"}),
+    ],
+)
+def test_catalog_filter_values_are_normalized(
+    category: str, raw_key: str, raw_value: str, expected_filters: dict[str, str]
+) -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="find products",
+            category=category,
+            filters={raw_key: raw_value},
+        )
+    )
+
+    assert plan.filters == expected_filters
+    assert plan.normalization_debug["filter_aliases"][0]["to"] == {
+        "key": next(iter(expected_filters)),
+        "value": next(iter(expected_filters.values())),
+    }
 
 
 @pytest.mark.asyncio
@@ -867,6 +903,10 @@ async def test_catalog_facets_infers_brand_facet_from_query_only(
     assert result.output["result_type"] == "facets"
     assert result.output["facet"] == "brand"
     assert result.output["category"] == "mouse"
+    assert result.output["query_plan"]["planner"] == "rule_based"
+    assert result.output["query_plan"]["supported"] is True
+    assert result.output["query_plan"]["facet"] == "brand"
+    assert result.output["query_plan"]["category"] == "mouse"
     values = {item["value"] for item in result.output["items"]}
     assert {"Logitech", "Razer"} <= values
 
@@ -908,7 +948,28 @@ async def test_catalog_facets_returns_spec_values(
     assert result.output is not None
     assert result.output["result_type"] == "facets"
     assert result.output["facet"] == "spec_value"
+    assert result.output["query_plan"]["spec_key"] == "switches"
     assert any("Red" in item["value"] for item in result.output["items"])
+
+
+@pytest.mark.asyncio
+async def test_catalog_facets_returns_unsupported_formal_plan_without_querying(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await build_tool_registry(session, settings=TOOL_TEST_SETTINGS).execute(
+            "catalog.facets",
+            {"query": "what monitor switches are available"},
+        )
+
+    assert result.ok
+    assert result.output is not None
+    assert result.output["result_type"] == "empty"
+    assert result.output["query_plan"]["supported"] is False
+    assert result.output["query_plan"]["facet"] == "spec_value"
+    assert result.output["query_plan"]["category"] == "monitor"
+    assert result.output["query_plan"]["spec_key"] == "switches"
+    assert "unsupported spec_key for monitor" in result.output["query_plan"]["unsupported_reason"]
 
 
 @pytest.mark.asyncio

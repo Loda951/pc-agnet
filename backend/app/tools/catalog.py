@@ -166,6 +166,7 @@ class ProductQueryPlan(BaseModel):
     unsupported_reason: str | None = None
     planner: str = "rule_based"
     fallback_reason: str | None = None
+    normalization_debug: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_price_range(self) -> "ProductQueryPlan":
@@ -190,6 +191,7 @@ class CatalogComparePlan(BaseModel):
     unsupported_reason: str | None = None
     planner: str = "rule_based"
     fallback_reason: str | None = None
+    normalization_debug: dict = Field(default_factory=dict)
 
 
 class CatalogQueryPlanner(Protocol):
@@ -198,6 +200,22 @@ class CatalogQueryPlanner(Protocol):
 
     async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
         ...
+
+
+class FacetQueryPlan(BaseModel):
+    query: str = ""
+    facet: Literal["category", "brand", "spec_key", "spec_value"] = "brand"
+    category: str | None = None
+    brand: str | None = None
+    spec_key: str | None = None
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    filters: dict[str, str] = Field(default_factory=dict)
+    limit: int = Field(default=20, ge=1, le=50)
+    supported: bool = True
+    unsupported_reason: str | None = None
+    planner: str = "rule_based"
+    normalization_debug: dict = Field(default_factory=dict)
 
 
 class RuleBasedCatalogQueryPlanner:
@@ -398,35 +416,36 @@ class CatalogToolService:
 
 
     async def facets(self, request: CatalogFacetInput) -> CatalogFacetOutput:
-        normalized = _normalize_facet_request(request)
+        plan = _facet_query_plan(request)
+        if not plan.supported:
+            return CatalogFacetOutput(
+                result_type="empty",
+                facet=plan.facet,
+                items=[],
+                category=plan.category,
+                brand=plan.brand,
+                spec_key=plan.spec_key,
+                query_plan=plan.model_dump(mode="json"),
+            )
+
         items = await CatalogRepository(self.session).list_facets(
-            facet=normalized.facet,
-            category=normalized.category,
-            brand=normalized.brand,
-            spec_key=normalized.spec_key,
-            min_price=normalized.min_price,
-            max_price=normalized.max_price,
-            filters=normalized.filters,
-            limit=normalized.limit,
+            facet=plan.facet,
+            category=plan.category,
+            brand=plan.brand,
+            spec_key=plan.spec_key,
+            min_price=plan.min_price,
+            max_price=plan.max_price,
+            filters=plan.filters,
+            limit=plan.limit,
         )
         return CatalogFacetOutput(
             result_type="facets" if items else "empty",
-            facet=normalized.facet,
+            facet=plan.facet,
             items=[CatalogFacetItem(value=value, count=count) for value, count in items],
-            category=normalized.category,
-            brand=normalized.brand,
-            spec_key=normalized.spec_key,
-            query_plan={
-                "query": normalized.query,
-                "facet": normalized.facet,
-                "category": normalized.category,
-                "brand": normalized.brand,
-                "spec_key": normalized.spec_key,
-                "min_price": str(normalized.min_price) if normalized.min_price else None,
-                "max_price": str(normalized.max_price) if normalized.max_price else None,
-                "filters": normalized.filters,
-                "limit": normalized.limit,
-            },
+            category=plan.category,
+            brand=plan.brand,
+            spec_key=plan.spec_key,
+            query_plan=plan.model_dump(mode="json"),
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
@@ -618,7 +637,9 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if plan.category and plan.category.lower() not in ALLOWED_CATEGORIES:
         raise ValueError(f"unsupported category: {plan.category}")
 
-    plan.filters = _normalize_catalog_filters(plan.filters)
+    plan.filters, normalization_debug = _normalize_catalog_filters_with_debug(plan.filters)
+    if normalization_debug:
+        plan.normalization_debug = {**plan.normalization_debug, **normalization_debug}
     unknown_filters = {key for key in plan.filters if key.lower() not in ALLOWED_FILTERS}
     if unknown_filters:
         raise ValueError(f"unsupported catalog filters: {', '.join(sorted(unknown_filters))}")
@@ -656,12 +677,29 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
 
 
 def _normalize_catalog_filters(filters: dict[str, str]) -> dict[str, str]:
+    return _normalize_catalog_filters_with_debug(filters)[0]
+
+
+def _normalize_catalog_filters_with_debug(
+    filters: dict[str, str],
+) -> tuple[dict[str, str], dict[str, list[dict[str, dict[str, str]]]]]:
     normalized: dict[str, str] = {}
+    changes: list[dict[str, dict[str, str]]] = []
     for raw_key, raw_value in filters.items():
-        key = _normalize_filter_key(str(raw_key))
-        value = _normalize_filter_value(key, str(raw_value))
+        raw_key_text = str(raw_key)
+        raw_value_text = str(raw_value)
+        key = _normalize_filter_key(raw_key_text)
+        value = _normalize_filter_value(key, raw_value_text)
         normalized[key] = value
-    return normalized
+        if key != raw_key_text or value != raw_value_text:
+            changes.append(
+                {
+                    "from": {"key": raw_key_text, "value": raw_value_text},
+                    "to": {"key": key, "value": value},
+                }
+            )
+    debug = {"filter_aliases": changes} if changes else {}
+    return normalized, debug
 
 
 def _normalize_filter_key(key: str) -> str:
@@ -731,6 +769,58 @@ def _normalize_filter_value(key: str, value: str) -> str:
             return "true"
         if lowered in {"false", "no", "0", "wired", "否", "有线"}:
             return "false"
+    if key == "color":
+        color_aliases = {
+            "black": "Black",
+            "white": "White",
+            "silver": "Silver",
+            "gray": "Gray",
+            "grey": "Gray",
+            "pink": "Pink",
+            "黑": "黑色",
+            "黑色": "黑色",
+            "白": "白色",
+            "白色": "白色",
+            "银": "银色",
+            "银色": "银色",
+            "灰": "灰色",
+            "灰色": "灰色",
+            "粉": "粉色",
+            "粉色": "粉色",
+        }
+        return color_aliases.get(lowered, stripped)
+    if key == "switches":
+        switch_aliases = {
+            "red": "Red",
+            "blue": "Blue",
+            "brown": "Brown",
+            "magnetic": "Magnetic",
+            "红": "红轴",
+            "红轴": "红轴",
+            "青": "青轴",
+            "青轴": "青轴",
+            "茶": "茶轴",
+            "茶轴": "茶轴",
+            "磁": "磁轴",
+            "磁轴": "磁轴",
+        }
+        return switch_aliases.get(lowered, stripped)
+    if key == "refresh_rate":
+        if match := re.search(r"(\d{2,3})\s*(?:hz|赫兹)?", lowered):
+            return f"{match.group(1)}Hz"
+    if key == "resolution":
+        resolution_aliases = {
+            "2k": "2560x1440",
+            "1440p": "2560x1440",
+            "4k": "4K",
+            "1080p": "1080p",
+        }
+        return resolution_aliases.get(lowered.replace(" ", ""), stripped)
+    if key in {"microphone", "backlit"}:
+        if lowered in {"true", "yes", "1", "有", "带", "是"}:
+            return "Yes"
+        if lowered in {"false", "no", "0", "无", "不带", "否"}:
+            return "No"
     return stripped
 
 
@@ -1165,6 +1255,92 @@ def _compare_term_score(product: ProductCard, terms: list[str]) -> int:
 def _brands_for_item(item: str, brands: list[str]) -> list[str]:
     item_lower = item.lower()
     return [brand for brand in brands if brand.lower() in item_lower]
+
+
+def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
+    normalized_request = _normalize_facet_request(request)
+    filters, normalization_debug = _normalize_catalog_filters_with_debug(
+        normalized_request.filters
+    )
+    spec_key = (
+        _normalize_filter_key(normalized_request.spec_key)
+        if normalized_request.spec_key
+        else None
+    )
+    category = _canonical_category(normalized_request.category)
+    plan = FacetQueryPlan(
+        query=normalized_request.query,
+        facet=normalized_request.facet,
+        category=category,
+        brand=normalized_request.brand,
+        spec_key=spec_key,
+        min_price=normalized_request.min_price,
+        max_price=normalized_request.max_price,
+        filters={key.lower(): str(value) for key, value in filters.items()},
+        limit=normalized_request.limit,
+        normalization_debug=normalization_debug,
+    )
+
+    if category and category not in ALLOWED_CATEGORIES:
+        plan.supported = False
+        plan.unsupported_reason = f"unsupported category: {category}"
+        return plan
+
+    unknown_filters = {key for key in plan.filters if key.lower() not in ALLOWED_FILTERS}
+    if unknown_filters:
+        plan.supported = False
+        plan.unsupported_reason = (
+            "unsupported catalog filters: " + ", ".join(sorted(unknown_filters))
+        )
+        return plan
+
+    if spec_key and spec_key.lower() not in ALLOWED_FILTERS:
+        plan.supported = False
+        plan.unsupported_reason = f"unsupported spec_key: {spec_key}"
+        return plan
+
+    if plan.facet == "spec_value" and not spec_key:
+        plan.supported = False
+        plan.unsupported_reason = "spec_value facet requires spec_key"
+        return plan
+
+    if category and category in CATEGORY_FILTERS:
+        allowed = CATEGORY_FILTERS[category]
+        disallowed_filters = {key for key in plan.filters if key.lower() not in allowed}
+        if disallowed_filters:
+            plan.supported = False
+            plan.unsupported_reason = (
+                f"unsupported filters for {category}: "
+                + ", ".join(sorted(disallowed_filters))
+            )
+            return plan
+        if spec_key and spec_key.lower() not in allowed:
+            plan.supported = False
+            plan.unsupported_reason = f"unsupported spec_key for {category}: {spec_key}"
+            return plan
+
+    if plan.min_price is not None and plan.min_price < 0:
+        plan.supported = False
+        plan.unsupported_reason = "min_price cannot be negative"
+        return plan
+    if plan.max_price is not None and plan.max_price < 0:
+        plan.supported = False
+        plan.unsupported_reason = "max_price cannot be negative"
+        return plan
+    if (
+        plan.min_price is not None
+        and plan.max_price is not None
+        and plan.min_price > plan.max_price
+    ):
+        plan.supported = False
+        plan.unsupported_reason = "min_price cannot be greater than max_price"
+        return plan
+
+    if reason := _unsupported_reason(plan.query):
+        plan.supported = False
+        plan.unsupported_reason = reason
+
+    return plan
 
 
 def _normalize_facet_request(request: CatalogFacetInput) -> CatalogFacetInput:
