@@ -92,7 +92,16 @@ Stable error codes exposed to orchestrator:
 - PostgreSQL。
 - 主要表：`sku`, `spu`, `brand`, `category`, `attribute_key`, `attribute_value`, `goods_attribute_relation`。
 
-输入：
+Orchestrator 可见的 public input：
+
+```json
+{
+  "query": "Logitech wireless mouse under 300",
+  "limit": 3
+}
+```
+
+以下是 Tool 内部 Planner 使用的 internal input，不向 Orchestrator 暴露：
 
 ```json
 {
@@ -119,7 +128,7 @@ Stable error codes exposed to orchestrator:
 }
 ```
 
-字段说明：
+内部字段说明：
 
 - `query`：必填，自然语言需求。
 - `category`：可选，类目过滤。
@@ -130,6 +139,8 @@ Stable error codes exposed to orchestrator:
 - `min_price` / `max_price`：可选，价格范围。
 - `filters`：可选，规格过滤，例如 `wireless`, `connection_type`。
 - `limit`：默认 `3`，范围 `1..20`。
+
+主编排不得生成上述内部结构化字段；完整约束留在 public `query`，由 Tool Planner 统一解析。
 
 输出：
 
@@ -271,11 +282,11 @@ Stable error codes exposed to orchestrator:
 - PostgreSQL。
 - 主要表：`app_user`, `order_info`, `order_item`, `order_logistics`。
 
-输入：
+Orchestrator 可见的 public input：
 
 ```json
 {
-  "user_id": 1,
+  "query": "查询订单 202607020001 的物流",
   "order_id": 202607020001,
   "limit": 5
 }
@@ -283,9 +294,10 @@ Stable error codes exposed to orchestrator:
 
 字段说明：
 
-- `user_id`：必填，必须由主流程从登录态或可信上下文传入。
+- `query`：可选，自然语言订单请求；Tool 可以从中提取明确的长数字订单号。
 - `order_id`：可选。有订单号时查询单个订单。
 - `limit`：无订单号时返回最近 N 个订单摘要，默认 `5`，范围 `1..20`。
+- `user_id`：不属于 public input，由可信 Runtime 注入 internal input，Orchestrator 不得提供。
 
 有 `order_id` 输出：
 
@@ -351,7 +363,7 @@ Stable error codes exposed to orchestrator:
 
 用途：
 
-- 检索售后、退换货、退款、保修、价保、发票、发货等政策问题。
+- 检索售后、退换货、退款、保修、价保、发票、发货、用户隐私与数据访问等政策问题。
 
 数据来源：
 
@@ -480,13 +492,14 @@ backend/data/knowledge_documents.json
 backend/data/knowledge_vector_index.json
 ```
 
-当前包含 5 篇：
+当前包含 6 篇：
 
 - `PC 外设售后与退换货政策`，类型 `policy`
 - `订单发货、物流、价保与发票规则`，类型 `store_rule`
 - `PC 外设商城常见问题 FAQ`，类型 `faq`
 - `PC 外设选购知识指南`，类型 `peripheral_knowledge`
 - `品牌与商家知识说明`，类型 `brand`
+- `用户隐私与数据访问规则`，类型 `policy`
 
 文档格式：
 
@@ -598,7 +611,16 @@ LLM-safe name：`catalog_facets`
 
 Registry name：`catalog.facets`
 
-输入示例：
+Orchestrator 可见的 public input：
+
+```json
+{
+  "query": "你们卖哪些品牌的鼠标",
+  "limit": 20
+}
+```
+
+Tool 内部推导的 facet plan 示例，不向 Orchestrator 暴露：
 
 ```json
 {
@@ -620,6 +642,9 @@ Registry name：`catalog.facets`
 - `category`：返回某品牌/条件下有哪些类目及数量。
 - `spec_key`：返回某类目/条件下有哪些规格字段。
 - `spec_value`：返回某个规格字段有哪些可选值，例如 `switches`、`refresh_rate`、`resolution`。
+
+主编排只选择 `catalog_facets` 并保留完整 `query`，不自行猜测 `facet`、`category`、`brand`
+或 `spec_key`。
 
 输出示例：
 

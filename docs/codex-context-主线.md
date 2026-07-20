@@ -97,8 +97,8 @@ priority: P0
 
 - 前端调用 `frontend/src/api.ts`，默认同源请求 `/api`，开发环境由 Vite proxy 转发到 `http://127.0.0.1:8000`。
 - `/api/chat` 接收用户问题后进入 `AgentRuntime`。
-- LangGraph 主流程为 `load_context -> orchestrate -> dispatch_decision`；需要业务事实时进入 `execute_tool_wave -> orchestrate` 循环，形成终态后经 `finalize_response/render_* -> persist_turn` 返回。
-- `orchestrate` 使用完整 `AIMessage` 选择原生 Tool Call 或直接回复；LLM 不做 token/chunk 流式输出。
+- LangGraph 主流程为 `load_context -> orchestrate -> dispatch_decision`；需要业务事实时进入 `execute_tool_wave -> normalize_tool_results -> update_subquery_ledger -> orchestrate` 循环，形成结构化控制终态后经 `terminal_guard -> finalize_response/render_* -> persist_turn` 返回。
+- `orchestrate` 使用完整 `AIMessage` 选择带 `subquery` 编排元数据的原生业务 Tool Call，或选择原生控制 Tool Call；普通文本终止无效，LLM 不做 token/chunk 流式输出。
 - 商品、订单、物流、政策和知识事实由只读 Tool 提供；Tool Result 可投影为 products、order 和 evidence。
 - `persist_turn` 写入用户消息、助手消息、agent run、工具调用和记忆变更。
 - 售后办理当前不由 Agent 自动执行；前端会通过聊天入口触发人工接管提示，`/api/after-sales` 保留但降级为 `409 human_handoff_required`。
