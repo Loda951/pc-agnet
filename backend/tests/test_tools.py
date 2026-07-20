@@ -1356,6 +1356,23 @@ async def test_policy_and_knowledge_search_support_hybrid_retrieval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_policy_search_finds_customer_privacy_boundary() -> None:
+    service = _knowledge_service()
+
+    result = await service.search_policy(
+        DocumentSearchInput(
+            query="查询其他用户购买记录和客户名单的隐私规则",
+            retrieval_mode="bm25",
+            limit=3,
+        )
+    )
+
+    assert result.result_type == "documents"
+    assert result.documents[0].title == "用户隐私与数据访问规则"
+    assert "不得查询、披露、汇总或推断其他用户" in result.documents[0].snippet
+
+
+@pytest.mark.asyncio
 async def test_document_search_can_select_retrieval_mode() -> None:
     service = _knowledge_service()
     bm25 = await service.search_knowledge(
