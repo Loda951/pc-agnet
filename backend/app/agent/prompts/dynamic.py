@@ -3,6 +3,11 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.agent.outcomes import (
+    build_subquery_ledger,
+    is_active_ledger_entry,
+    normalize_tool_result,
+)
 from app.agent.prompts.static import ORCHESTRATOR_BASE_PROMPT
 
 FAILURE_ACTION_RULES = {
@@ -11,8 +16,8 @@ FAILURE_ACTION_RULES = {
         "应说明暂时无法查询。"
     ),
     "replan_arguments": (
-        "阅读结构化 invalid_input 信息，修正参数后最多重新调用一次；不得原样重交无效参数。"
-        "无法确定合法参数时，向用户提出一个具体澄清问题。"
+        "阅读结构化 invalid_input 信息，只修正被明确指出的非 query 参数并最多重新调用一次；"
+        "canonical_query 不得改变。无法确定合法参数时，向用户提出一个具体澄清问题。"
     ),
     "explain_temporary_unavailability": (
         "不要继续调用依赖同一服务的 Tool；保留其他成功结果，并向用户说明对应信息暂时无法查询。"
@@ -101,12 +106,17 @@ def build_orchestrator_user_prompt(
     tool_wave_count: int,
     orchestrator_call_count: int,
     memory_context: dict[str, Any] | None = None,
+    subquery_ledger: Sequence[Mapping[str, Any]] | None = None,
+    terminal_guard_feedback: str | None = None,
 ) -> str:
     execution_state = {
         "completed_tool_waves": tool_wave_count,
+        "remaining_tool_waves": max(0, 2 - tool_wave_count),
         "current_orchestrator_call": orchestrator_call_count,
+        "remaining_orchestrator_calls": max(0, 3 - orchestrator_call_count),
         "maximum_tool_waves": 2,
         "maximum_orchestrator_calls": 3,
+        "must_terminate_now": tool_wave_count >= 2 or orchestrator_call_count >= 3,
     }
     parts = [
         "<current_request>",
@@ -124,6 +134,29 @@ def build_orchestrator_user_prompt(
                 "</memory_context>",
             ]
         )
+    if subquery_ledger:
+        parts.extend(
+            [
+                "<subquery_ledger>",
+                json.dumps(
+                    list(subquery_ledger),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+                "</subquery_ledger>",
+            ]
+        )
+    if terminal_guard_feedback:
+        parts.extend(
+            [
+                "<terminal_guard_feedback>",
+                json.dumps(terminal_guard_feedback, ensure_ascii=False),
+                "上一终止动作未通过运行时校验。请根据原因改用一个合法控制动作；"
+                "不要重复原输出。",
+                "</terminal_guard_feedback>",
+            ]
+        )
     return "\n".join(parts)
 
 
@@ -138,6 +171,11 @@ def _collect_failures(
     normalized_results: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     seen_result_ids: set[str] = set()
     has_success = False
+    active_ids = {
+        entry.tool_call_id
+        for entry in build_subquery_ledger(tool_waves)
+        if is_active_ledger_entry(entry.model_dump(mode="json"))
+    }
 
     for wave in tool_waves:
         calls = {
@@ -166,8 +204,11 @@ def _collect_failures(
         execution = result.get("execution")
         if not isinstance(execution, Mapping):
             continue
-        if execution.get("ok"):
+        result_id = str(result.get("tool_call_id") or "")
+        is_active = not active_ids or result_id in active_ids
+        if is_active and normalize_tool_result(result).has_usable_information:
             has_success = True
+        if execution.get("ok"):
             continue
         error = execution.get("error")
         if not isinstance(error, Mapping):

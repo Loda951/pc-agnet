@@ -18,6 +18,11 @@ class AgentState(TypedDict, total=False):
     tool_wave_count: int
     tool_waves: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
+    normalized_tool_results: list[dict[str, Any]]
+    subquery_ledger: list[dict[str, Any]]
+    terminal_guard_replan_count: int
+    terminal_guard_feedback: str
+    terminal_guard_status: str
     boundary: dict[str, Any]
     parsed: dict[str, Any]
     history: list[dict[str, str]]

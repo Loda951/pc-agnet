@@ -41,6 +41,8 @@ ORDER_CHANGE_WRITE_TERMS = [
     "催发货",
     "补发",
 ]
+ORDER_CHANGE_ACTION_TERMS = ["取消", "撤销", "修改", "更改", "改", "换", "催", "补发"]
+ORDER_CHANGE_OBJECT_TERMS = ["订单", "收货地址", "收货信息", "地址", "发货", "快递"]
 PURCHASE_ACTION_TERMS = [
     "下单",
     "支付",
@@ -59,6 +61,12 @@ PURCHASE_INFO_TERMS = [
     "哪里",
     "在哪",
     "说明",
+    "条件",
+    "要求",
+    "是否",
+    "能否",
+    "能不能",
+    "可以",
 ]
 OUT_OF_SCOPE_TERMS = [
     "天气",
@@ -183,13 +191,31 @@ def _requires_human_handoff(message: str, compact: str) -> bool:
 
 
 def _requires_order_handoff(message: str, compact: str) -> bool:
-    if any(term in compact for term in ORDER_CHANGE_WRITE_TERMS):
+    asks_for_info = any(term in compact for term in PURCHASE_INFO_TERMS)
+    has_known_write_phrase = any(term in compact for term in ORDER_CHANGE_WRITE_TERMS)
+    has_action = any(term in compact for term in ORDER_CHANGE_ACTION_TERMS)
+    has_object = any(term in compact for term in ORDER_CHANGE_OBJECT_TERMS)
+    has_order_change = has_known_write_phrase or (has_action and has_object)
+    explicit_order_change = re.search(
+        r"(帮我|给我|替我|代我|麻烦|请|我要|我想|需要|现在|马上|直接)"
+        r".{0,12}(取消|撤销|修改|更改|改|换|催|补发)"
+        r".{0,12}(订单|收货地址|收货信息|地址|发货|快递)",
+        message,
+    )
+    explicit_reverse_order_change = re.search(
+        r"(订单|收货地址|收货信息|地址|发货|快递).{0,10}"
+        r"(帮我|给我|替我|代我|麻烦|请).{0,6}"
+        r"(取消|撤销|修改|更改|改|换|催|补发)",
+        message,
+    )
+    if has_order_change and (
+        explicit_order_change or explicit_reverse_order_change or not asks_for_info
+    ):
         return True
 
     if not any(term in compact for term in PURCHASE_ACTION_TERMS):
         return False
 
-    asks_for_info = any(term in compact for term in PURCHASE_INFO_TERMS)
     explicit_agent_action = re.search(
         r"(帮我|给我|替我|代我|客服|你).{0,8}(下单|支付|付款|提交订单|结算)",
         message,

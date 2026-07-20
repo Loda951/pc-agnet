@@ -1,8 +1,8 @@
 import asyncio
+import copy
 import json
 import re
 from collections.abc import AsyncIterator
-from decimal import Decimal
 from typing import Any
 
 from langchain_core.messages import (
@@ -19,14 +19,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.decisions import (
     OrchestratorDecision,
     PlannedToolCall,
+    control_tool_definitions,
     decision_from_ai_message,
+    infer_tool_subquery,
 )
 from app.agent.intent import (
     boundary_for_classification,
-    build_product_search,
     classify_boundary,
     classify_intent,
     extract_order_id,
+)
+from app.agent.outcomes import (
+    active_usable_tool_call_ids,
+    build_subquery_ledger,
+    is_active_ledger_entry,
+    normalize_tool_result,
+    query_fingerprint,
+    tool_call_fingerprint,
+    validate_terminal_decision,
 )
 from app.agent.prompts import (
     build_orchestrator_system_prompt,
@@ -36,7 +46,7 @@ from app.agent.state import AgentState
 from app.core.config import Settings
 from app.core.llm import build_chat_model
 from app.repositories.conversations import ConversationRepository
-from app.schemas.catalog import ProductCard, ProductSearchRequest
+from app.schemas.catalog import ProductCard
 from app.schemas.chat import (
     BoundaryClassification,
     ChatRequest,
@@ -57,31 +67,12 @@ from app.tools.contracts import (
 )
 from app.tools.schemas import (
     CatalogCompareInput,
-    CatalogSearchInput,
     ToolError,
     ToolExecutionResult,
 )
 
 MAX_ORCHESTRATOR_CALLS = 3
 MAX_TOOL_WAVES = 2
-
-
-class _RegistryCompatibilityExecutor:
-    """Adapt the pre-contract ToolRegistry seam used by existing runtime tests."""
-
-    def __init__(self, registry: Any):
-        self.registry = registry
-
-    async def execute(
-        self,
-        contract: ToolContract,
-        arguments: dict[str, Any],
-        runtime_context: dict[str, Any],
-    ) -> ToolExecutionResult:
-        internal_arguments = dict(arguments)
-        for field_name in contract.runtime_fields:
-            internal_arguments[field_name] = runtime_context[field_name]
-        return await self.registry.execute(contract.registry_name, internal_arguments)
 
 
 class AgentRuntime:
@@ -95,27 +86,23 @@ class AgentRuntime:
         chat_model: Any | None = None,
         context_service: ConversationContextService | None = None,
         memory_service: MemoryService | None = None,
-        tool_registry: Any | None = None,
-        knowledge_service: Any | None = None,
     ):
         self.session = session
         self.settings = settings
         self.contract_provider = contract_provider or DefaultToolContractProvider()
-        self.tool_executor = (
-            tool_executor
-            or (
-                _RegistryCompatibilityExecutor(tool_registry)
-                if tool_registry is not None
-                else RegistryToolExecutor(session, settings)
-            )
-        )
+        self.tool_executor = tool_executor or RegistryToolExecutor(session, settings)
         self.context_service = context_service or ConversationContextService(session, settings)
         self.memory_service = memory_service or MemoryService()
-        self.knowledge_service = knowledge_service
         self.llm = chat_model if chat_model is not None else build_chat_model(settings)
         self.orchestrator = (
             self.llm.bind_tools(
-                [contract.as_llm_tool() for contract in self.contract_provider.list_contracts()]
+                [
+                    *(
+                        _orchestrator_business_tool_definition(contract)
+                        for contract in self.contract_provider.list_contracts()
+                    ),
+                    *control_tool_definitions(),
+                ]
             )
             if self.llm
             else None
@@ -191,6 +178,8 @@ class AgentRuntime:
             "tool_wave_count": 0,
             "tool_waves": [],
             "tool_results": [],
+            "subquery_ledger": [],
+            "terminal_guard_replan_count": 0,
             "parsed": {},
             "products": [],
             "evidence": [],
@@ -202,6 +191,9 @@ class AgentRuntime:
         workflow.add_node("load_context", self._load_context)
         workflow.add_node("orchestrate", self._orchestrate)
         workflow.add_node("execute_tool_wave", self._execute_tool_wave)
+        workflow.add_node("normalize_tool_results", self._normalize_tool_results)
+        workflow.add_node("update_subquery_ledger", self._update_subquery_ledger)
+        workflow.add_node("terminal_guard", self._terminal_guard)
         workflow.add_node("finalize_response", self._finalize_response)
         workflow.add_node("render_handoff_template", self._render_handoff_template)
         workflow.add_node("render_out_of_scope_template", self._render_out_of_scope_template)
@@ -214,12 +206,22 @@ class AgentRuntime:
             self._dispatch_decision,
             {
                 "execute": "execute_tool_wave",
+                "guard": "terminal_guard",
+            },
+        )
+        workflow.add_edge("execute_tool_wave", "normalize_tool_results")
+        workflow.add_edge("normalize_tool_results", "update_subquery_ledger")
+        workflow.add_edge("update_subquery_ledger", "orchestrate")
+        workflow.add_conditional_edges(
+            "terminal_guard",
+            self._dispatch_terminal_guard,
+            {
+                "replan": "orchestrate",
                 "respond": "finalize_response",
                 "handoff": "render_handoff_template",
                 "out_of_scope": "render_out_of_scope_template",
             },
         )
-        workflow.add_edge("execute_tool_wave", "orchestrate")
         workflow.add_edge("finalize_response", "persist_turn")
         workflow.add_edge("render_handoff_template", "persist_turn")
         workflow.add_edge("render_out_of_scope_template", "persist_turn")
@@ -245,31 +247,30 @@ class AgentRuntime:
         call_count = state.get("orchestrator_call_count", 0) + 1
         boundary = classify_boundary(state["message"])
         if boundary.classification == "human_handoff_required":
-            decision = OrchestratorDecision(type="handoff", reason=boundary.reason)
+            decision = OrchestratorDecision(
+                type="handoff",
+                reason=boundary.reason,
+                control_action="request_handoff",
+            )
         elif boundary.classification == "out_of_scope":
-            decision = OrchestratorDecision(type="out_of_scope", reason=boundary.reason)
+            decision = OrchestratorDecision(
+                type="out_of_scope",
+                reason=boundary.reason,
+                control_action="reject_out_of_scope",
+            )
         elif call_count > MAX_ORCHESTRATOR_CALLS:
-            decision = _limit_decision()
+            decision = _state_terminal_decision(state, "orchestration_limit_reached")
         elif self.orchestrator:
             try:
                 decision = await self._invoke_orchestrator_decision(state, call_count)
             except (ValidationError, ValueError, TypeError) as exc:
                 reason = f"invalid_orchestrator_response:{type(exc).__name__}"
-                if _has_successful_tool_result(state):
-                    decision = OrchestratorDecision(
-                        type="grounded_response",
-                        response=_fallback_answer(state),
-                        reason=reason,
-                    )
-                else:
-                    decision = OrchestratorDecision(
-                        type="clarification",
-                        response=(
-                            "我还不能准确判断你的需求。"
-                            "请补充具体商品、订单或想咨询的问题。"
-                        ),
-                        reason=reason,
-                    )
+                decision = OrchestratorDecision(type="invalid", reason=reason)
+            except Exception as exc:
+                if not state.get("tool_results"):
+                    raise
+                reason = f"orchestrator_unavailable:{type(exc).__name__}"
+                decision = _state_terminal_decision(state, reason)
         else:
             decision = self._fallback_orchestrator_decision(state)
 
@@ -292,7 +293,6 @@ class AgentRuntime:
             raise TypeError("orchestrator returned a non-AI message")
         return decision_from_ai_message(
             message,
-            has_successful_tool_results=_has_successful_tool_result(state),
         )
 
     def _validate_decision_budget(
@@ -310,26 +310,44 @@ class AgentRuntime:
         if not decision.tool_calls or any(
             call.name not in known_tools for call in decision.tool_calls
         ):
-            return OrchestratorDecision(
-                type="clarification",
-                response="我暂时无法安全选择业务工具，请换一种方式描述你的需求。",
-                reason="unknown_or_empty_tool_call",
+            if state.get("tool_results"):
+                return _state_terminal_decision(state, "unknown_or_empty_tool_call")
+            return _clarification_decision(
+                "我暂时无法安全选择业务工具，请换一种方式描述你的需求。",
+                "unknown_or_empty_tool_call",
             )
+        decision = decision.model_copy(
+            update={
+                "tool_calls": _unique_tool_call_ids(
+                    decision.tool_calls,
+                    state.get("tool_waves", []),
+                    call_count,
+                )
+            }
+        )
         if state.get("tool_wave_count", 0) >= MAX_TOOL_WAVES or (
             call_count >= MAX_ORCHESTRATOR_CALLS
         ):
-            return _limit_decision()
+            return _state_terminal_decision(state, "orchestration_limit_reached")
+        if state.get("tool_wave_count", 0) > 0:
+            allowed_calls: list[PlannedToolCall] = []
+            for call in decision.tool_calls:
+                try:
+                    effective_call, _ = self._prepare_tool_call(state, call)
+                except ValidationError:
+                    continue
+                if _followup_tool_call_allowed(state, effective_call):
+                    allowed_calls.append(call)
+            if not allowed_calls:
+                return _state_terminal_decision(state, "unnecessary_or_invalid_followup")
+            decision = decision.model_copy(update={"tool_calls": allowed_calls})
         return decision
 
     def _dispatch_decision(self, state: AgentState) -> str:
         decision_type = state["decision"]["type"]
         if decision_type == "tool_calls":
             return "execute"
-        if decision_type == "handoff":
-            return "handoff"
-        if decision_type == "out_of_scope":
-            return "out_of_scope"
-        return "respond"
+        return "guard"
 
     async def _execute_tool_wave(self, state: AgentState) -> AgentState:
         decision = OrchestratorDecision.model_validate(state["decision"])
@@ -341,6 +359,7 @@ class AgentRuntime:
         for planned_call in decision.tool_calls:
             call = planned_call
             execution: ToolExecutionResult | None = None
+            reused_from_tool_call_id: str | None = None
             try:
                 call, applied_memory_ids = self._prepare_tool_call(state, planned_call)
             except ValidationError as exc:
@@ -361,6 +380,10 @@ class AgentRuntime:
                             [*state.get("applied_memory_ids", []), *applied_memory_ids]
                         )
                     )
+                reusable = _find_reusable_tool_result(state, call)
+                if reusable is not None:
+                    reused_from_tool_call_id = str(reusable["tool_call_id"])
+                    execution = ToolExecutionResult.model_validate(reusable["execution"])
             writer(
                 {
                     "kind": "tool_call",
@@ -405,15 +428,17 @@ class AgentRuntime:
                         )
 
             call_json = call.model_dump(mode="json")
+            call_json["fingerprint"] = tool_call_fingerprint(call.name, call.arguments)
             execution_json = execution.model_dump(mode="json")
             calls.append(call_json)
-            results.append(
-                {
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "execution": execution_json,
-                }
-            )
+            result_json = {
+                "tool_call_id": call.id,
+                "name": call.name,
+                "execution": execution_json,
+            }
+            if reused_from_tool_call_id is not None:
+                result_json["reused_from_tool_call_id"] = reused_from_tool_call_id
+            results.append(result_json)
             writer(
                 {
                     "kind": "tool_call",
@@ -423,12 +448,13 @@ class AgentRuntime:
                     "output": execution_json,
                 }
             )
-            await repo.add_tool_call(
-                state["run_id"],
-                call.name,
-                call.arguments,
-                execution_json,
-            )
+            if reused_from_tool_call_id is None:
+                await repo.add_tool_call(
+                    state["run_id"],
+                    call.name,
+                    call.arguments,
+                    execution_json,
+                )
             _apply_tool_output(state, call, execution)
 
         wave = {
@@ -441,53 +467,127 @@ class AgentRuntime:
         state["tool_wave_count"] = wave["wave"]
         return state
 
+    async def _normalize_tool_results(self, state: AgentState) -> AgentState:
+        state["normalized_tool_results"] = [
+            normalize_tool_result(result).model_dump(mode="json")
+            for result in state.get("tool_results", [])
+        ]
+        return state
+
+    async def _update_subquery_ledger(self, state: AgentState) -> AgentState:
+        state["subquery_ledger"] = [
+            entry.model_dump(mode="json")
+            for entry in build_subquery_ledger(state.get("tool_waves", []))
+        ]
+        _rebuild_tool_projections(state)
+        return state
+
+    async def _terminal_guard(self, state: AgentState) -> AgentState:
+        decision = OrchestratorDecision.model_validate(state["decision"])
+        validation = validate_terminal_decision(
+            decision,
+            state.get("subquery_ledger", []),
+            allow_direct=_is_safe_direct_request(state["message"]),
+        )
+        if validation.valid:
+            if decision.control_action in {"finish_answer", "finish_partial"}:
+                used_ids = set(decision.used_tool_call_ids)
+                for entry in state.get("subquery_ledger", []):
+                    if str(entry.get("tool_call_id") or "") in used_ids:
+                        entry["status"] = "answered"
+            if decision.control_action == "finish_unavailable":
+                decision.response = _fallback_unavailable_answer(state)
+                state["decision"] = decision.model_dump(mode="json")
+            state["terminal_guard_status"] = "accepted"
+            state.pop("terminal_guard_feedback", None)
+            return state
+
+        if _usable_tool_call_ids(state):
+            fallback = _terminal_fallback_decision(state, validation.reason)
+            state["decision"] = fallback.model_dump(mode="json")
+            state["intent"] = _tag_from_decision(fallback, state.get("intent"))
+            state["boundary"] = _boundary_from_decision(fallback)
+            state["terminal_guard_status"] = "fallback"
+            return state
+
+        can_replan = (
+            state.get("terminal_guard_replan_count", 0) < 1
+            and state.get("orchestrator_call_count", 0) < MAX_ORCHESTRATOR_CALLS
+            and self.orchestrator is not None
+        )
+        if can_replan:
+            state["terminal_guard_replan_count"] = (
+                state.get("terminal_guard_replan_count", 0) + 1
+            )
+            state["terminal_guard_feedback"] = validation.reason
+            state["terminal_guard_status"] = "replan"
+            return state
+
+        fallback = _terminal_fallback_decision(state, validation.reason)
+        state["decision"] = fallback.model_dump(mode="json")
+        state["intent"] = _tag_from_decision(fallback, state.get("intent"))
+        state["boundary"] = _boundary_from_decision(fallback)
+        state["terminal_guard_status"] = "fallback"
+        return state
+
+    def _dispatch_terminal_guard(self, state: AgentState) -> str:
+        if state.get("terminal_guard_status") == "replan":
+            return "replan"
+        decision_type = state["decision"]["type"]
+        if decision_type == "handoff":
+            return "handoff"
+        if decision_type == "out_of_scope":
+            return "out_of_scope"
+        return "respond"
+
     def _prepare_tool_call(
         self,
         state: AgentState,
         call: PlannedToolCall,
     ) -> tuple[PlannedToolCall, list[int]]:
-        if call.name == "catalog_search":
-            request = CatalogSearchInput.model_validate(
-                _normalize_catalog_search_arguments(call.arguments)
-            )
-            catalog_input, applied_memory_ids = _catalog_search_input(state, request)
-            return (
-                call.model_copy(
-                    update={"arguments": catalog_input.model_dump(mode="json")}
-                ),
-                applied_memory_ids,
-            )
+        arguments = dict(call.arguments)
 
         if call.name == "catalog_compare":
-            request = CatalogCompareInput.model_validate(call.arguments)
+            request = CatalogCompareInput.model_validate(arguments)
             resolved_sku_ids = _resolve_compare_sku_ids(
                 state["message"], state.get("working_memory", {})
             )
             if resolved_sku_ids:
                 request = request.model_copy(update={"sku_ids": resolved_sku_ids})
-            return call.model_copy(update={"arguments": request.model_dump(mode="json")}), []
+            arguments = request.model_dump(mode="json", exclude_none=True)
 
-        if call.name == "order_lookup":
-            arguments = dict(call.arguments)
+        elif call.name == "order_lookup":
+            arguments.setdefault("query", state["message"])
             arguments["order_id"] = _resolve_order_id(
                 state["message"],
                 arguments.get("order_id"),
                 state.get("working_memory", {}),
                 self.memory_service,
             )
-            return call.model_copy(update={"arguments": arguments}), []
 
-        if call.name in {"policy_search", "knowledge_search"} and _is_v2_policy_followup(
+        elif call.name in {"policy_search", "knowledge_search"} and _is_v2_policy_followup(
             state["message"], state.get("working_memory", {})
         ):
-            arguments = dict(call.arguments)
             arguments["query"] = self.memory_service.resolve_knowledge_query(
                 state["message"],
                 _knowledge_memory_view(state.get("working_memory", {})),
             )
-            return call.model_copy(update={"arguments": arguments}), []
 
-        return call, []
+        contract = self.contract_provider.get_contract(call.name)
+        if contract is None:
+            return call.model_copy(update={"arguments": arguments}), []
+        public_input = contract.public_input_model.model_validate(arguments)
+        return (
+            call.model_copy(
+                update={
+                    "arguments": public_input.model_dump(
+                        mode="json",
+                        exclude_none=True,
+                    )
+                }
+            ),
+            [],
+        )
 
     async def _finalize_response(self, state: AgentState) -> AgentState:
         decision = OrchestratorDecision.model_validate(state["decision"])
@@ -514,6 +614,7 @@ class AgentRuntime:
             "intent": state["intent"],
             "decision": state["decision"],
             "boundary": state["boundary"],
+            "subquery_ledger": state.get("subquery_ledger", []),
             "evidence": _dump_evidence(state.get("evidence", [])),
             "products": [
                 product.model_dump(mode="json") for product in state.get("products", [])
@@ -555,17 +656,36 @@ class AgentRuntime:
                     "order_lookup",
                     {"order_id": order_candidates[0]["id"], "limit": 1},
                 )
+            usable_ids = _usable_tool_call_ids(state)
+            if usable_ids:
+                return OrchestratorDecision(
+                    type="grounded_response",
+                    response=_fallback_answer(state),
+                    reason="llm_not_configured",
+                    control_action="finish_answer",
+                    used_tool_call_ids=usable_ids,
+                )
             return OrchestratorDecision(
-                type="grounded_response",
-                response=_fallback_answer(state),
+                type="unavailable_response",
+                response=_fallback_unavailable_answer(state),
                 reason="llm_not_configured",
+                control_action="finish_unavailable",
+                unavailable_parts=["请求所需的业务信息"],
             )
 
         boundary = classify_boundary(state["message"])
         if boundary.classification == "human_handoff_required":
-            return OrchestratorDecision(type="handoff", reason=boundary.reason)
+            return OrchestratorDecision(
+                type="handoff",
+                reason=boundary.reason,
+                control_action="request_handoff",
+            )
         if boundary.classification == "out_of_scope":
-            return OrchestratorDecision(type="out_of_scope", reason=boundary.reason)
+            return OrchestratorDecision(
+                type="out_of_scope",
+                reason=boundary.reason,
+                control_action="reject_out_of_scope",
+            )
         if _is_identity_or_capability_question(state["message"]):
             return OrchestratorDecision(
                 type="direct_response",
@@ -574,6 +694,7 @@ class AgentRuntime:
                     "以及说明售后政策和选购知识。"
                 ),
                 reason="identity_or_capability_question",
+                control_action="finish_direct",
             )
 
         if facet_arguments := _fallback_catalog_facets_arguments(state["message"]):
@@ -597,16 +718,18 @@ class AgentRuntime:
                         "limit": 5,
                     },
                 )
-            search = build_product_search(state["message"])
-            catalog_input, applied_memory_ids = _catalog_search_input(state, search)
-            state["applied_memory_ids"] = applied_memory_ids
             return _tool_decision(
-                "catalog_search", catalog_input.model_dump(mode="json")
+                "catalog_search",
+                {
+                    "query": _fallback_catalog_query(state),
+                    "limit": 3,
+                },
             )
         if intent == "order_status":
             return _tool_decision(
                 "order_lookup",
                 {
+                    "query": state["message"],
                     "order_id": _resolve_order_id(
                         state["message"],
                         extract_order_id(state["message"]),
@@ -633,34 +756,12 @@ class AgentRuntime:
                 type="direct_response",
                 response=_purchase_guidance_answer(),
                 reason="read_only_purchase_guidance",
+                control_action="finish_direct",
             )
         return _tool_decision(
             "knowledge_search",
             {"query": state["message"], "limit": 3, "retrieval_mode": "hybrid"},
         )
-
-    async def _route_intent(self, state: AgentState) -> AgentState:
-        """Compatibility seam for deterministic context-routing tests."""
-        intent = _contextual_intent(
-            state["message"],
-            state.get("working_memory", {}),
-            self.memory_service,
-        )
-        parsed: dict[str, Any] = {}
-        if intent == "product_recommendation":
-            parsed["product_search"] = build_product_search(
-                state["message"]
-            ).model_dump(mode="json")
-        elif intent == "order_status":
-            parsed["order_id"] = _resolve_order_id(
-                state["message"],
-                extract_order_id(state["message"]),
-                state.get("working_memory", {}),
-                self.memory_service,
-            )
-        state["intent"] = intent
-        state["parsed"] = parsed
-        return state
 
     async def _mark_run_failed(
         self, state: AgentState, error_type: str, message: str
@@ -734,24 +835,6 @@ def _contextual_intent(
     return intent
 
 
-def _normalize_catalog_search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(arguments)
-    connection_type = normalized.pop("connection_type", None)
-    filters = normalized.get("filters")
-    if connection_type is not None and (filters is None or isinstance(filters, dict)):
-        normalized_filters = dict(filters or {})
-        normalized_filters.setdefault("connection_type", connection_type)
-        normalized["filters"] = normalized_filters
-    return normalized
-
-
-def _product_search_from_state(state: AgentState) -> ProductSearchRequest:
-    product_search = state.get("parsed", {}).get("product_search")
-    if product_search:
-        return ProductSearchRequest.model_validate(product_search)
-    return build_product_search(state["message"])
-
-
 def _resolve_compare_sku_ids(message: str, working_memory: dict[str, Any]) -> list[int]:
     catalog = working_memory.get("catalog")
     if not isinstance(catalog, dict):
@@ -794,333 +877,6 @@ def _resolve_compare_sku_ids(message: str, working_memory: dict[str, Any]) -> li
     return resolved[:10]
 
 
-def _catalog_search_input(
-    state: AgentState, search: ProductSearchRequest | CatalogSearchInput
-) -> tuple[CatalogSearchInput, list[int]]:
-    working_plan = _working_catalog_query_plan(state.get("working_memory", {}))
-    requested_brands = (
-        _dedupe_text([*search.brands, *([search.brand] if search.brand else [])])
-        if isinstance(search, CatalogSearchInput)
-        else []
-    )
-    explicit_excluded_brands = _dedupe_text(
-        [
-            *_excluded_brands_from_message(
-                state["message"], working_plan, state.get("memory", [])
-            ),
-            *(
-                search.excluded_brands
-                if isinstance(search, CatalogSearchInput)
-                else []
-            ),
-        ]
-    )
-    inferred_brands = [
-        brand
-        for brand in _brands_from_message(
-            state["message"], working_plan, state.get("memory", [])
-        )
-        if brand.lower() not in {item.lower() for item in explicit_excluded_brands}
-    ]
-    explicit_brands = [
-        brand
-        for brand in (requested_brands or inferred_brands)
-        if brand.lower() not in {item.lower() for item in explicit_excluded_brands}
-    ]
-    explicit_excluded_usage = _dedupe_text(
-        [
-            *_excluded_usage_from_message(state["message"]),
-            *(search.excluded_usage if isinstance(search, CatalogSearchInput) else []),
-        ]
-    )
-    explicit_usage = (
-        None
-        if explicit_excluded_usage
-        else (
-            search.usage
-            if isinstance(search, CatalogSearchInput) and search.usage
-            else _usage_from_message(state["message"])
-        )
-    )
-    explicit_filters = dict(search.filters)
-    if _has_negative_term(state["message"], "无线"):
-        explicit_filters["connection_type"] = "Wired"
-    elif _has_negative_term(state["message"], "有线"):
-        explicit_filters["connection_type"] = "Wireless"
-
-    is_v2_followup = bool(working_plan) and _is_v2_product_followup(
-        state["message"], state.get("working_memory", {})
-    )
-    category_changed = False
-    if is_v2_followup:
-        previous_category = _optional_text(working_plan.get("category"))
-        category_changed = bool(search.category) and _catalog_category_key(
-            search.category
-        ) != _catalog_category_key(previous_category)
-        base_filters = (
-            dict(working_plan["filters"])
-            if not category_changed and isinstance(working_plan.get("filters"), dict)
-            else {}
-        )
-        historical_brands = [] if category_changed else _text_list(working_plan.get("brands"))
-        current_brands = explicit_brands or [
-            brand
-            for brand in historical_brands
-            if brand.lower()
-            not in {item.lower() for item in explicit_excluded_brands}
-        ]
-        excluded_brands = _dedupe_text(
-            [
-                *_text_list(working_plan.get("excluded_brands")),
-                *explicit_excluded_brands,
-            ]
-        )
-        included_brands = {brand.lower() for brand in current_brands}
-        excluded_brands = [
-            brand for brand in excluded_brands if brand.lower() not in included_brands
-        ]
-        excluded_usage = _dedupe_text(
-            [
-                *_text_list(working_plan.get("excluded_usage")),
-                *explicit_excluded_usage,
-            ]
-        )
-        current_usage = explicit_usage or (
-            None
-            if category_changed
-            else _optional_text(working_plan.get("usage_scenario"))
-        )
-        if explicit_excluded_usage and current_usage in explicit_excluded_usage:
-            current_usage = None
-        if explicit_usage:
-            excluded_usage = [item for item in excluded_usage if item != explicit_usage]
-        keywords = [] if category_changed else _text_list(working_plan.get("keywords"))
-        if isinstance(search, CatalogSearchInput) and search.keywords:
-            keywords = _dedupe_text(search.keywords)
-        previous_usage = _optional_text(working_plan.get("usage_scenario"))
-        if explicit_usage and explicit_usage != previous_usage:
-            keywords = [item for item in keywords if item != previous_usage]
-            keywords = _dedupe_text([*keywords, explicit_usage])
-        query = (
-            search.query or state["message"]
-            if category_changed
-            else _optional_text(working_plan.get("query"))
-            or search.query
-            or state["message"]
-        )
-        category = search.category or previous_category
-        min_price = (
-            search.min_price
-            if search.min_price is not None
-            else working_plan.get("min_price")
-        )
-        max_price = (
-            search.max_price
-            if search.max_price is not None
-            else working_plan.get("max_price")
-        )
-        current_filters = {**base_filters, **explicit_filters}
-        sort = (
-            search.sort
-            if isinstance(search, CatalogSearchInput)
-            and "sort" in search.model_fields_set
-            else _catalog_sort(working_plan.get("sort"))
-        )
-        limit = _catalog_limit(working_plan.get("limit"), search.limit)
-    else:
-        current_brands = explicit_brands
-        excluded_brands = explicit_excluded_brands
-        excluded_usage = explicit_excluded_usage
-        current_usage = explicit_usage
-        query = search.query or state["message"]
-        category = search.category or _optional_text(working_plan.get("category"))
-        min_price = search.min_price
-        max_price = search.max_price
-        current_filters = explicit_filters
-        keywords = search.keywords if isinstance(search, CatalogSearchInput) else []
-        sort = search.sort if isinstance(search, CatalogSearchInput) else "recommend"
-        limit = search.limit
-
-    preference_defaults, applied_memory_ids = _catalog_preference_defaults(
-        state,
-        current_brands=current_brands,
-        current_max_price=max_price,
-        current_connection=current_filters.get("connection_type"),
-        current_usage=current_usage,
-        current_excluded_brands=excluded_brands,
-        current_excluded_usage=excluded_usage,
-        reset_working_category_defaults=category_changed,
-    )
-    return (
-        CatalogSearchInput(
-            query=query,
-            category=category,
-            brands=current_brands,
-            min_price=min_price,
-            max_price=max_price,
-            filters=current_filters,
-            keywords=keywords,
-            usage=current_usage,
-            sort=sort,
-            excluded_brands=excluded_brands,
-            excluded_usage=excluded_usage,
-            preference_defaults=preference_defaults,
-            limit=limit,
-        ),
-        applied_memory_ids,
-    )
-
-
-def _dedupe_text(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(value for value in values if value))
-
-
-def _catalog_sort(value: Any) -> str:
-    return (
-        str(value)
-        if value in {"recommend", "sales", "price_asc", "price_desc", "stock"}
-        else "recommend"
-    )
-
-
-def _catalog_limit(value: Any, fallback: int) -> int:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return min(20, max(1, value))
-    return fallback
-
-
-def _catalog_category_key(value: str | None) -> str | None:
-    if not value:
-        return None
-    lowered = value.lower()
-    aliases = {
-        "mouse": "鼠标",
-        "mice": "鼠标",
-        "keyboard": "键盘",
-        "keyboards": "键盘",
-        "headphone": "耳机",
-        "headphones": "耳机",
-        "headset": "耳机",
-        "monitor": "显示器",
-        "monitors": "显示器",
-        "webcam": "摄像头",
-        "webcams": "摄像头",
-    }
-    return aliases.get(lowered, lowered)
-
-
-def _catalog_preference_defaults(
-    state: AgentState,
-    *,
-    current_brands: list[str],
-    current_max_price: Decimal | None,
-    current_connection: str | None,
-    current_usage: str | None,
-    current_excluded_brands: list[str],
-    current_excluded_usage: list[str],
-    reset_working_category_defaults: bool = False,
-) -> tuple[dict[str, Any], list[int]]:
-    plan = _working_catalog_query_plan(state.get("working_memory", {}))
-    filters = plan.get("filters") if isinstance(plan.get("filters"), dict) else {}
-    defaults: dict[str, Any] = {
-        "brands": (
-            []
-            if reset_working_category_defaults
-            else _text_list(plan.get("brands"))
-        ),
-        "excluded_brands": _text_list(plan.get("excluded_brands")),
-        "excluded_usage": _text_list(plan.get("excluded_usage")),
-        "max_price": plan.get("max_price"),
-        "connection_type": (
-            None
-            if reset_working_category_defaults
-            else _normalized_connection(
-                filters.get("connection_type", filters.get("wireless"))
-            )
-        ),
-        "usage": (
-            None
-            if reset_working_category_defaults
-            else _optional_text(plan.get("usage_scenario"))
-        ),
-    }
-    applied: list[int] = []
-    current_values = {
-        "brands": bool(current_brands),
-        "max_price": current_max_price is not None,
-        "connection_type": current_connection is not None,
-        "usage": current_usage is not None,
-        "excluded_brands": bool(current_brands or current_excluded_brands),
-        "excluded_usage": bool(current_usage or current_excluded_usage),
-    }
-    if current_brands:
-        defaults["excluded_brands"] = []
-    if current_excluded_brands:
-        defaults["brands"] = []
-    if current_usage:
-        defaults["excluded_usage"] = []
-    if current_excluded_usage:
-        defaults["usage"] = None
-    for raw_memory in state.get("memory", []):
-        if not isinstance(raw_memory, dict):
-            continue
-        value_json = raw_memory.get("value_json")
-        if not isinstance(value_json, dict):
-            continue
-        default_key, default_value = _preference_default(raw_memory.get("key"), value_json)
-        conflicts = {
-            "brands": "excluded_brands",
-            "excluded_brands": "brands",
-            "usage": "excluded_usage",
-            "excluded_usage": "usage",
-        }
-        if (
-            default_key is None
-            or default_value is None
-            or current_values.get(default_key)
-            or defaults.get(default_key)
-            or defaults.get(conflicts.get(default_key, ""))
-        ):
-            continue
-        defaults[default_key] = default_value
-        memory_id = raw_memory.get("id")
-        if not current_values[default_key] and isinstance(memory_id, int):
-            applied.append(memory_id)
-    return defaults, applied
-
-
-def _preference_default(
-    key: Any, value_json: dict[str, Any]
-) -> tuple[str | None, Any]:
-    if key == "brand_preference":
-        if value_json.get("negated") is True:
-            brand = _optional_text(value_json.get("brand"))
-            return "excluded_brands", [brand] if brand else None
-        brand = _optional_text(value_json.get("brand"))
-        return "brands", [brand] if brand else None
-    if key == "budget_preference" and value_json.get("maximum") is not False:
-        return "max_price", value_json.get("amount")
-    if key == "connection_preference":
-        connection = _normalized_connection(value_json.get("preference"))
-        if value_json.get("negated") is True:
-            connection = {"Wireless": "Wired", "Wired": "Wireless"}.get(connection)
-        return "connection_type", connection
-    if key == "usage_preference":
-        if value_json.get("negated") is True:
-            usage = _optional_text(value_json.get("usage"))
-            return "excluded_usage", [usage] if usage else None
-        return "usage", _optional_text(value_json.get("usage"))
-    return None, None
-
-
-def _working_catalog_query_plan(working_memory: dict[str, Any]) -> dict[str, Any]:
-    catalog = working_memory.get("catalog")
-    if not isinstance(catalog, dict):
-        return {}
-    query_plan = catalog.get("query_plan")
-    return query_plan if isinstance(query_plan, dict) else {}
-
-
 def _is_v2_product_followup(message: str, working_memory: dict[str, Any]) -> bool:
     catalog = working_memory.get("catalog")
     if not isinstance(catalog, dict):
@@ -1146,6 +902,37 @@ def _is_v2_product_followup(message: str, working_memory: dict[str, Any]) -> boo
             "第三个",
         )
     )
+
+
+def _fallback_catalog_query(state: AgentState) -> str:
+    """Build query-only context when the runtime has no orchestrator LLM."""
+    message = state["message"].strip()
+    working_memory = state.get("working_memory", {})
+    explicit_categories = (
+        "鼠标",
+        "键盘",
+        "耳机",
+        "显示器",
+        "摄像头",
+        "音箱",
+        "mouse",
+        "keyboard",
+        "headset",
+        "monitor",
+        "webcam",
+        "speaker",
+    )
+    if (
+        any(category in message.casefold() for category in explicit_categories)
+        or not _is_v2_product_followup(message, working_memory)
+    ):
+        return message
+    catalog = working_memory.get("catalog")
+    query_plan = catalog.get("query_plan") if isinstance(catalog, dict) else None
+    previous_query = query_plan.get("query") if isinstance(query_plan, dict) else None
+    if not isinstance(previous_query, str) or not previous_query.strip():
+        return message
+    return f"此前商品需求：{previous_query.strip()}；当前补充要求：{message}"
 
 
 def _is_v2_policy_followup(message: str, working_memory: dict[str, Any]) -> bool:
@@ -1189,91 +976,6 @@ def _knowledge_memory_view(working_memory: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(policy, dict) or not policy.get("last_query"):
         return working_memory
     return {**working_memory, "last_policy_query": policy["last_query"]}
-
-
-def _brands_from_message(
-    message: str, working_plan: dict[str, Any], memories: list[dict[str, Any]]
-) -> list[str]:
-    candidates = ["Logitech", "Razer", "SteelSeries", "罗技", "雷蛇", "赛睿"]
-    candidates.extend(_text_list(working_plan.get("brands")))
-    for memory in memories:
-        value_json = memory.get("value_json") if isinstance(memory, dict) else None
-        if isinstance(value_json, dict) and (brand := _optional_text(value_json.get("brand"))):
-            candidates.append(brand)
-    lowered = message.lower()
-    matched = list(
-        dict.fromkeys(brand for brand in candidates if brand.lower() in lowered)
-    )
-    generic_latin_brands = re.findall(r"\b[A-Z][A-Za-z-]{2,30}\b", message)
-    ignored = {"FPS", "RGB", "PC", "Wireless", "Wired", "Gaming", "Office"}
-    matched.extend(brand for brand in generic_latin_brands if brand not in ignored)
-    chinese_brand_match = re.search(
-        r"(?:要|选|买|换成|推荐)\s*([\u4e00-\u9fff]{2,6})(?:牌|品牌)", message
-    )
-    if chinese_brand_match:
-        matched.append(chinese_brand_match.group(1))
-    return list(dict.fromkeys(matched))
-
-
-def _usage_from_message(message: str) -> str | None:
-    lowered = message.lower()
-    if "fps" in lowered or "游戏" in message or "gaming" in lowered:
-        return "gaming"
-    if "办公" in message or "office" in lowered:
-        return "office"
-    return None
-
-
-def _excluded_brands_from_message(
-    message: str, working_plan: dict[str, Any], memories: list[dict[str, Any]]
-) -> list[str]:
-    return [
-        brand
-        for brand in _brands_from_message(message, working_plan, memories)
-        if _has_negative_term(message, brand)
-    ]
-
-
-def _excluded_usage_from_message(message: str) -> list[str]:
-    excluded: list[str] = []
-    if _has_negative_term(message, "游戏") or _has_negative_term(message, "gaming"):
-        excluded.append("gaming")
-    if _has_negative_term(message, "办公") or _has_negative_term(message, "office"):
-        excluded.append("office")
-    return excluded
-
-
-def _has_negative_term(message: str, term: str) -> bool:
-    return bool(
-        re.search(
-            rf"(?:不要|不喜欢|不偏好|排除|避开|别(?:用|要|选)?)[^，。；]{{0,32}}{re.escape(term)}",
-            message,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
-def _normalized_connection(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return "Wireless" if value else "Wired"
-    lowered = str(value).lower()
-    if lowered in {"wireless", "无线"}:
-        return "Wireless"
-    if lowered in {"wired", "有线"}:
-        return "Wired"
-    return None
-
-
-def _text_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item) for item in value if str(item).strip()]
-
-
-def _optional_text(value: Any) -> str | None:
-    return str(value) if value is not None and str(value).strip() else None
 
 
 def _legacy_memory_view(working_memory: dict[str, Any]) -> dict[str, Any]:
@@ -1323,6 +1025,8 @@ def _orchestrator_messages(
                     "working_memory": state.get("working_memory", {}),
                     "explicit_user_preferences": state.get("memory", []),
                 },
+                subquery_ledger=state.get("subquery_ledger", []),
+                terminal_guard_feedback=state.get("terminal_guard_feedback"),
             )
         )
     )
@@ -1334,7 +1038,13 @@ def _orchestrator_messages(
                     {
                         "id": call["id"],
                         "name": call["name"],
-                        "args": call["arguments"],
+                        "args": {
+                            **call["arguments"],
+                            "subquery": (
+                                str(call.get("subquery") or "").strip()
+                                or infer_tool_subquery(call["name"], call["arguments"])
+                            ),
+                        },
                         "type": "tool_call",
                     }
                     for call in wave.get("calls", [])
@@ -1355,19 +1065,260 @@ def _orchestrator_messages(
 def _tool_decision(name: str, arguments: dict[str, Any]) -> OrchestratorDecision:
     return OrchestratorDecision(
         type="tool_calls",
-        tool_calls=[PlannedToolCall(id=f"fallback_{name}", name=name, arguments=arguments)],
+        tool_calls=[
+            PlannedToolCall(
+                id=f"fallback_{name}",
+                name=name,
+                arguments=arguments,
+                subquery=infer_tool_subquery(name, arguments),
+            )
+        ],
     )
 
 
-def _limit_decision() -> OrchestratorDecision:
+def _orchestrator_business_tool_definition(contract: ToolContract) -> dict[str, Any]:
+    definition = copy.deepcopy(contract.as_llm_tool())
+    parameters = definition["function"]["parameters"]
+    properties = parameters.setdefault("properties", {})
+    properties["subquery"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "description": (
+            "One atomic part of the user's current request that this tool call is intended "
+            "to answer. Keep the same wording across waves when replanning the same subquery."
+        ),
+    }
+    required = parameters.setdefault("required", [])
+    if "subquery" not in required:
+        required.append("subquery")
+    return definition
+
+
+def _unique_tool_call_ids(
+    calls: list[PlannedToolCall],
+    previous_waves: list[dict[str, Any]],
+    call_count: int,
+) -> list[PlannedToolCall]:
+    used_ids = {
+        str(call.get("id"))
+        for wave in previous_waves
+        for call in wave.get("calls", [])
+        if isinstance(call, dict) and call.get("id")
+    }
+    normalized: list[PlannedToolCall] = []
+    for index, call in enumerate(calls, start=1):
+        call_id = call.id
+        if not call_id or call_id in used_ids:
+            base_id = f"call_{call_count}_{index}"
+            call_id = base_id
+            suffix = 1
+            while call_id in used_ids:
+                suffix += 1
+                call_id = f"{base_id}_{suffix}"
+        used_ids.add(call_id)
+        normalized.append(call.model_copy(update={"id": call_id}))
+    return normalized
+
+
+def _find_reusable_tool_result(
+    state: AgentState,
+    call: PlannedToolCall,
+) -> dict[str, Any] | None:
+    fingerprint = tool_call_fingerprint(call.name, call.arguments)
+    matches: list[dict[str, Any]] = []
+    for wave in state.get("tool_waves", []):
+        calls = {
+            str(previous.get("id") or ""): previous
+            for previous in wave.get("calls", [])
+            if isinstance(previous, dict)
+        }
+        for result in wave.get("results", []):
+            if not isinstance(result, dict) or result.get("name") != call.name:
+                continue
+            previous_call = calls.get(str(result.get("tool_call_id") or ""), {})
+            previous_arguments = previous_call.get("arguments", {})
+            previous_fingerprint = str(previous_call.get("fingerprint") or "")
+            if not previous_fingerprint and isinstance(previous_arguments, dict):
+                previous_fingerprint = tool_call_fingerprint(call.name, previous_arguments)
+            if previous_fingerprint == fingerprint:
+                matches.append(result)
+
+    if not matches:
+        return None
+
+    outcomes = [normalize_tool_result(result) for result in matches]
+    if outcomes[-1].outcome != "error":
+        return matches[-1]
+    # One retry is allowed after the first execution error; later identical calls reuse it.
+    if sum(outcome.outcome == "error" for outcome in outcomes) >= 2:
+        return matches[-1]
+    return None
+
+
+def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> bool:
+    """Admit only a recovery or a known result-dependent call after the first wave."""
+    ledger = state.get("subquery_ledger", [])
+    if not ledger and state.get("tool_waves"):
+        ledger = [
+            entry.model_dump(mode="json")
+            for entry in build_subquery_ledger(state.get("tool_waves", []))
+        ]
+
+    subquery = (call.subquery or infer_tool_subquery(call.name, call.arguments)).strip()
+    key = subquery.casefold()
+    matching = [
+        entry
+        for entry in ledger
+        if is_active_ledger_entry(entry)
+        and str(entry.get("subquery") or "").strip().casefold() == key
+    ]
+    if not matching:
+        return _is_supported_dependent_call(state, call)
+
+    latest = matching[-1]
+    if query_fingerprint(call.arguments.get("query")) != str(
+        latest.get("query_fingerprint") or query_fingerprint(
+            latest.get("canonical_query")
+            or latest.get("arguments", {}).get("query")
+        )
+    ):
+        return False
+
+    outcome = str(latest.get("outcome") or "")
+    if outcome in {"usable", "empty", "not_found", "unsupported", "insufficient"}:
+        return False
+
+    previous_fingerprint = str(latest.get("fingerprint") or "")
+    next_fingerprint = tool_call_fingerprint(call.name, call.arguments)
+    if outcome != "error":
+        return False
+
+    result = _tool_result_by_call_id(state, str(latest.get("tool_call_id") or ""))
+    error = result.get("execution", {}).get("error", {}) if result else {}
+    if not isinstance(error, dict):
+        return False
+    code = str(error.get("code") or "execution_error")
+    action = str(error.get("recommended_action") or "")
+    if not action:
+        action = {
+            "invalid_input": "replan_arguments",
+            "timeout": "retry_once",
+        }.get(code, "stop")
+
+    if action == "retry_once":
+        same_failures = sum(
+            entry.get("outcome") == "error"
+            and str(entry.get("fingerprint") or "") == previous_fingerprint
+            for entry in ledger
+        )
+        return same_failures < 2 and next_fingerprint == previous_fingerprint
+    if action == "replan_arguments":
+        attempts = sum(
+            entry.get("outcome") == "error"
+            and str(entry.get("subquery") or "").strip().casefold() == key
+            for entry in ledger
+        )
+        return attempts < 2 and next_fingerprint != previous_fingerprint
+    return False
+
+
+def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bool:
+    active = [
+        entry
+        for entry in state.get("subquery_ledger", [])
+        if is_active_ledger_entry(entry) and entry.get("has_usable_information")
+    ]
+    if call.name == "catalog_compare":
+        return any(entry.get("tool_name") == "catalog_search" for entry in active)
+    if call.name == "order_lookup":
+        output = _latest_successful_tool_output(state, "order_lookup")
+        return bool(output and output.get("result_type") == "order_candidates")
+    return False
+
+
+def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] | None:
+    for result in reversed(state.get("tool_results", [])):
+        if str(result.get("tool_call_id") or "") == call_id:
+            return result
+    return None
+
+
+def _unresolved_initial_subqueries(state: AgentState) -> list[str]:
+    ledger = state.get("subquery_ledger", [])
+    initial = {
+        str(entry.get("subquery") or "").strip().casefold(): str(
+            entry.get("subquery") or ""
+        ).strip()
+        for entry in ledger
+        if entry.get("wave") == 1 and str(entry.get("subquery") or "").strip()
+    }
+    resolved = {
+        str(entry.get("subquery") or "").strip().casefold()
+        for entry in ledger
+        if is_active_ledger_entry(entry)
+        and entry.get("has_usable_information")
+        and str(entry.get("subquery") or "").strip()
+    }
+    return [label for key, label in initial.items() if key not in resolved]
+
+
+def _clarification_decision(response: str, reason: str) -> OrchestratorDecision:
     return OrchestratorDecision(
         type="clarification",
-        response=(
-            "这次请求需要的查询步骤超过了当前处理上限。请缩小问题范围，"
-            "例如只查询一个订单、一个商品类别或一个政策问题。"
-        ),
-        reason="orchestration_limit_reached",
+        response=response,
+        reason=reason,
+        control_action="ask_clarification",
     )
+
+
+def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDecision:
+    """Stop the loop without discarding observations already useful to the user."""
+    usable_ids = _usable_tool_call_ids(state)
+    unresolved = _unresolved_initial_subqueries(state)
+    if usable_ids:
+        response = _fallback_answer(state)
+        if unresolved:
+            response = (
+                f"{response}\n\n"
+                f"暂时未能完成：{'、'.join(unresolved)}。你可以稍后重试或补充更具体的信息。"
+            )
+            return OrchestratorDecision(
+                type="partial_response",
+                response=response,
+                reason=reason,
+                control_action="finish_partial",
+                used_tool_call_ids=usable_ids,
+                unavailable_parts=unresolved,
+            )
+        return OrchestratorDecision(
+            type="grounded_response",
+            response=response,
+            reason=reason,
+            control_action="finish_answer",
+            used_tool_call_ids=usable_ids,
+        )
+    if state.get("tool_results"):
+        return OrchestratorDecision(
+            type="unavailable_response",
+            response=_fallback_unavailable_answer(state),
+            reason=reason,
+            control_action="finish_unavailable",
+            unavailable_parts=_unresolved_initial_subqueries(state)
+            or ["请求所需的业务信息"],
+        )
+    return _clarification_decision(
+        "我还不能准确判断你的需求。请补充具体商品、订单或想咨询的问题。",
+        reason,
+    )
+
+
+def _terminal_fallback_decision(
+    state: AgentState,
+    validation_reason: str,
+) -> OrchestratorDecision:
+    reason = f"terminal_guard_fallback:{validation_reason}"
+    return _state_terminal_decision(state, reason)
 
 
 def _boundary_from_decision(decision: OrchestratorDecision) -> dict[str, Any]:
@@ -1442,15 +1393,106 @@ def _apply_tool_output(
         state.setdefault("parsed", {})["order_candidates"] = output.get("candidates", [])
 
 
+def _rebuild_tool_projections(state: AgentState) -> None:
+    """Rebuild compatibility state from active observations instead of the latest call."""
+    ledger = state.get("subquery_ledger", [])
+    active_ids = {
+        str(entry.get("tool_call_id"))
+        for entry in ledger
+        if is_active_ledger_entry(entry) and entry.get("tool_call_id")
+    }
+    if not active_ids:
+        return
+
+    products: list[ProductCard] = []
+    seen_sku_ids: set[int] = set()
+    evidence: list[EvidenceItem] = []
+    order: OrderCard | None = None
+    order_candidates: list[dict[str, Any]] = []
+    parsed = state.setdefault("parsed", {})
+    parsed.pop("product_search", None)
+    parsed.pop("catalog_comparison", None)
+    parsed.pop("order_candidates", None)
+    saw_catalog_result = False
+    catalog_completed = False
+
+    for result in state.get("tool_results", []):
+        call_id = str(result.get("tool_call_id") or "")
+        if call_id not in active_ids:
+            continue
+        name = str(result.get("name") or "")
+        execution = result.get("execution", {})
+        if not isinstance(execution, dict):
+            continue
+        output = execution.get("output")
+        if name in {"catalog_search", "catalog_compare"}:
+            saw_catalog_result = True
+            catalog_completed = catalog_completed or bool(execution.get("ok"))
+        if not execution.get("ok") or not isinstance(output, dict):
+            continue
+
+        if name in {"catalog_search", "catalog_compare"}:
+            for item in output.get("products", []):
+                product = ProductCard.model_validate(item)
+                if product.sku_id in seen_sku_ids:
+                    continue
+                seen_sku_ids.add(product.sku_id)
+                products.append(product)
+            if name == "catalog_search":
+                parsed["product_search"] = output.get("query_plan", {})
+            else:
+                parsed["catalog_comparison"] = {
+                    "query": _tool_call_arguments(state, call_id).get("query"),
+                    "sku_ids": [item.get("sku_id") for item in output.get("products", [])],
+                    "comparison_fields": output.get("comparison_fields", []),
+                }
+        elif name in {"policy_search", "knowledge_search"}:
+            evidence.extend(
+                EvidenceItem.model_validate(item)
+                for item in output.get("documents", [])
+            )
+        elif name == "order_lookup":
+            if output.get("order"):
+                order = OrderCard.model_validate(output["order"])
+            candidates = output.get("candidates")
+            if isinstance(candidates, list):
+                order_candidates = candidates
+
+    state["products"] = products
+    state["evidence"] = _dedupe_evidence(evidence)
+    state["order"] = order
+    parsed["order_candidates"] = order_candidates
+    if saw_catalog_result:
+        state["catalog_tool_succeeded"] = catalog_completed
+
+
+def _tool_call_arguments(state: AgentState, call_id: str) -> dict[str, Any]:
+    for wave in state.get("tool_waves", []):
+        for call in wave.get("calls", []):
+            if str(call.get("id") or "") == call_id:
+                arguments = call.get("arguments")
+                return arguments if isinstance(arguments, dict) else {}
+    return {}
+
+
 def _fallback_answer(state: AgentState) -> str:
     products = state.get("products", [])
     if products:
         lines = ["我根据商品目录找到了这些候选："]
+        asks_sales = any(
+            term in state.get("message", "").lower()
+            for term in ("销量", "热销", "畅销", "sales")
+        )
         for product in products[:3]:
             specs = "，".join(
                 f"{key}: {value}" for key, value in list(product.specs.items())[:4]
             )
             suffix = f"，{specs}" if specs else ""
+            if asks_sales:
+                suffix += (
+                    f"，SKU 销量 {product.sku_sales_count}，"
+                    f"SPU 总销量 {product.sales_count}"
+                )
             lines.append(
                 f"- {product.title}：¥{product.price}，库存 {product.stock}{suffix}。"
             )
@@ -1490,7 +1532,7 @@ def _fallback_answer(state: AgentState) -> str:
 
     failed_results = [
         result
-        for result in state.get("tool_results", [])
+        for result in _active_tool_results(state)
         if not result.get("execution", {}).get("ok")
     ]
     if failed_results:
@@ -1506,14 +1548,14 @@ def _fallback_catalog_facets_arguments(message: str) -> dict[str, Any] | None:
         return None
 
     if any(term in compact for term in ("品牌", "牌子")):
-        return {"query": message, "facet": "brand", "limit": 20}
+        return {"query": message, "limit": 20}
     if any(term in compact for term in ("品类", "类目", "商品类型", "外设类型")):
-        return {"query": message, "facet": "category", "limit": 20}
+        return {"query": message, "limit": 20}
     if any(
         term in compact
         for term in ("轴体", "刷新率", "分辨率", "连接方式", "dpi", "颜色")
     ):
-        return {"query": message, "facet": "spec_value", "limit": 20}
+        return {"query": message, "limit": 20}
     return None
 
 
@@ -1521,7 +1563,7 @@ def _latest_successful_tool_output(
     state: AgentState,
     tool_name: str,
 ) -> dict[str, Any] | None:
-    for result in reversed(state.get("tool_results", [])):
+    for result in reversed(_active_tool_results(state)):
         execution = result.get("execution", {})
         if result.get("name") == tool_name and execution.get("ok"):
             output = execution.get("output")
@@ -1530,11 +1572,61 @@ def _latest_successful_tool_output(
     return None
 
 
-def _has_successful_tool_result(state: AgentState) -> bool:
-    return any(
-        bool(result.get("execution", {}).get("ok"))
+def _active_tool_results(state: AgentState) -> list[dict[str, Any]]:
+    ledger = state.get("subquery_ledger", [])
+    if not ledger:
+        return state.get("tool_results", [])
+    active_ids = {
+        str(entry.get("tool_call_id"))
+        for entry in ledger
+        if is_active_ledger_entry(entry) and entry.get("tool_call_id")
+    }
+    return [
+        result
         for result in state.get("tool_results", [])
-    )
+        if str(result.get("tool_call_id") or "") in active_ids
+    ]
+
+
+def _has_successful_tool_result(state: AgentState) -> bool:
+    return bool(_usable_tool_call_ids(state))
+
+
+def _usable_tool_call_ids(state: AgentState) -> list[str]:
+    ledger = state.get("subquery_ledger", [])
+    if ledger:
+        return active_usable_tool_call_ids(ledger)
+    return [
+        outcome.tool_call_id
+        for outcome in (
+            normalize_tool_result(result) for result in state.get("tool_results", [])
+        )
+        if outcome.has_usable_information and outcome.tool_call_id
+    ]
+
+
+def _fallback_unavailable_answer(state: AgentState) -> str:
+    outcomes = [
+        normalize_tool_result(result) for result in _active_tool_results(state)
+    ]
+    kinds = {outcome.outcome for outcome in outcomes}
+    tool_names = {outcome.tool_name for outcome in outcomes}
+    if "unsupported" in kinds:
+        return (
+            "这个请求属于 PC 外设相关，但当前商品查询能力不支持这类信息。"
+            "你可以改问具体商品、价格、库存、规格或目录筛选。"
+        )
+    if "error" in kinds:
+        return "业务信息查询暂时失败，请稍后重试。"
+    if "not_found" in kinds and tool_names == {"order_lookup"}:
+        return "当前账号下没有找到对应订单。请核对订单号，或让我查询最近订单。"
+    if "insufficient" in kinds and "catalog_compare" in tool_names:
+        return "当前只找到不足两款可比商品，暂时无法完成有效对比。请补充具体型号。"
+    if tool_names <= {"policy_search", "knowledge_search"}:
+        return "当前知识库没有找到足够依据，我不能凭模型常识补写答案。"
+    if tool_names <= {"catalog_search", "catalog_compare", "catalog_facets"}:
+        return "当前商品目录没有找到匹配信息。你可以补充型号，或放宽一个筛选条件。"
+    return "本次查询没有得到可用于回答的信息，请补充更具体的商品、订单或政策问题。"
 
 
 def _catalog_facets_fallback_answer(output: dict[str, Any]) -> str:
@@ -1577,6 +1669,23 @@ def _is_identity_or_capability_question(message: str) -> bool:
         term in compact
         for term in ["你是谁", "你是什么", "你能做什么", "你会什么", "怎么用你"]
     )
+
+
+def _is_safe_direct_request(message: str) -> bool:
+    if _is_identity_or_capability_question(message):
+        return True
+    if classify_intent(message) == "purchase_guidance":
+        return True
+    compact = re.sub(r"[\s，。！？!?、,.]", "", message.lower())
+    return compact in {
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "谢谢",
+        "谢谢你",
+        "再见",
+    }
 
 
 def _suggest_actions(state: AgentState) -> list[dict[str, Any]]:

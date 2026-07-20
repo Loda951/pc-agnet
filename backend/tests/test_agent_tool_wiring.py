@@ -5,10 +5,9 @@ from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.decisions import PlannedToolCall
-from app.agent.graph import AgentRuntime, _catalog_search_input
+from app.agent.graph import AgentRuntime, _fallback_catalog_query
 from app.agent.state import AgentState
 from app.core.config import Settings
-from app.schemas.catalog import ProductSearchRequest
 from app.schemas.chat import ChatRequest
 from app.schemas.context import (
     MemoryChanges,
@@ -16,6 +15,7 @@ from app.schemas.context import (
     StructuredMemory,
     WorkingMemoryV2,
 )
+from app.tools.contracts import ToolContract
 from app.tools.schemas import ToolError, ToolExecutionResult
 
 PRODUCT = {
@@ -26,7 +26,10 @@ PRODUCT = {
     "category": "mouse",
     "price": "399.00",
     "stock": 8,
+    "sku_sales_count": 5,
+    "sku_sales_count_scope": "sku",
     "sales_count": 12,
+    "sales_count_scope": "spu",
     "specs": {"connection_type": "Wireless"},
     "image_url": None,
 }
@@ -86,22 +89,26 @@ class FakeContextService:
         )
 
 
-class FakeToolRegistry:
+class FakeToolExecutor:
     def __init__(self, results: dict[str, ToolExecutionResult]):
         self.results = results
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def execute(self, name: str, input_data: dict[str, Any]) -> ToolExecutionResult:
+    async def execute(
+        self,
+        contract: ToolContract,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> ToolExecutionResult:
+        name = contract.registry_name
+        input_data = dict(arguments)
+        for field_name in contract.runtime_fields:
+            input_data[field_name] = runtime_context[field_name]
         self.calls.append((name, input_data))
         return self.results[name]
 
 
-class EmptyKnowledgeService:
-    async def retrieve(self, query: str) -> list:
-        return []
-
-
-def test_catalog_tool_call_normalizes_top_level_connection_type() -> None:
+def test_catalog_tool_call_preserves_query_only_public_input() -> None:
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     state = cast(
         AgentState,
@@ -115,20 +122,20 @@ def test_catalog_tool_call_normalizes_top_level_connection_type() -> None:
         id="catalog-call",
         name="catalog_search",
         arguments={
-            "query": "无线鼠标",
-            "max_price": 500,
-            "connection_type": "Wireless",
+            "query": "推荐 500 元以内无线鼠标",
             "limit": 5,
         },
     )
 
     prepared_call, _ = runtime._prepare_tool_call(state, call)
 
-    assert "connection_type" not in prepared_call.arguments
-    assert prepared_call.arguments["filters"]["connection_type"] == "Wireless"
+    assert prepared_call.arguments == {
+        "query": "推荐 500 元以内无线鼠标",
+        "limit": 5,
+    }
 
 
-def test_catalog_tool_call_prefers_nested_connection_type() -> None:
+def test_catalog_tool_call_rejects_internal_planner_fields() -> None:
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     state = cast(
         AgentState,
@@ -143,14 +150,12 @@ def test_catalog_tool_call_prefers_nested_connection_type() -> None:
         name="catalog_search",
         arguments={
             "query": "有线鼠标",
-            "connection_type": "Wireless",
             "filters": {"connection_type": "Wired"},
         },
     )
 
-    prepared_call, _ = runtime._prepare_tool_call(state, call)
-
-    assert prepared_call.arguments["filters"]["connection_type"] == "Wired"
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        runtime._prepare_tool_call(state, call)
 
 
 @pytest.mark.asyncio
@@ -166,12 +171,12 @@ async def test_invalid_catalog_tool_arguments_become_tool_error(
         async def add_tool_call(self, *args: Any) -> None:
             captured_calls.append(args)
 
-    registry = FakeToolRegistry({})
+    registry = FakeToolExecutor({})
     monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        tool_registry=registry,
+        tool_executor=registry,
     )
     workflow = StateGraph(AgentState)
     workflow.add_node("execute_tool_wave", runtime._execute_tool_wave)
@@ -221,6 +226,112 @@ async def test_invalid_catalog_tool_arguments_become_tool_error(
 
 
 @pytest.mark.asyncio
+async def test_equivalent_tool_call_reuses_previous_usable_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_calls: list[tuple[Any, ...]] = []
+
+    class FakeAuditRepository:
+        def __init__(self, session: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *args: Any) -> None:
+            captured_calls.append(args)
+
+    registry = FakeToolExecutor({})
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        tool_executor=registry,
+    )
+    previous_execution = {
+        "tool_name": "catalog.facets",
+        "ok": True,
+        "output": {
+            "result_type": "facets",
+            "facet": "brand",
+            "items": [{"value": "Logitech", "count": 12}],
+            "query_plan": {},
+        },
+        "error": None,
+    }
+    state = cast(
+        AgentState,
+        {
+            "user_id": 7,
+            "run_id": 61,
+            "message": "有哪些鼠标品牌",
+            "decision": {
+                "type": "tool_calls",
+                "tool_calls": [
+                    {
+                        "id": "facets-2",
+                        "name": "catalog_facets",
+                        "arguments": {
+                            "query": "  MOUSE   BRANDS ",
+                        },
+                    }
+                ],
+            },
+            "parsed": {},
+            "products": [],
+            "evidence": [],
+            "order": None,
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "facets-1",
+                            "name": "catalog_facets",
+                            "arguments": {
+                                "query": "mouse brands",
+                                "limit": 20,
+                            },
+                        }
+                    ],
+                    "results": [
+                        {
+                            "tool_call_id": "facets-1",
+                            "name": "catalog_facets",
+                            "execution": previous_execution,
+                        }
+                    ],
+                }
+            ],
+            "tool_results": [
+                {
+                    "tool_call_id": "facets-1",
+                    "name": "catalog_facets",
+                    "execution": previous_execution,
+                }
+            ],
+            "tool_wave_count": 1,
+        },
+    )
+    workflow = StateGraph(AgentState)
+    workflow.add_node("execute_tool_wave", runtime._execute_tool_wave)
+    workflow.add_node("normalize_tool_results", runtime._normalize_tool_results)
+    workflow.add_node("update_subquery_ledger", runtime._update_subquery_ledger)
+    workflow.set_entry_point("execute_tool_wave")
+    workflow.add_edge("execute_tool_wave", "normalize_tool_results")
+    workflow.add_edge("normalize_tool_results", "update_subquery_ledger")
+    workflow.add_edge("update_subquery_ledger", END)
+
+    result = await workflow.compile().ainvoke(state)
+
+    assert registry.calls == []
+    assert captured_calls == []
+    assert result["tool_wave_count"] == 2
+    reused = result["tool_waves"][1]["results"][0]
+    assert reused["reused_from_tool_call_id"] == "facets-1"
+    assert reused["execution"] == previous_execution
+    assert result["subquery_ledger"][1]["outcome"] == "usable"
+    assert result["subquery_ledger"][1]["reused_from_tool_call_id"] == "facets-1"
+
+
+@pytest.mark.asyncio
 async def test_sync_runtime_uses_context_and_catalog_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,7 +344,7 @@ async def test_sync_runtime_uses_context_and_catalog_registry(
         retained_turns=2,
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -264,9 +375,8 @@ async def test_sync_runtime_uses_context_and_catalog_registry(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
@@ -274,6 +384,10 @@ async def test_sync_runtime_uses_context_and_catalog_registry(
     assert context.prepare_calls == [(7, None, prepared.message)]
     assert [name for name, _ in registry.calls] == ["catalog.search"]
     assert response.products[0].sku_id == 101
+    assert response.products[0].sku_sales_count == 5
+    assert response.products[0].sales_count == 12
+    assert response.products[0].sku_sales_count_scope == "sku"
+    assert response.products[0].sales_count_scope == "spu"
     assert context.completed_outcomes
     assert "working_memory" not in context.completed_outcomes[0]
 
@@ -299,7 +413,7 @@ async def test_compare_followup_resolves_ordinals_to_working_memory_sku_ids(
         ),
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.compare": ToolExecutionResult(
                 tool_name="catalog.compare",
@@ -331,9 +445,8 @@ async def test_compare_followup_resolves_ordinals_to_working_memory_sku_ids(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
@@ -349,7 +462,7 @@ async def test_compare_followup_resolves_ordinals_to_working_memory_sku_ids(
 
 
 @pytest.mark.asyncio
-async def test_current_catalog_conditions_beat_working_and_long_term_defaults(
+async def test_catalog_fallback_sends_current_query_without_structured_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedTurn(
@@ -394,7 +507,7 @@ async def test_current_catalog_conditions_beat_working_and_long_term_defaults(
         ],
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -420,27 +533,18 @@ async def test_current_catalog_conditions_beat_working_and_long_term_defaults(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
     _, tool_input = registry.calls[0]
-    assert tool_input["brands"] == ["Logitech"]
-    assert tool_input["max_price"] == "800"
-    assert tool_input["filters"]["connection_type"] == "Wireless"
-    assert tool_input["usage"] == "office"
-    assert tool_input["preference_defaults"] == {
-        "brands": ["Razer"],
-        "excluded_brands": [],
-        "excluded_usage": [],
-        "max_price": "500",
-        "connection_type": "Wired",
-        "usage": "gaming",
+    assert tool_input == {
+        "query": prepared.message,
+        "limit": 3,
     }
-    assert context.completed_outcomes[0]["applied_memory_ids"] == []
+    assert context.completed_outcomes[0].get("applied_memory_ids", []) == []
 
 
 @pytest.mark.asyncio
@@ -456,13 +560,20 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
     )
     context = FakeContextService(prepared)
 
-    class SequenceRegistry:
+    class SequenceToolExecutor:
         def __init__(self):
             self.calls: list[tuple[str, dict[str, Any]]] = []
 
         async def execute(
-            self, name: str, input_data: dict[str, Any]
+            self,
+            contract: ToolContract,
+            arguments: dict[str, Any],
+            runtime_context: dict[str, Any],
         ) -> ToolExecutionResult:
+            name = contract.registry_name
+            input_data = dict(arguments)
+            for field_name in contract.runtime_fields:
+                input_data[field_name] = runtime_context[field_name]
             self.calls.append((name, input_data))
             if len(self.calls) == 1:
                 return ToolExecutionResult(
@@ -491,7 +602,7 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
                 output={"result_type": "single_order", "order": ORDER, "candidates": []},
             )
 
-    registry = SequenceRegistry()
+    executor = SequenceToolExecutor()
 
     class FakeAuditRepository:
         def __init__(self, session: AsyncSession):
@@ -504,16 +615,23 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=cast(Any, registry),
+        tool_executor=executor,
     )
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
-    assert registry.calls == [
-        ("order.lookup", {"user_id": 7, "order_id": None, "limit": 1}),
-        ("order.lookup", {"user_id": 7, "order_id": ORDER["id"], "limit": 1}),
+    assert executor.calls == [
+        ("order.lookup", {"query": prepared.message, "limit": 1, "user_id": 7}),
+        (
+            "order.lookup",
+            {
+                "order_id": ORDER["id"],
+                "query": prepared.message,
+                "limit": 1,
+                "user_id": 7,
+            },
+        ),
     ]
     assert response.order is not None
     assert response.order.id == ORDER["id"]
@@ -542,7 +660,7 @@ async def test_stream_registry_failure_emits_tool_error_and_finishes_safely(
         ),
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -570,9 +688,8 @@ async def test_stream_registry_failure_emits_tool_error_and_finishes_safely(
     runtime = AgentRuntime(
         cast(AsyncSession, FakeSession()),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     events = [
@@ -622,7 +739,7 @@ async def test_v2_working_query_plan_routes_generic_catalog_followup(
         ),
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -648,9 +765,8 @@ async def test_v2_working_query_plan_routes_generic_catalog_followup(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
@@ -658,12 +774,13 @@ async def test_v2_working_query_plan_routes_generic_catalog_followup(
     assert response.intent == "catalog_search"
     assert registry.calls[0][0] == "catalog.search"
     tool_input = registry.calls[0][1]
-    assert tool_input["category"] == "mouse"
-    assert tool_input["filters"]["connection_type"] == "Wireless"
-    assert tool_input["preference_defaults"]["max_price"] == "500"
+    assert tool_input == {
+        "query": "此前商品需求：mouse；当前补充要求：换成无线",
+        "limit": 3,
+    }
 
 
-def test_three_turn_search_compare_followup_reuses_complete_safe_search_plan() -> None:
+def test_fallback_catalog_followup_keeps_memory_as_natural_language_context() -> None:
     working_memory = WorkingMemoryV2.model_validate(
         {
             "catalog": {
@@ -704,37 +821,14 @@ def test_three_turn_search_compare_followup_reuses_complete_safe_search_plan() -
         },
     )
 
-    tool_input, _ = _catalog_search_input(
-        state,
-        ProductSearchRequest(
-            query="换成无线",
-            filters={"connection_type": "Wireless"},
-            limit=6,
-        ),
-    )
-    payload = tool_input.model_dump(mode="json")
+    query = _fallback_catalog_query(state)
 
-    assert payload["query"] == "fps ergonomic mouse"
-    assert payload["category"] == "mouse"
-    assert payload["brands"] == ["Razer"]
-    assert payload["excluded_brands"] == ["Logitech"]
-    assert payload["excluded_usage"] == ["office"]
-    assert payload["min_price"] == "200"
-    assert payload["max_price"] == "500"
-    assert payload["filters"] == {
-        "connection_type": "Wireless",
-        "max_dpi": "20000",
-        "hand_orientation": "Right",
-        "tracking_method": "Optical",
-    }
-    assert payload["keywords"] == ["fps", "lightweight"]
-    assert payload["usage"] == "gaming"
-    assert payload["sort"] == "price_asc"
-    assert "换成无线" not in payload["keywords"]
+    assert query == "此前商品需求：fps ergonomic mouse；当前补充要求：换成无线"
+    assert "max_dpi" not in query
+    assert "price_asc" not in query
 
 
-@pytest.mark.asyncio
-async def test_bare_v2_brand_exclusion_routes_back_to_catalog_search() -> None:
+def test_bare_v2_brand_exclusion_routes_back_to_query_first_catalog_search() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
     working_memory = WorkingMemoryV2.model_validate(
         {
@@ -748,102 +842,24 @@ async def test_bare_v2_brand_exclusion_routes_back_to_catalog_search() -> None:
         }
     )
 
-    state = await runtime._route_intent(
+    decision = runtime._fallback_orchestrator_decision(
         cast(
-            Any,
+            AgentState,
             {
                 "message": "不要 Razer",
                 "working_memory": working_memory.model_dump(mode="json"),
                 "memory": [],
+                "tool_results": [],
             },
         )
     )
 
-    assert state["intent"] == "product_recommendation"
-    assert "product_search" in state["parsed"]
-
-
-def test_v2_followup_brand_exclusion_removes_historical_positive_brand() -> None:
-    state = cast(
-        Any,
-        {
-            "message": "不要 Razer",
-            "working_memory": WorkingMemoryV2.model_validate(
-                {
-                    "catalog": {
-                        "query_plan": {
-                            "query": "gaming mouse",
-                            "category": "mouse",
-                            "brands": ["Razer"],
-                            "keywords": ["gaming"],
-                            "usage_scenario": "gaming",
-                            "limit": 6,
-                        }
-                    }
-                }
-            ).model_dump(mode="json"),
-            "memory": [],
-        },
-    )
-
-    tool_input, _ = _catalog_search_input(
-        state,
-        ProductSearchRequest(query="不要 Razer", limit=6),
-    )
-
-    assert tool_input.brands == []
-    assert tool_input.excluded_brands == ["Razer"]
-
-
-def test_v2_category_switch_uses_current_query_and_drops_old_constraints() -> None:
-    state = cast(
-        Any,
-        {
-            "message": "换成无线键盘",
-            "working_memory": WorkingMemoryV2.model_validate(
-                {
-                    "catalog": {
-                        "query_plan": {
-                            "query": "fps ergonomic mouse",
-                            "category": "mouse",
-                            "max_price": 500,
-                            "filters": {
-                                "connection_type": "Wired",
-                                "max_dpi": "20000",
-                                "hand_orientation": "Right",
-                            },
-                            "keywords": ["fps", "lightweight"],
-                            "usage_scenario": "gaming",
-                            "sort": "price_asc",
-                            "limit": 6,
-                        }
-                    }
-                }
-            ).model_dump(mode="json"),
-            "memory": [],
-        },
-    )
-
-    tool_input, _ = _catalog_search_input(
-        state,
-        ProductSearchRequest(
-            query="无线键盘",
-            category="keyboard",
-            filters={"connection_type": "Wireless"},
-            limit=6,
-        ),
-    )
-
-    assert tool_input.query == "无线键盘"
-    assert tool_input.category == "keyboard"
-    assert tool_input.filters == {"connection_type": "Wireless"}
-    assert tool_input.keywords == []
-    assert tool_input.usage is None
-    assert tool_input.max_price == 500
-    assert tool_input.sort == "price_asc"
-    assert tool_input.preference_defaults.brands == []
-    assert tool_input.preference_defaults.connection_type is None
-    assert tool_input.preference_defaults.usage is None
+    assert decision.type == "tool_calls"
+    assert decision.tool_calls[0].name == "catalog_search"
+    assert decision.tool_calls[0].arguments == {
+        "query": "此前商品需求：gaming mouse；当前补充要求：不要 Razer",
+        "limit": 3,
+    }
 
 
 @pytest.mark.asyncio
@@ -885,9 +901,8 @@ async def test_failed_stream_run_uses_compact_context_audit(
     runtime = AgentRuntime(
         cast(AsyncSession, FakeSession()),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=FakeContextService(prepared),
-        tool_registry=FakeToolRegistry({}),
+        tool_executor=FakeToolExecutor({}),
     )
     state = cast(
         Any,
@@ -942,18 +957,22 @@ async def test_sync_runtime_tool_exception_degrades_to_safe_response(
         async def fail_run(self, run_id, intent, state, error) -> None:
             captured["failed_run"] = (run_id, intent, state, error)
 
-    class RaisingRegistry:
-        async def execute(self, name: str, input_data: dict[str, Any]):
-            raise RuntimeError("registry boom")
+    class RaisingToolExecutor:
+        async def execute(
+            self,
+            contract: ToolContract,
+            arguments: dict[str, Any],
+            runtime_context: dict[str, Any],
+        ) -> ToolExecutionResult:
+            raise RuntimeError("executor boom")
 
     monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
     context = FakeContextService(prepared)
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=cast(Any, RaisingRegistry()),
+        tool_executor=RaisingToolExecutor(),
     )
 
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
@@ -968,7 +987,7 @@ async def test_sync_runtime_tool_exception_degrades_to_safe_response(
 
 
 @pytest.mark.asyncio
-async def test_current_negative_catalog_preferences_are_explicit_exclusions(
+async def test_current_negative_catalog_request_stays_in_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedTurn(
@@ -979,7 +998,7 @@ async def test_current_negative_catalog_preferences_are_explicit_exclusions(
         message="不要 Logitech 的游戏无线鼠标",
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -1005,22 +1024,18 @@ async def test_current_negative_catalog_preferences_are_explicit_exclusions(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
     tool_input = registry.calls[0][1]
-    assert tool_input["brands"] == []
-    assert tool_input["excluded_brands"] == ["Logitech"]
-    assert tool_input["excluded_usage"] == ["gaming"]
-    assert tool_input["filters"]["connection_type"] == "Wired"
+    assert tool_input == {"query": prepared.message, "limit": 3}
 
 
 @pytest.mark.asyncio
-async def test_negative_long_term_preferences_become_query_defaults(
+async def test_fallback_does_not_emit_long_term_preferences_as_tool_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedTurn(
@@ -1051,7 +1066,7 @@ async def test_negative_long_term_preferences_become_query_defaults(
         ],
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -1077,21 +1092,18 @@ async def test_negative_long_term_preferences_become_query_defaults(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
-    defaults = registry.calls[0][1]["preference_defaults"]
-    assert defaults["excluded_brands"] == ["Logitech"]
-    assert defaults["excluded_usage"] == ["gaming"]
-    assert context.completed_outcomes[0]["applied_memory_ids"] == [81, 82]
+    assert registry.calls[0][1] == {"query": prepared.message, "limit": 3}
+    assert context.completed_outcomes[0].get("applied_memory_ids", []) == []
 
 
 @pytest.mark.asyncio
-async def test_working_exclusion_beats_long_term_positive_preference(
+async def test_fallback_does_not_emit_working_memory_as_tool_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = PreparedTurn(
@@ -1116,7 +1128,7 @@ async def test_working_exclusion_beats_long_term_positive_preference(
         ],
     )
     context = FakeContextService(prepared)
-    registry = FakeToolRegistry(
+    registry = FakeToolExecutor(
         {
             "catalog.search": ToolExecutionResult(
                 tool_name="catalog.search",
@@ -1142,14 +1154,11 @@ async def test_working_exclusion_beats_long_term_positive_preference(
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
-        knowledge_service=EmptyKnowledgeService(),
         context_service=context,
-        tool_registry=registry,
+        tool_executor=registry,
     )
 
     await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
-    defaults = registry.calls[0][1]["preference_defaults"]
-    assert defaults["brands"] == []
-    assert defaults["excluded_brands"] == ["Logitech"]
-    assert context.completed_outcomes[0]["applied_memory_ids"] == []
+    assert registry.calls[0][1] == {"query": prepared.message, "limit": 3}
+    assert context.completed_outcomes[0].get("applied_memory_ids", []) == []

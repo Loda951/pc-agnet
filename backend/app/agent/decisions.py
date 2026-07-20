@@ -1,15 +1,28 @@
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 DecisionType = Literal[
     "direct_response",
     "clarification",
     "grounded_response",
+    "partial_response",
+    "unavailable_response",
     "handoff",
     "out_of_scope",
     "tool_calls",
+    "invalid",
+]
+
+ControlAction = Literal[
+    "reject_out_of_scope",
+    "ask_clarification",
+    "finish_direct",
+    "finish_answer",
+    "finish_partial",
+    "finish_unavailable",
+    "request_handoff",
 ]
 
 
@@ -17,6 +30,7 @@ class PlannedToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    subquery: str = ""
 
 
 class OrchestratorDecision(BaseModel):
@@ -24,32 +38,216 @@ class OrchestratorDecision(BaseModel):
     response: str = ""
     reason: str = ""
     tool_calls: list[PlannedToolCall] = Field(default_factory=list)
+    control_action: ControlAction | None = None
+    used_tool_call_ids: list[str] = Field(default_factory=list)
+    unavailable_parts: list[str] = Field(default_factory=list)
+    requested_action: str = ""
+
+
+class _ControlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    response: str = Field(min_length=1, max_length=6000)
+
+
+class RejectOutOfScopeInput(_ControlInput):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class AskClarificationInput(_ControlInput):
+    missing_information: list[str] = Field(default_factory=list, max_length=5)
+
+
+class FinishDirectInput(_ControlInput):
+    pass
+
+
+class FinishAnswerInput(_ControlInput):
+    used_tool_call_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class FinishPartialInput(FinishAnswerInput):
+    unavailable_parts: list[str] = Field(min_length=1, max_length=10)
+
+
+class FinishUnavailableInput(_ControlInput):
+    unavailable_parts: list[str] = Field(min_length=1, max_length=10)
+
+
+class RequestHandoffInput(_ControlInput):
+    reason: str = Field(min_length=1, max_length=500)
+    requested_action: str = Field(min_length=1, max_length=200)
+
+
+_CONTROL_MODELS: dict[str, type[BaseModel]] = {
+    "reject_out_of_scope": RejectOutOfScopeInput,
+    "ask_clarification": AskClarificationInput,
+    "finish_direct": FinishDirectInput,
+    "finish_answer": FinishAnswerInput,
+    "finish_partial": FinishPartialInput,
+    "finish_unavailable": FinishUnavailableInput,
+    "request_handoff": RequestHandoffInput,
+}
+
+CONTROL_TOOL_NAMES = frozenset(_CONTROL_MODELS)
+
+_CONTROL_DESCRIPTIONS = {
+    "reject_out_of_scope": (
+        "Reject a request that is not about the PC peripherals store. Do not combine this "
+        "with any business tool call."
+    ),
+    "ask_clarification": (
+        "Ask exactly one focused clarification when required information is missing."
+    ),
+    "finish_direct": (
+        "Finish a response that needs no current business facts, such as identity or capability."
+    ),
+    "finish_answer": (
+        "Finish a fully supported answer. Every listed tool call id must have usable information."
+    ),
+    "finish_partial": (
+        "Finish with supported findings plus explicit unavailable parts for a mixed request."
+    ),
+    "finish_unavailable": (
+        "Finish when tools ran but no usable information was available for the requested facts."
+    ),
+    "request_handoff": (
+        "Route a store-related write action to human support when the runtime boundary did not "
+        "already intercept it. Do not call a read-only business tool as if it performed the action."
+    ),
+}
+
+
+def control_tool_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": _CONTROL_DESCRIPTIONS[name],
+                "parameters": model.model_json_schema(),
+            },
+        }
+        for name, model in _CONTROL_MODELS.items()
+    ]
 
 
 def decision_from_ai_message(
     message: AIMessage,
     *,
-    has_successful_tool_results: bool,
+    has_successful_tool_results: bool | None = None,
 ) -> OrchestratorDecision:
+    """Parse one native business-tool wave or one native control action.
+
+    ``has_successful_tool_results`` remains as a compatibility argument for callers from the
+    previous plain-text protocol. It intentionally no longer affects the decision.
+    """
+    del has_successful_tool_results
+
     if message.tool_calls:
+        control_calls = [
+            call for call in message.tool_calls if str(call.get("name")) in CONTROL_TOOL_NAMES
+        ]
+        if control_calls:
+            if len(message.tool_calls) != 1:
+                raise ValueError("a control action cannot be mixed with other tool calls")
+            return _decision_from_control_call(control_calls[0])
+
         return OrchestratorDecision(
             type="tool_calls",
             tool_calls=[
-                PlannedToolCall(
-                    id=str(call.get("id") or f"call_{index}"),
-                    name=str(call["name"]),
-                    arguments=dict(call.get("args") or {}),
-                )
+                _planned_tool_call(call, index)
                 for index, call in enumerate(message.tool_calls, start=1)
             ],
         )
 
     text = _message_content_to_text(message.content).strip()
-    if not text:
-        raise ValueError("orchestrator returned neither tool calls nor a final response")
+    if text:
+        raise ValueError("orchestrator returned plain text instead of a control action")
+    raise ValueError("orchestrator returned neither tool calls nor a control action")
+
+
+def _planned_tool_call(call: dict[str, Any], index: int) -> PlannedToolCall:
+    name = str(call["name"])
+    arguments = dict(call.get("args") or {})
+    subquery = str(arguments.pop("subquery", "")).strip()
+    return PlannedToolCall(
+        id=str(call.get("id") or f"call_{index}"),
+        name=name,
+        arguments=arguments,
+        subquery=subquery or infer_tool_subquery(name, arguments),
+    )
+
+
+def infer_tool_subquery(tool_name: str, arguments: dict[str, Any]) -> str:
+    query = str(arguments.get("query") or "").strip()
+    if query:
+        return query
+    if tool_name == "order_lookup":
+        order_id = arguments.get("order_id")
+        return f"查询订单 {order_id}" if order_id is not None else "查询当前用户的最近订单"
+    if tool_name == "catalog_facets":
+        facet = str(arguments.get("facet") or "目录信息")
+        category = str(arguments.get("category") or "").strip()
+        return f"查询{category or '商品目录'}的{facet}"
+    return f"使用 {tool_name} 查询所需信息"
+
+
+def _decision_from_control_call(call: dict[str, Any]) -> OrchestratorDecision:
+    name = str(call["name"])
+    payload = _CONTROL_MODELS[name].model_validate(call.get("args") or {})
+    data = payload.model_dump(mode="json")
+    response = str(data["response"])
+
+    if name == "reject_out_of_scope":
+        return OrchestratorDecision(
+            type="out_of_scope",
+            response=response,
+            reason=str(data["reason"]),
+            control_action=name,
+        )
+    if name == "ask_clarification":
+        return OrchestratorDecision(
+            type="clarification",
+            response=response,
+            reason="missing_information",
+            control_action=name,
+            unavailable_parts=list(data["missing_information"]),
+        )
+    if name == "finish_direct":
+        return OrchestratorDecision(
+            type="direct_response",
+            response=response,
+            control_action=name,
+        )
+    if name == "finish_answer":
+        return OrchestratorDecision(
+            type="grounded_response",
+            response=response,
+            control_action=name,
+            used_tool_call_ids=list(data["used_tool_call_ids"]),
+        )
+    if name == "finish_partial":
+        return OrchestratorDecision(
+            type="partial_response",
+            response=response,
+            control_action=name,
+            used_tool_call_ids=list(data["used_tool_call_ids"]),
+            unavailable_parts=list(data["unavailable_parts"]),
+        )
+    if name == "request_handoff":
+        return OrchestratorDecision(
+            type="handoff",
+            response=response,
+            reason=str(data["reason"]),
+            control_action=name,
+            requested_action=str(data["requested_action"]),
+        )
     return OrchestratorDecision(
-        type=("grounded_response" if has_successful_tool_results else "direct_response"),
-        response=text,
+        type="unavailable_response",
+        response=response,
+        control_action="finish_unavailable",
+        unavailable_parts=list(data["unavailable_parts"]),
     )
 
 

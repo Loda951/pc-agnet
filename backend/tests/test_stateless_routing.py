@@ -22,12 +22,13 @@ async def test_product_route_only_uses_current_message() -> None:
         )
     )
 
-    product_search = decision.tool_calls[0].arguments
+    tool_input = decision.tool_calls[0].arguments
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name == "catalog_search"
-    assert product_search["category"] == "鼠标"
-    assert product_search["max_price"] == "500"
-    assert product_search["filters"] == {"connection_type": "Wireless"}
+    assert tool_input == {
+        "query": "推荐 500 元以内的无线鼠标",
+        "limit": 3,
+    }
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,8 @@ from app.agent.prompts import (
     ORCHESTRATOR_BASE_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
     ROUTING_EXAMPLES,
+    SECURITY_AND_PRIVACY_POLICY,
+    TOOL_CALL_PROTOCOL,
     TOOL_SELECTION_RULES,
     build_orchestrator_system_prompt,
     build_orchestrator_user_prompt,
@@ -29,6 +31,7 @@ from app.agent.state import AgentState
 from app.core.config import Settings
 from app.schemas.chat import ChatRequest
 from app.tools.contracts import (
+    LLM_SAFE_TOOL_NAMES,
     BoundTool,
     DefaultToolContractProvider,
     RegistryToolExecutor,
@@ -43,7 +46,19 @@ class FakeChatModel:
         self.call_count = 0
 
     def bind_tools(self, tools: list[dict]):
-        assert len(tools) == 6
+        assert len(tools) == 13
+        tools_by_name = {tool["function"]["name"]: tool for tool in tools}
+        assert set(tools_by_name) >= {
+            "catalog_search",
+            "finish_answer",
+            "finish_unavailable",
+            "reject_out_of_scope",
+            "request_handoff",
+        }
+        for name in LLM_SAFE_TOOL_NAMES:
+            parameters = tools_by_name[name]["function"]["parameters"]
+            assert "subquery" in parameters["properties"]
+            assert "subquery" in parameters["required"]
         return self
 
     async def ainvoke(self, messages):
@@ -51,6 +66,20 @@ class FakeChatModel:
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
+
+
+def _control_message(name: str, **arguments) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": f"control-{name}",
+                "name": name,
+                "args": arguments,
+                "type": "tool_call",
+            }
+        ],
+    )
 
 
 def test_orchestrator_prompt_separates_fact_sources_without_repeating_schemas() -> None:
@@ -82,6 +111,7 @@ def test_orchestrator_prompt_covers_high_confusion_tool_boundaries() -> None:
     assert examples["Logitech 有哪些鼠标"] == ["catalog_search"]
     assert examples["我的订单发货了吗"] == ["order_lookup"]
     assert examples["商城一般多久发货"] == ["policy_search"]
+    assert examples["哪些用户购买过 Logitech 鼠标"] == ["policy_search"]
     assert examples["这单发货了吗，收到后不合适能退吗"] == [
         "order_lookup",
         "policy_search",
@@ -98,8 +128,21 @@ def test_orchestrator_prompt_defines_memory_precedence_and_fact_refresh() -> Non
     assert "<memory_policy>" in ORCHESTRATOR_SYSTEM_PROMPT
 
 
-def test_orchestrator_prompt_requests_plain_final_text_without_type_protocol() -> None:
-    assert "不要输出 TYPE 头" in ORCHESTRATOR_SYSTEM_PROMPT
+def test_orchestrator_prompt_preserves_sku_and_spu_sales_semantics() -> None:
+    assert "sku_sales_count 是当前 SKU 的销量" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "sales_count 是该 SPU 下所有 SKU" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "不得把它当成单个版本销量" in ORCHESTRATOR_SYSTEM_PROMPT
+    rules = "\n".join(TOOL_SELECTION_RULES)
+    examples = {item["request"]: item["decision"] for item in ROUTING_EXAMPLES}
+    assert "sku_sales_count 表示当前 SKU" in rules
+    assert "不得用当前累计销量推断趋势" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert examples["G502 黑色版本当前销量多少"] == ["catalog_search"]
+    assert examples["这两个颜色哪个更畅销"] == ["catalog_compare"]
+    assert examples["鼠标近三个月销量趋势"] == ["catalog_search"]
+
+
+def test_orchestrator_prompt_requires_native_control_action_without_type_protocol() -> None:
+    assert "不要直接输出正文、TYPE 头" in ORCHESTRATOR_SYSTEM_PROMPT
     assert "第一行必须且只能输出 TYPE" not in ORCHESTRATOR_SYSTEM_PROMPT
 
 
@@ -111,10 +154,14 @@ def test_orchestrator_prompt_is_split_into_agent_runtime_and_response_blocks() -
         "decision_policy",
         "instruction_priority",
         "scope_and_safety",
+        "security_and_privacy_policy",
         "fact_sources",
         "memory_policy",
+        "subquery_protocol",
         "tool_routing",
+        "tool_call_protocol",
         "tool_loop_policy",
+        "control_action_policy",
         "terminal_response_contract",
         "response_style",
     ]
@@ -122,6 +169,28 @@ def test_orchestrator_prompt_is_split_into_agent_runtime_and_response_blocks() -
     for block in expected_blocks:
         assert f"<{block}>" in ORCHESTRATOR_SYSTEM_PROMPT
         assert f"</{block}>" in ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_orchestrator_prompt_defines_sensitive_customer_data_boundary() -> None:
+    assert "其他用户的身份与联系方式" in SECURITY_AND_PRIVACY_POLICY
+    assert "不得使用\n  `reject_out_of_scope`" in SECURITY_AND_PRIVACY_POLICY
+    assert "不得调用 `order_lookup`" in SECURITY_AND_PRIVACY_POLICY
+    assert "调用 `policy_search`" in SECURITY_AND_PRIVACY_POLICY
+    assert "商品级公开统计" in SECURITY_AND_PRIVACY_POLICY
+    assert SECURITY_AND_PRIVACY_POLICY in ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_orchestrator_prompt_enforces_schema_fidelity_and_error_recovery() -> None:
+    assert "不得翻译字段名、创造别名" in TOOL_CALL_PROTOCOL
+    assert "[Tool input]" in TOOL_CALL_PROTOCOL
+    assert "query-first 工具" in TOOL_CALL_PROTOCOL
+    assert "不要生成或覆盖 Tool 内部查询计划" in TOOL_CALL_PROTOCOL
+    assert "invalid_catalog_plan" in TOOL_CALL_PROTOCOL
+    assert "code=invalid_input" in TOOL_CALL_PROTOCOL
+    assert "code=execution_error" in TOOL_CALL_PROTOCOL
+    assert "不得修改 key/value 猜测原因" in TOOL_CALL_PROTOCOL
+    assert "reused_from_tool_call_id" in TOOL_CALL_PROTOCOL
+    assert TOOL_CALL_PROTOCOL in ORCHESTRATOR_SYSTEM_PROMPT
 
 
 def test_empty_tool_result_does_not_load_failure_recovery_prompt() -> None:
@@ -240,7 +309,7 @@ def test_repeated_timeout_marks_retry_limit_and_mixed_success() -> None:
     prompt = build_tool_failure_prompt(tool_waves=tool_waves)
 
     assert "相同调用与错误已失败 2 次，已达到重试上限" in prompt
-    assert "本次执行同时存在成功结果" in prompt
+    assert "当前没有成功 Tool Result" in prompt
 
 
 def test_user_prompt_separates_request_execution_and_memory_data() -> None:
@@ -253,7 +322,22 @@ def test_user_prompt_separates_request_execution_and_memory_data() -> None:
 
     assert '<current_request>\n"换成无线"\n</current_request>' in prompt
     assert '"completed_tool_waves": 1' in prompt
+    assert '"remaining_tool_waves": 1' in prompt
+    assert '"remaining_orchestrator_calls": 1' in prompt
+    assert '"must_terminate_now": false' in prompt
     assert "<memory_context>" in prompt
+
+
+def test_user_prompt_marks_final_orchestrator_call_as_terminal_only() -> None:
+    prompt = build_orchestrator_user_prompt(
+        message="继续查",
+        tool_wave_count=2,
+        orchestrator_call_count=3,
+    )
+
+    assert '"remaining_tool_waves": 0' in prompt
+    assert '"remaining_orchestrator_calls": 0' in prompt
+    assert '"must_terminate_now": true' in prompt
 
 
 def test_native_tool_calls_are_normalized_as_one_wave() -> None:
@@ -293,7 +377,7 @@ def test_catalog_facets_tag_is_preserved_across_tool_waves() -> None:
                 {
                     "id": "facets-call",
                     "name": "catalog_facets",
-                    "args": {"query": "有哪些鼠标品牌", "facet": "brand"},
+                    "args": {"query": "有哪些鼠标品牌"},
                     "type": "tool_call",
                 }
             ],
@@ -331,7 +415,6 @@ def test_fallback_orchestrator_routes_catalog_facets_questions() -> None:
     assert decision.tool_calls[0].name == "catalog_facets"
     assert decision.tool_calls[0].arguments == {
         "query": "你们有哪些鼠标品牌？",
-        "facet": "brand",
         "limit": 20,
     }
 
@@ -342,6 +425,7 @@ def test_fallback_answer_renders_catalog_facets_result() -> None:
         {
             "tool_results": [
                 {
+                    "tool_call_id": "call-facets",
                     "name": "catalog_facets",
                     "execution": {
                         "ok": True,
@@ -365,31 +449,48 @@ def test_fallback_answer_renders_catalog_facets_result() -> None:
     assert "Razer（8 条 SKU 记录）" in answer
 
 
-def test_plain_final_response_is_directly_accepted_without_type_header() -> None:
-    decision = decision_from_ai_message(
-        AIMessage(content="你好，我是商城客服。"),
-        has_successful_tool_results=False,
-    )
+def test_finish_direct_control_action_is_parsed() -> None:
+    decision = decision_from_ai_message(_control_message("finish_direct", response="你好。"))
 
     assert decision.type == "direct_response"
-    assert decision.response == "你好，我是商城客服。"
+    assert decision.control_action == "finish_direct"
+    assert decision.response == "你好。"
 
 
-def test_plain_terminal_after_tool_results_is_grounded() -> None:
+def test_finish_answer_control_action_declares_evidence_ids() -> None:
     decision = decision_from_ai_message(
-        AIMessage(content="目前目录中有以下鼠标。"),
-        has_successful_tool_results=True,
+        _control_message(
+            "finish_answer",
+            response="目前目录中有以下鼠标。",
+            used_tool_call_ids=["call-1"],
+        )
     )
 
     assert decision.type == "grounded_response"
+    assert decision.used_tool_call_ids == ["call-1"]
     assert decision.response == "目前目录中有以下鼠标。"
 
 
+def test_request_handoff_control_action_is_parsed() -> None:
+    decision = decision_from_ai_message(
+        _control_message(
+            "request_handoff",
+            response="这个操作需要人工客服处理。",
+            reason="需要修改订单状态",
+            requested_action="取消最近订单",
+        )
+    )
+
+    assert decision.type == "handoff"
+    assert decision.control_action == "request_handoff"
+    assert decision.reason == "需要修改订单状态"
+    assert decision.requested_action == "取消最近订单"
+
+
 def test_empty_terminal_response_is_rejected() -> None:
-    with pytest.raises(ValueError, match="neither tool calls nor a final response"):
+    with pytest.raises(ValueError, match="neither tool calls nor a control action"):
         decision_from_ai_message(
             AIMessage(content=""),
-            has_successful_tool_results=True,
         )
 
 
@@ -398,7 +499,9 @@ async def test_orchestrator_accepts_complete_terminal_response() -> None:
     runtime = AgentRuntime(
         cast(object, None),
         Settings(llm_api_key=""),
-        chat_model=FakeChatModel([AIMessage(content="你好，我是商城客服。")]),
+        chat_model=FakeChatModel(
+            [_control_message("finish_direct", response="你好，我是商城客服。")]
+        ),
     )
     workflow = StateGraph(AgentState)
     workflow.add_node("orchestrate", runtime._orchestrate)
@@ -458,7 +561,10 @@ async def test_native_tool_call_is_parsed_from_complete_message() -> None:
                     tool_calls=[
                         {
                             "name": "catalog_search",
-                            "args": {"query": "无线鼠标"},
+                            "args": {
+                                "query": "无线鼠标",
+                                "subquery": "推荐无线鼠标",
+                            },
                             "id": "call-1",
                             "type": "tool_call",
                         }
@@ -486,10 +592,12 @@ async def test_native_tool_call_is_parsed_from_complete_message() -> None:
     decision = result["decision"]
     assert decision["type"] == "tool_calls"
     assert decision["tool_calls"][0]["name"] == "catalog_search"
+    assert decision["tool_calls"][0]["subquery"] == "推荐无线鼠标"
+    assert "subquery" not in decision["tool_calls"][0]["arguments"]
 
 
 @pytest.mark.asyncio
-async def test_tool_loop_accepts_plain_final_text_on_second_orchestrator_call() -> None:
+async def test_tool_loop_accepts_finish_answer_control_on_second_call() -> None:
     runtime = AgentRuntime(
         cast(object, None),
         Settings(llm_api_key=""),
@@ -506,7 +614,11 @@ async def test_tool_loop_accepts_plain_final_text_on_second_orchestrator_call() 
                         }
                     ],
                 ),
-                AIMessage(content="根据查询结果，推荐这三款无线鼠标。"),
+                _control_message(
+                    "finish_answer",
+                    response="根据查询结果，推荐这三款无线鼠标。",
+                    used_tool_call_ids=["call-1"],
+                ),
             ]
         ),
     )
@@ -532,7 +644,10 @@ async def test_tool_loop_accepts_plain_final_text_on_second_orchestrator_call() 
             "name": "catalog_search",
             "execution": {
                 "ok": True,
-                "output": {"result_type": "products", "items": []},
+                "output": {
+                    "result_type": "products",
+                    "products": [{"sku_id": 1}],
+                },
             },
         }
     ]
@@ -544,11 +659,11 @@ async def test_tool_loop_accepts_plain_final_text_on_second_orchestrator_call() 
 
 
 @pytest.mark.asyncio
-async def test_empty_terminal_after_successful_tool_uses_grounded_fallback() -> None:
+async def test_invalid_terminal_after_usable_tool_uses_immediate_grounded_fallback() -> None:
     runtime = AgentRuntime(
         cast(object, None),
         Settings(llm_api_key=""),
-        chat_model=FakeChatModel([AIMessage(content="")]),
+        chat_model=FakeChatModel([AIMessage(content=""), AIMessage(content="")]),
     )
 
     state = cast(
@@ -562,6 +677,7 @@ async def test_empty_terminal_after_successful_tool_uses_grounded_fallback() -> 
             "intent": "catalog_facets",
             "tool_results": [
                 {
+                    "tool_call_id": "call-facets-terminal",
                     "name": "catalog_facets",
                     "execution": {
                         "ok": True,
@@ -582,10 +698,13 @@ async def test_empty_terminal_after_successful_tool_uses_grounded_fallback() -> 
     result = await runtime._orchestrate(state)
 
     assert _has_successful_tool_result(state) is True
-    assert result["decision"]["type"] == "grounded_response"
     assert result["decision"]["reason"] == "invalid_orchestrator_response:ValueError"
-    assert "Logitech（12 条 SKU 记录）" in result["decision"]["response"]
-    assert "请补充具体商品" not in result["decision"]["response"]
+    guarded = await runtime._terminal_guard(result)
+
+    assert guarded["terminal_guard_status"] == "fallback"
+    assert guarded["decision"]["type"] == "grounded_response"
+    assert runtime.orchestrator.call_count == 1
+    assert "Logitech（12 条 SKU 记录）" in guarded["decision"]["response"]
 
 
 @pytest.mark.asyncio
@@ -617,7 +736,7 @@ async def test_run_stream_sends_one_validated_answer_delta_before_done() -> None
         cast(object, None),
         Settings(llm_api_key=""),
         chat_model=FakeChatModel(
-            [AIMessage(content="完整校验后的回答")]
+            [_control_message("finish_direct", response="完整校验后的回答")]
         ),
     )
 
@@ -652,6 +771,7 @@ def test_tool_results_are_reconstructed_as_tool_messages() -> None:
                             "id": "call-1",
                             "name": "catalog_search",
                             "arguments": {"query": "无线鼠标"},
+                            "subquery": "推荐无线鼠标",
                         }
                     ],
                     "results": [
@@ -674,6 +794,8 @@ def test_tool_results_are_reconstructed_as_tool_messages() -> None:
     messages = _orchestrator_messages(state, call_count=2)
 
     assert isinstance(messages[-1], ToolMessage)
+    assert isinstance(messages[-2], AIMessage)
+    assert messages[-2].tool_calls[0]["args"]["subquery"] == "推荐无线鼠标"
     assert messages[-1].tool_call_id == "call-1"
     assert '"result_type": "empty"' in str(messages[-1].content)
     assert "\n<tool_failure_recovery>\n" not in str(messages[0].content)
@@ -753,7 +875,16 @@ def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
 
     assert guarded.type == "clarification"
     assert guarded.tool_calls == []
-    assert "处理上限" in guarded.response
+    assert "处理上限" not in guarded.response
+    assert "补充具体商品" in guarded.response
+
+
+def test_orchestrator_prompt_uses_tool_specific_sufficiency_without_internal_limits() -> None:
+    assert "`catalog_search` 返回至少一个" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "`catalog_compare` 返回至少两款" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "至少一篇能直接支持核心问题" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "同一套 `finish_answer`" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "最终回复不得提及调用次数" in ORCHESTRATOR_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

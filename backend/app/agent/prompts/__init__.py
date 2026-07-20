@@ -6,6 +6,7 @@ from app.agent.prompts.dynamic import (
     build_orchestrator_user_prompt,
     build_tool_failure_prompt,
 )
+from app.agent.prompts.security import SECURITY_AND_PRIVACY_POLICY
 from app.agent.prompts.static import (
     AGENT_IDENTITY,
     BOUNDARY_PROTOCOL_PROMPT,
@@ -17,6 +18,7 @@ from app.agent.prompts.static import (
     SYSTEM_PROMPT,
     TOOL_SELECTION_RULES,
 )
+from app.agent.prompts.tool_call import TOOL_CALL_PROTOCOL
 
 ORCHESTRATOR_SYSTEM_PROMPT = ORCHESTRATOR_BASE_PROMPT
 
@@ -31,8 +33,10 @@ __all__ = [
     "ORCHESTRATOR_BASE_PROMPT",
     "ORCHESTRATOR_SYSTEM_PROMPT",
     "ROUTING_EXAMPLES",
+    "SECURITY_AND_PRIVACY_POLICY",
     "SYSTEM_PROMPT",
     "TOOL_SELECTION_RULES",
+    "TOOL_CALL_PROTOCOL",
     "build_orchestrator_input",
     "build_orchestrator_system_prompt",
     "build_orchestrator_user_prompt",

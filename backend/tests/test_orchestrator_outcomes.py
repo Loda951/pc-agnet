@@ -1,0 +1,810 @@
+from typing import Any, cast
+
+import pytest
+from langchain_core.messages import AIMessage
+
+from app.agent.decisions import OrchestratorDecision, PlannedToolCall, decision_from_ai_message
+from app.agent.graph import AgentRuntime, _fallback_answer, _has_successful_tool_result
+from app.agent.outcomes import (
+    build_subquery_ledger,
+    has_usable_information,
+    normalize_tool_result,
+    tool_call_fingerprint,
+    validate_terminal_decision,
+)
+from app.agent.state import AgentState
+from app.core.config import Settings
+from app.schemas.catalog import ProductCard
+
+
+def _result(
+    name: str,
+    output: dict[str, Any] | None = None,
+    *,
+    call_id: str = "call-1",
+    ok: bool = True,
+    error_code: str = "timeout",
+) -> dict[str, Any]:
+    execution: dict[str, Any] = {"ok": ok}
+    if ok:
+        execution["output"] = output
+    else:
+        execution["error"] = {"code": error_code}
+    return {
+        "tool_call_id": call_id,
+        "name": name,
+        "execution": execution,
+    }
+
+
+def _control_message(name: str, **arguments: Any) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": f"control-{name}",
+                "name": name,
+                "args": arguments,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_outcome", "usable"),
+    [
+        (
+            _result(
+                "catalog_search",
+                {"result_type": "products", "products": [{"sku_id": 1}]},
+            ),
+            "usable",
+            True,
+        ),
+        (
+            _result("catalog_search", {"result_type": "empty", "products": []}),
+            "empty",
+            False,
+        ),
+        (
+            _result(
+                "catalog_search",
+                {
+                    "result_type": "empty",
+                    "products": [],
+                    "diagnostics": [{"code": "invalid_catalog_plan"}],
+                },
+            ),
+            "insufficient",
+            False,
+        ),
+        (
+            _result(
+                "catalog_search",
+                {
+                    "result_type": "empty",
+                    "products": [],
+                    "diagnostics": [{"code": "unsupported_query"}],
+                },
+            ),
+            "unsupported",
+            False,
+        ),
+        (
+            _result(
+                "catalog_search",
+                {"result_type": "empty", "products": [{"sku_id": 1}]},
+            ),
+            "insufficient",
+            False,
+        ),
+        (
+            _result(
+                "catalog_search",
+                {
+                    "result_type": "empty",
+                    "products": [],
+                    "ranking_strategy": "unsupported_query",
+                    "query_plan": {"supported": False},
+                },
+            ),
+            "unsupported",
+            False,
+        ),
+        (
+            _result(
+                "catalog_compare",
+                {"result_type": "comparison", "products": [{"sku_id": 1}]},
+            ),
+            "insufficient",
+            False,
+        ),
+        (
+            _result(
+                "catalog_facets",
+                {"result_type": "facets", "items": [{"value": "Logitech"}]},
+            ),
+            "usable",
+            True,
+        ),
+        (
+            _result("order_lookup", {"result_type": "not_found", "candidates": []}),
+            "not_found",
+            False,
+        ),
+        (
+            _result("knowledge_search", {"result_type": "empty", "documents": []}),
+            "empty",
+            False,
+        ),
+        (_result("policy_search", ok=False), "error", False),
+    ],
+)
+def test_normalize_tool_result_distinguishes_execution_from_usable_information(
+    result: dict[str, Any],
+    expected_outcome: str,
+    usable: bool,
+) -> None:
+    outcome = normalize_tool_result(result)
+
+    assert outcome.outcome == expected_outcome
+    assert outcome.has_usable_information is usable
+
+
+def test_subquery_ledger_preserves_call_identity_arguments_and_outcome() -> None:
+    waves = [
+        {
+            "wave": 1,
+            "calls": [
+                {
+                    "id": "catalog-1",
+                    "name": "catalog_search",
+                    "arguments": {"query": "销量趋势"},
+                    "subquery": "查询鼠标销量趋势",
+                }
+            ],
+            "results": [
+                _result(
+                    "catalog_search",
+                    {
+                        "result_type": "empty",
+                        "products": [],
+                        "ranking_strategy": "unsupported_query",
+                    },
+                    call_id="catalog-1",
+                )
+            ],
+        }
+    ]
+
+    ledger = build_subquery_ledger(waves)
+
+    assert len(ledger) == 1
+    assert ledger[0].tool_call_id == "catalog-1"
+    assert ledger[0].subquery == "查询鼠标销量趋势"
+    assert ledger[0].subquery_id.startswith("sq_")
+    assert ledger[0].canonical_query == "销量趋势"
+    assert ledger[0].query_fingerprint
+    assert ledger[0].initial_tool_call_id == "catalog-1"
+    assert ledger[0].status == "unavailable"
+    assert ledger[0].arguments == {"query": "销量趋势"}
+    assert ledger[0].outcome == "unsupported"
+    assert ledger[0].fingerprint
+    assert ledger[0].reused_from_tool_call_id is None
+    assert has_usable_information([item.model_dump() for item in ledger]) is False
+
+
+def test_usable_outcome_is_ready_to_answer_not_implicitly_request_complete() -> None:
+    waves = [
+        {
+            "wave": 1,
+            "calls": [
+                {
+                    "id": "knowledge-1",
+                    "name": "knowledge_search",
+                    "arguments": {"query": "DPI 怎么选"},
+                    "subquery": "解释 DPI 怎么选",
+                }
+            ],
+            "results": [
+                _result(
+                    "knowledge_search",
+                    {
+                        "result_type": "documents",
+                        "documents": [{"title": "鼠标 DPI 指南"}],
+                    },
+                    call_id="knowledge-1",
+                )
+            ],
+        }
+    ]
+
+    ledger = build_subquery_ledger(waves)
+
+    assert ledger[0].outcome == "usable"
+    assert ledger[0].status == "ready_to_answer"
+    assert ledger[0].subquery == "解释 DPI 怎么选"
+
+
+def test_new_attempt_supersedes_old_status_for_the_same_subquery() -> None:
+    waves = [
+        {
+            "wave": 1,
+            "calls": [
+                {
+                    "id": "catalog-1",
+                    "name": "catalog_search",
+                    "arguments": {"query": "无线鼠标", "brands": ["Razer"]},
+                    "subquery": "推荐无线鼠标",
+                }
+            ],
+            "results": [
+                _result(
+                    "catalog_search",
+                    {"result_type": "empty", "products": []},
+                    call_id="catalog-1",
+                )
+            ],
+        },
+        {
+            "wave": 2,
+            "calls": [
+                {
+                    "id": "catalog-2",
+                    "name": "catalog_search",
+                    "arguments": {"query": "无线鼠标"},
+                    "subquery": "推荐无线鼠标",
+                }
+            ],
+            "results": [
+                _result(
+                    "catalog_search",
+                    {
+                        "result_type": "products",
+                        "products": [{"sku_id": 1}],
+                    },
+                    call_id="catalog-2",
+                )
+            ],
+        },
+    ]
+
+    ledger = build_subquery_ledger(waves)
+
+    assert [entry.status for entry in ledger] == ["superseded", "ready_to_answer"]
+    assert [entry.canonical_query for entry in ledger] == ["无线鼠标", "无线鼠标"]
+    assert ledger[0].query_fingerprint == ledger[1].query_fingerprint
+    assert ledger[0].subquery_id == ledger[1].subquery_id
+    assert ledger[1].initial_tool_call_id == "catalog-1"
+
+
+def test_tool_call_fingerprint_normalizes_equivalent_arguments() -> None:
+    first = tool_call_fingerprint(
+        "catalog_search",
+        {
+            "query": "  Wireless   Mouse ",
+            "brands": ["Razer", "Logitech"],
+            "filters": {"connection_type": "Wireless"},
+            "category": None,
+        },
+    )
+    equivalent = tool_call_fingerprint(
+        "CATALOG_SEARCH",
+        {
+            "filters": {"connection_type": "wireless"},
+            "brands": ["logitech", "razer"],
+            "query": "wireless mouse",
+        },
+    )
+    different = tool_call_fingerprint(
+        "catalog_search",
+        {
+            "query": "wireless mouse",
+            "brands": ["Logitech"],
+            "filters": {"connection_type": "Wireless"},
+        },
+    )
+
+    assert first == equivalent
+    assert first != different
+
+
+@pytest.mark.asyncio
+async def test_graph_normalization_nodes_publish_the_ledger_to_state() -> None:
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    tool_result = _result(
+        "knowledge_search",
+        {"result_type": "empty", "documents": []},
+        call_id="knowledge-1",
+    )
+    state = cast(
+        AgentState,
+        {
+            "tool_results": [tool_result],
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "knowledge-1",
+                            "name": "knowledge_search",
+                            "arguments": {"query": "冷门问题"},
+                        }
+                    ],
+                    "results": [tool_result],
+                }
+            ],
+        },
+    )
+
+    normalized = await runtime._normalize_tool_results(state)
+    updated = await runtime._update_subquery_ledger(normalized)
+
+    assert updated["normalized_tool_results"][0]["outcome"] == "empty"
+    assert updated["subquery_ledger"][0]["tool_call_id"] == "knowledge-1"
+    assert updated["subquery_ledger"][0]["arguments"] == {"query": "冷门问题"}
+
+
+def test_ok_empty_result_is_not_reported_as_successful_evidence() -> None:
+    state = cast(
+        AgentState,
+        {"tool_results": [_result("catalog_search", {"result_type": "empty", "products": []})]},
+    )
+
+    assert _has_successful_tool_result(state) is False
+
+
+def test_catalog_fallback_distinguishes_sku_and_spu_sales_counts() -> None:
+    state = cast(
+        AgentState,
+        {
+            "message": "这款鼠标销量多少？",
+            "products": [
+                ProductCard(
+                    spu_id=10,
+                    sku_id=101,
+                    title="Razer Test Mouse 黑色",
+                    brand="Razer",
+                    category="mouse",
+                    price="399.00",
+                    stock=8,
+                    sku_sales_count=5,
+                    sales_count=12,
+                )
+            ],
+        },
+    )
+
+    answer = _fallback_answer(state)
+
+    assert "SKU 销量 5" in answer
+    assert "SPU 总销量 12" in answer
+
+
+def test_duplicate_tool_call_ids_are_normalized_before_ledger_execution() -> None:
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    decision = OrchestratorDecision(
+        type="tool_calls",
+        tool_calls=[
+            PlannedToolCall(id="reused", name="catalog_search", arguments={"query": "鼠标"}),
+            PlannedToolCall(id="reused", name="policy_search", arguments={"query": "退货"}),
+        ],
+    )
+    state = cast(
+        AgentState,
+        {
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [{"id": "reused", "name": "knowledge_search"}],
+                }
+            ],
+            "tool_wave_count": 0,
+        },
+    )
+
+    normalized = runtime._validate_decision_budget(state, decision, call_count=2)
+    call_ids = [call.id for call in normalized.tool_calls]
+
+    assert call_ids == ["call_2_1", "call_2_2"]
+    assert len(call_ids) == len(set(call_ids))
+
+
+def test_finish_answer_requires_declared_usable_tool_call_ids() -> None:
+    ledger = [
+        {
+            "tool_call_id": "empty-1",
+            "has_usable_information": False,
+        },
+        {
+            "tool_call_id": "usable-1",
+            "has_usable_information": True,
+        },
+    ]
+    valid = OrchestratorDecision(
+        type="grounded_response",
+        response="有依据的回答",
+        control_action="finish_answer",
+        used_tool_call_ids=["usable-1"],
+    )
+    invalid = valid.model_copy(update={"used_tool_call_ids": ["empty-1"]})
+
+    assert validate_terminal_decision(valid, ledger).valid is True
+    assert validate_terminal_decision(invalid, ledger).valid is False
+
+
+def test_finish_partial_requires_usable_part_and_explicit_unavailable_part() -> None:
+    ledger = [{"tool_call_id": "catalog-1", "has_usable_information": True}]
+    decision = OrchestratorDecision(
+        type="partial_response",
+        response="鼠标已找到；天气不在服务范围。",
+        control_action="finish_partial",
+        used_tool_call_ids=["catalog-1"],
+        unavailable_parts=["天气"],
+    )
+
+    assert validate_terminal_decision(decision, ledger).valid is True
+    assert (
+        validate_terminal_decision(
+            decision.model_copy(update={"unavailable_parts": []}), ledger
+        ).valid
+        is False
+    )
+
+
+def test_out_of_scope_and_direct_actions_cannot_follow_business_calls() -> None:
+    ledger = [{"tool_call_id": "call-1", "has_usable_information": False}]
+    out_of_scope = OrchestratorDecision(
+        type="out_of_scope",
+        response="不支持",
+        reason="not_pc_store",
+        control_action="reject_out_of_scope",
+    )
+    direct = OrchestratorDecision(
+        type="direct_response",
+        response="直接回答",
+        control_action="finish_direct",
+    )
+
+    assert validate_terminal_decision(out_of_scope, ledger).valid is False
+    assert validate_terminal_decision(direct, ledger).valid is False
+
+
+def test_finish_direct_requires_runtime_allowlist_even_without_tool_calls() -> None:
+    direct = OrchestratorDecision(
+        type="direct_response",
+        response="明天会下雨。",
+        control_action="finish_direct",
+    )
+
+    validation = validate_terminal_decision(direct, [], allow_direct=False)
+
+    assert validation.valid is False
+    assert validation.reason == "direct_answer_not_allowed_for_this_request"
+
+
+def test_finish_unavailable_requires_tool_results_and_zero_usable_information() -> None:
+    decision = OrchestratorDecision(
+        type="unavailable_response",
+        response="没有查到",
+        control_action="finish_unavailable",
+        unavailable_parts=["商品信息"],
+    )
+    empty_ledger = [{"tool_call_id": "empty-1", "has_usable_information": False}]
+    usable_ledger = [{"tool_call_id": "usable-1", "has_usable_information": True}]
+
+    assert validate_terminal_decision(decision, empty_ledger).valid is True
+    assert validate_terminal_decision(decision, []).valid is False
+    assert validate_terminal_decision(decision, usable_ledger).valid is False
+
+
+def test_control_action_cannot_be_mixed_with_business_tool_call() -> None:
+    message = _control_message("finish_direct", response="你好")
+    message.tool_calls.append(
+        {
+            "id": "catalog-1",
+            "name": "catalog_search",
+            "args": {"query": "鼠标"},
+            "type": "tool_call",
+        }
+    )
+
+    with pytest.raises(ValueError, match="cannot be mixed"):
+        decision_from_ai_message(message)
+
+
+def test_plain_text_terminal_is_rejected_for_guarded_replanning() -> None:
+    with pytest.raises(ValueError, match="plain text instead of a control action"):
+        decision_from_ai_message(AIMessage(content="我查到了三款商品。"))
+
+
+class _FakeChatModel:
+    def __init__(self, responses: list[AIMessage]):
+        self.responses = responses
+        self.call_count = 0
+
+    def bind_tools(self, tools: list[dict[str, Any]]):
+        assert len(tools) == 13
+        return self
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        response = self.responses[self.call_count]
+        self.call_count += 1
+        return response
+
+
+@pytest.mark.asyncio
+async def test_semantic_out_of_scope_control_is_structurally_routed() -> None:
+    model = _FakeChatModel(
+        [
+            _control_message(
+                "reject_out_of_scope",
+                response="我不能回答天气。",
+                reason="与 PC 外设商城无关",
+            )
+        ]
+    )
+    runtime = AgentRuntime(
+        cast(Any, None),
+        Settings(llm_api_key=""),
+        chat_model=model,
+    )
+    state = cast(
+        AgentState,
+        {
+            "message": "你知道明天会不会下雨吗？",
+            "history": [],
+            "tool_results": [],
+            "tool_waves": [],
+            "subquery_ledger": [],
+            "tool_wave_count": 0,
+            "orchestrator_call_count": 0,
+        },
+    )
+
+    result = await runtime._orchestrate(state)
+    guarded = await runtime._terminal_guard(result)
+
+    assert model.call_count == 1
+    assert guarded["decision"]["type"] == "out_of_scope"
+    assert guarded["boundary"]["classification"] == "out_of_scope"
+    assert guarded["terminal_guard_status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_out_of_scope_request_cannot_be_smuggled_through_finish_direct() -> None:
+    model = _FakeChatModel(
+        [
+            _control_message("finish_direct", response="明天会下雨。"),
+            _control_message(
+                "reject_out_of_scope",
+                response="我不能回答天气。",
+                reason="与 PC 外设商城无关",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
+    state = cast(
+        AgentState,
+        {
+            "message": "你知道明天会不会下雨吗？",
+            "history": [],
+            "tool_results": [],
+            "tool_waves": [],
+            "subquery_ledger": [],
+            "tool_wave_count": 0,
+            "orchestrator_call_count": 0,
+            "terminal_guard_replan_count": 0,
+        },
+    )
+
+    first = await runtime._orchestrate(state)
+    first_guard = await runtime._terminal_guard(first)
+    assert first_guard["terminal_guard_status"] == "replan"
+    assert first_guard["terminal_guard_feedback"] == (
+        "direct_answer_not_allowed_for_this_request"
+    )
+
+    second = await runtime._orchestrate(first_guard)
+    second_guard = await runtime._terminal_guard(second)
+
+    assert model.call_count == 2
+    assert second_guard["terminal_guard_status"] == "accepted"
+    assert second_guard["boundary"]["classification"] == "out_of_scope"
+
+
+@pytest.mark.asyncio
+async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() -> None:
+    model = _FakeChatModel(
+        [
+            _control_message(
+                "finish_answer",
+                response="销量正在上涨。",
+                used_tool_call_ids=["catalog-1"],
+            ),
+            _control_message(
+                "finish_unavailable",
+                response="销量数据显示最近三个月上涨了 20%。",
+                unavailable_parts=["销量趋势"],
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        cast(Any, None),
+        Settings(llm_api_key=""),
+        chat_model=model,
+    )
+    unsupported = _result(
+        "catalog_search",
+        {
+            "result_type": "empty",
+            "products": [],
+            "ranking_strategy": "unsupported_query",
+            "query_plan": {"supported": False},
+        },
+        call_id="catalog-1",
+    )
+    state = cast(
+        AgentState,
+        {
+            "message": "分析一下鼠标最近三个月的销量趋势",
+            "history": [],
+            "tool_results": [unsupported],
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "catalog-1",
+                            "name": "catalog_search",
+                            "arguments": {"query": "鼠标销量趋势"},
+                        }
+                    ],
+                    "results": [unsupported],
+                }
+            ],
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "catalog-1",
+                    "tool_name": "catalog_search",
+                    "outcome": "unsupported",
+                    "has_usable_information": False,
+                    "reason": "query_not_supported_by_tool",
+                    "wave": 1,
+                    "arguments": {"query": "鼠标销量趋势"},
+                }
+            ],
+            "tool_wave_count": 1,
+            "orchestrator_call_count": 1,
+            "terminal_guard_replan_count": 0,
+        },
+    )
+
+    first = await runtime._orchestrate(state)
+    first_guard = await runtime._terminal_guard(first)
+    assert first_guard["terminal_guard_status"] == "replan"
+    assert first_guard["terminal_guard_feedback"] == (
+        "finish_answer_requires_only_active_usable_tool_call_ids"
+    )
+
+    second = await runtime._orchestrate(first_guard)
+    second_guard = await runtime._terminal_guard(second)
+
+    assert second_guard["terminal_guard_status"] == "accepted"
+    assert second_guard["decision"]["type"] == "unavailable_response"
+    assert second_guard["boundary"]["classification"] == "in_scope_auto"
+    assert "不支持" in second_guard["decision"]["response"]
+    assert "上涨" not in second_guard["decision"]["response"]
+
+
+@pytest.mark.asyncio
+async def test_usable_catalog_result_accepts_grounded_answer_without_replan() -> None:
+    model = _FakeChatModel(
+        [
+            _control_message(
+                "finish_answer",
+                response="找到一款符合预算的无线鼠标。",
+                used_tool_call_ids=["catalog-usable"],
+            )
+        ]
+    )
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
+    state = cast(
+        AgentState,
+        {
+            "message": "推荐 300 元以内的无线鼠标",
+            "history": [],
+            "tool_results": [],
+            "tool_waves": [],
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "catalog-usable",
+                    "tool_name": "catalog_search",
+                    "outcome": "usable",
+                    "has_usable_information": True,
+                }
+            ],
+            "tool_wave_count": 1,
+            "orchestrator_call_count": 1,
+            "terminal_guard_replan_count": 0,
+        },
+    )
+
+    result = await runtime._orchestrate(state)
+    guarded = await runtime._terminal_guard(result)
+
+    assert guarded["terminal_guard_status"] == "accepted"
+    assert guarded["decision"]["type"] == "grounded_response"
+    assert guarded["decision"]["used_tool_call_ids"] == ["catalog-usable"]
+    assert guarded["subquery_ledger"][0]["status"] == "answered"
+
+
+@pytest.mark.asyncio
+async def test_mixed_request_accepts_partial_answer_with_explicit_unhandled_part() -> None:
+    model = _FakeChatModel(
+        [
+            _control_message(
+                "finish_partial",
+                response="我找到了无线鼠标；天气不属于商城客服范围。",
+                used_tool_call_ids=["catalog-usable"],
+                unavailable_parts=["明天天气"],
+            )
+        ]
+    )
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
+    state = cast(
+        AgentState,
+        {
+            "message": "推荐无线鼠标，顺便说明天天气",
+            "history": [],
+            "tool_results": [],
+            "tool_waves": [],
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "catalog-usable",
+                    "tool_name": "catalog_search",
+                    "outcome": "usable",
+                    "has_usable_information": True,
+                }
+            ],
+            "tool_wave_count": 1,
+            "orchestrator_call_count": 1,
+            "terminal_guard_replan_count": 0,
+        },
+    )
+
+    result = await runtime._orchestrate(state)
+    guarded = await runtime._terminal_guard(result)
+
+    assert guarded["terminal_guard_status"] == "accepted"
+    assert guarded["decision"]["type"] == "partial_response"
+    assert guarded["decision"]["unavailable_parts"] == ["明天天气"]
+
+
+@pytest.mark.asyncio
+async def test_memory_without_current_tool_result_cannot_authorize_grounded_answer() -> None:
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    state = cast(
+        AgentState,
+        {
+            "message": "之前那款鼠标现在多少钱？",
+            "decision": OrchestratorDecision(
+                type="grounded_response",
+                response="记忆里的价格还是 299 元。",
+                control_action="finish_answer",
+                used_tool_call_ids=["memory-price"],
+            ).model_dump(mode="json"),
+            "working_memory": {"catalog": {"products": [{"price": "299"}]}},
+            "tool_results": [],
+            "subquery_ledger": [],
+            "orchestrator_call_count": 3,
+            "terminal_guard_replan_count": 1,
+        },
+    )
+
+    guarded = await runtime._terminal_guard(state)
+
+    assert guarded["terminal_guard_status"] == "fallback"
+    assert guarded["decision"]["type"] == "clarification"
+    assert "299" not in guarded["decision"]["response"]
