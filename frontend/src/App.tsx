@@ -457,10 +457,10 @@ export default function App() {
     const contextOrderId = response.order?.id ?? order?.id;
     setConversationId(response.conversation_id);
     setBoundary(response.boundary);
-    setEvidence(response.boundary.classification === "out_of_scope" ? [] : response.evidence);
-    setProducts(response.boundary.classification === "out_of_scope" ? [] : response.products);
+    setEvidence(isBlockedBoundary(response.boundary) ? [] : response.evidence);
+    setProducts(isBlockedBoundary(response.boundary) ? [] : response.products);
     setOrder((current) => {
-      if (response.boundary.classification === "out_of_scope") return null;
+      if (isBlockedBoundary(response.boundary)) return null;
       return response.order ?? current;
     });
     setSuggestedActions(response.suggested_actions);
@@ -476,7 +476,7 @@ export default function App() {
       productCount: response.products.length,
       orderId: currentTurnOrderId,
       suggestedActions: response.suggested_actions,
-      products: response.boundary.classification === "out_of_scope" ? [] : response.products
+      products: isBlockedBoundary(response.boundary) ? [] : response.products
     }));
     setTurns((current) => [
       ...current,
@@ -665,9 +665,9 @@ export default function App() {
     setInput("");
     setMessages(restoredMessages.length ? restoredMessages : [initialAssistantMessage()]);
     setBoundary(restoredBoundary);
-    setEvidence(restoredBoundary?.classification === "out_of_scope" ? [] : restoredEvidence);
-    setProducts(restoredBoundary?.classification === "out_of_scope" ? [] : restoredProducts);
-    setOrder(restoredBoundary?.classification === "out_of_scope" ? null : restoredOrder);
+    setEvidence(restoredBoundary && isBlockedBoundary(restoredBoundary) ? [] : restoredEvidence);
+    setProducts(restoredBoundary && isBlockedBoundary(restoredBoundary) ? [] : restoredProducts);
+    setOrder(restoredBoundary && isBlockedBoundary(restoredBoundary) ? null : restoredOrder);
     setSuggestedActions([]);
     setTurns(turnsFromHistory(detail));
     setHandoffNotice(null);
@@ -778,8 +778,16 @@ export default function App() {
 
 function statusForBoundary(boundary: BoundaryClassification): ResponseStatus {
   if (boundary.classification === "human_handoff_required") return "handoff";
-  if (boundary.classification === "out_of_scope") return "blocked";
+  if (isBlockedBoundary(boundary)) return "blocked";
   return "success";
+}
+
+function isBlockedBoundary(boundary: BoundaryClassification): boolean {
+  return (
+    boundary.classification === "out_of_scope" ||
+    boundary.classification === "unsupported" ||
+    boundary.classification === "security_refusal"
+  );
 }
 
 function initialAssistantMessage(): ChatMessage {
@@ -848,7 +856,9 @@ function boundaryFromMetadata(metadata: Record<string, unknown>): BoundaryClassi
   if (
     classification !== "in_scope_auto" &&
     classification !== "human_handoff_required" &&
-    classification !== "out_of_scope"
+    classification !== "out_of_scope" &&
+    classification !== "unsupported" &&
+    classification !== "security_refusal"
   ) {
     return null;
   }

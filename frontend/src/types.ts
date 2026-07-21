@@ -86,7 +86,9 @@ export type AuthSession = {
 export type BoundaryClassificationValue =
   | "in_scope_auto"
   | "human_handoff_required"
-  | "out_of_scope";
+  | "out_of_scope"
+  | "unsupported"
+  | "security_refusal";
 
 export type BoundaryClassification = {
   classification: BoundaryClassificationValue;

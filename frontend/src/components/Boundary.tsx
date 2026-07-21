@@ -64,6 +64,20 @@ export function boundaryMeta(boundary: BoundaryClassification): BoundaryMeta {
       label: "拒答"
     };
   }
+  if (boundary.classification === "unsupported") {
+    return {
+      className: "blocked",
+      icon: <Ban size={14} />,
+      label: "能力暂不支持"
+    };
+  }
+  if (boundary.classification === "security_refusal") {
+    return {
+      className: "blocked",
+      icon: <ShieldCheck size={14} />,
+      label: "安全拒绝"
+    };
+  }
   return {
     className: "auto",
     icon: <ShieldCheck size={14} />,
