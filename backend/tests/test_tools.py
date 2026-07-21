@@ -649,6 +649,69 @@ async def test_rule_catalog_planner_fills_missing_fields_from_typed_preferences(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected_usage"),
+    [
+        ("开会用的摄像头", "video_meeting"),
+        ("直播摄像头", "live_streaming"),
+    ],
+)
+async def test_llm_catalog_planner_fills_common_usage_when_model_omits_it(
+    query: str, expected_usage: str
+) -> None:
+    chat = FakeChatModel(
+        '{"category":"webcam","brands":[],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(CatalogSearchInput(query=query, limit=3))
+
+    assert plan.usage_scenario == expected_usage
+    assert expected_usage in chat.calls[0][0].content
+
+
+def test_usage_scenario_alias_is_normalized_and_mapped_to_concrete_specs() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="video conference webcam",
+            category="webcam",
+            usage_scenario="video conferencing",
+        )
+    )
+
+    mapped = catalog_tools._apply_usage_scenario_mapping(plan)
+    request = catalog_tools._plan_to_product_search(mapped)
+
+    assert mapped.usage_scenario == "video_meeting"
+    assert mapped.usage_mapping["status"] == "applied"
+    assert mapped.usage_mapping["source"] == "deterministic_spec_mapping"
+    assert request.usage_scenario is None
+    assert request.usage_required_conditions[0].key == "microphone"
+    assert request.usage_required_conditions[0].values == ["是"]
+
+
+def test_unconfigured_usage_category_combination_is_explicitly_unsupported() -> None:
+    plan = validate_product_query_plan(
+        ProductQueryPlan(
+            query="办公鼠标",
+            category="mouse",
+            usage_scenario="office",
+        )
+    )
+
+    mapped = catalog_tools._apply_usage_scenario_mapping(plan)
+
+    assert mapped.supported is False
+    assert mapped.usage_mapping == {
+        "status": "unavailable",
+        "rule_version": "v1",
+        "scenario": "office",
+        "category": "mouse",
+    }
+
+
+@pytest.mark.asyncio
 async def test_llm_catalog_planner_fills_missing_high_confidence_query_constraints() -> None:
     chat = FakeChatModel(
         '{"category":"mouse","brands":["Logitech"],"filters":{},'
@@ -1043,6 +1106,152 @@ async def test_catalog_search_empty_result_has_stable_diagnostics(
     assert result.query_plan["error_type"] == "empty_result"
     assert result.diagnostics[0].code == "empty_result"
     assert result.diagnostics[0].recommended_action == "relax_filters_or_ask_followup"
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_applies_office_keyboard_spec_mapping(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        contract = DefaultToolContractProvider().get_contract("catalog_search")
+        assert contract is not None
+        execution = await RegistryToolExecutor(session, TOOL_TEST_SETTINGS).execute(
+            contract,
+            {"query": "办公键盘", "limit": 3},
+            {"user_id": 1},
+        )
+
+    assert execution.ok is True
+    assert execution.output is not None
+    assert execution.output["query_plan"]["category"] == "keyboard"
+    assert execution.output["query_plan"]["usage_scenario"] == "office"
+    assert execution.output["query_plan"]["usage_mapping"]["status"] == "applied"
+    assert execution.output["query_plan"]["usage_mapping"]["rule_version"] == "v1"
+    assert execution.output["result_type"] == "products"
+    assert execution.output["products"]
+    assert all(
+        product["specs"]["switches"] == "静音红轴"
+        for product in execution.output["products"]
+    )
+    assert execution.output["query_plan"]["error_type"] is None
+    assert execution.output["diagnostics"][0]["code"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_applies_video_meeting_webcam_requirements(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query="开会用的摄像头", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["usage_scenario"] == "video_meeting"
+    assert result.query_plan["usage_mapping"]["status"] == "applied"
+    assert result.products
+    assert all(product.specs["microphone"] == "是" for product in result.products)
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_applies_live_streaming_webcam_requirements(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query="直播摄像头", limit=3)
+        )
+
+    assert result.result_type == "products"
+    assert result.query_plan["usage_scenario"] == "live_streaming"
+    assert result.query_plan["usage_mapping"]["status"] == "applied"
+    assert result.products
+    assert all(
+        product.specs["resolution"] in {"1080p HDR", "1440p", "4K"}
+        and product.specs["frame_rate"] in {"60fps", "90fps"}
+        for product in result.products
+    )
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_reports_unavailable_usage_category_mapping() -> None:
+    result = await CatalogToolService(SimpleNamespace()).search(
+        CatalogSearchInput(query="办公鼠标", limit=3)
+    )
+
+    assert result.result_type == "empty"
+    assert result.query_plan["usage_scenario"] == "office"
+    assert result.query_plan["usage_mapping"]["status"] == "unavailable"
+    assert result.query_plan["error_type"] == "usage_mapping_unavailable"
+    assert result.diagnostics[0].code == "usage_mapping_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_categoryless_usage_search_runs_category_rules_in_parallel_and_diversifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_queries = 0
+    max_active_queries = 0
+    created_sessions = 0
+    category_index = {
+        "keyboard": 1,
+        "monitor": 2,
+        "headset": 3,
+        "webcam": 4,
+    }
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            nonlocal created_sessions
+            created_sessions += 1
+            return SimpleNamespace(session_number=created_sessions)
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    async def fake_search_products(_repository, request):
+        nonlocal active_queries, max_active_queries
+        active_queries += 1
+        max_active_queries = max(max_active_queries, active_queries)
+        await asyncio.sleep(0.01)
+        active_queries -= 1
+        index = category_index[request.category]
+        return [
+            ProductCard(
+                spu_id=index,
+                sku_id=index,
+                title=f"Office {request.category}",
+                brand="Test",
+                category=request.category,
+                price="99.00",
+                stock=1,
+                specs={},
+            )
+        ]
+
+    monkeypatch.setattr(
+        catalog_tools.CatalogRepository,
+        "search_products",
+        fake_search_products,
+    )
+    service = CatalogToolService(
+        SimpleNamespace(),
+        session_factory=lambda: FakeSessionContext(),  # type: ignore[arg-type]
+    )
+
+    result = await service.search(CatalogSearchInput(query="推荐办公相关产品", limit=4))
+
+    assert [product.category for product in result.products] == [
+        "keyboard",
+        "monitor",
+        "headset",
+        "webcam",
+    ]
+    assert result.query_plan["usage_mapping"]["status"] == "expanded"
+    assert result.query_plan["usage_mapping"]["execution"] == "parallel_independent_sessions"
+    assert result.ranking_strategy == "scenario_category_diversified_mapping"
+    assert created_sessions == 4
+    assert max_active_queries == 3
 
 
 @pytest.mark.asyncio

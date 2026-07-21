@@ -13,14 +13,18 @@
 - 向量索引持久化在本地 JSON 文件中，不写 PostgreSQL，不写 Chroma，不依赖外部 embedding API key。
 - `policy.search` / `knowledge.search` 已成为 AgentRuntime 的知识工具主链；上下文与记忆 M2 复用该链路，不再维护独立的 `knowledge.retrieve` 编排旁路。
 
-## ä¸»æµç¨å¥åå»ºè®®ï¼query-first
+## 主流程入参建议：query-first
 
-- ä¸»æµç¨é¦è¦è´è´£éå¯¹ toolï¼é»è®¤åªä¼  `query`ï¼ä¸å¼ºè¡å¡«å `category`ã`facet`ã`filters`ã`comparison_fields` ç­å¤æå­æ®µã
-- `catalog.search`ï¼ä¼åä¼  `{"query":"ç¨æ·åè¯","limit":3}`ï¼ç±»ç®ãåçãé¢ç®ãè§æ ¼ç± tool åé¨ `ProductQueryPlan` è§£æå¹¶è¿ç½ååæ ¡éªã
-- `catalog.compare`ï¼ä¼åä¼  `query`ï¼åªæå½ä¸ä¸æå·²ææç¡® SKU æ¶æä¼  `sku_ids`ã
-- `catalog.facets`ï¼å·²æ¯æ query-firstï¼tool ä¼ä» `query` æ¨æ­ `facet`ã`category`ã`brand` å `spec_key`ï¼ä¸»æµç¨ä¸éè¦èªå·±ç `facet`ã
-- `order.lookup`ï¼`user_id` åªè½ç± runtime æ³¨å¥ï¼å·²æ¯æä» `query` ä¸­æåæç¡®é¿æ°å­è®¢åå·ï¼ä½å¦æä¸»æµç¨å·²ç¨³å®æ¿å° `order_id`ï¼å¯ä»¥ç´æ¥ä¼  `order_id`ã
-- `policy.search` / `knowledge.search`ï¼ä¿æ query-only æ£ç´¢ã
+- 主流程首要负责选对 tool，默认只传 `query`，不强行填写 `category`、`facet`、`filters`、
+  `comparison_fields` 等内部复杂字段。
+- `catalog.search`：优先传 `{"query":"用户原话","limit":3}`；类目、品牌、预算、规格和用途
+  场景由 Tool 内部 `ProductQueryPlan` 解析并经过白名单校验。
+- `catalog.compare`：优先传 `query`；只有当上下文已有明确 SKU 时才传 `sku_ids`。
+- `catalog.facets`：Tool 会从 `query` 推断 `facet`、`category`、`brand` 和 `spec_key`；主流程
+  不需要自行猜测 `facet`。
+- `order.lookup`：`user_id` 只能由 Runtime 注入；Tool 可以从 `query` 提取明确长数字订单号，
+  主流程已稳定拿到 `order_id` 时也可以直接传入。
+- `policy.search` / `knowledge.search`：保持 query-only 检索。
 
 ## ToolRegistry
 
@@ -116,6 +120,9 @@ Orchestrator 可见的 public input：
   "filters": {
     "wireless": "wireless"
   },
+  "keywords": [],
+  "usage": null,
+  "sort": "recommend",
   "preference_defaults": {
     "brands": [],
     "excluded_brands": [],
@@ -138,6 +145,10 @@ Orchestrator 可见的 public input：
 - `preference_defaults`：由 Agent 上下文传入的 working/长期默认值，只补当前请求未明确的字段。
 - `min_price` / `max_price`：可选，价格范围。
 - `filters`：可选，规格过滤，例如 `wireless`, `connection_type`。
+- `keywords`：Tool Planner 的补充关键词；不向主 Orchestrator 暴露。
+- `usage`：显式用途覆盖；正常 query-first 路径由 Planner 生成 `usage_scenario`。
+- `sort`：Planner 可生成的排序意图。当前 Repository 的稳定排序仍以匹配分、SKU 销量、库存和
+  价格为准，主 Orchestrator 不应把它描述成已经严格执行的价格/销量排序。
 - `limit`：默认 `3`，范围 `1..20`。
 
 主编排不得生成上述内部结构化字段；完整约束留在 public `query`，由 Tool Planner 统一解析。
@@ -172,20 +183,34 @@ Orchestrator 可见的 public input：
       "wireless": "wireless"
     },
     "keywords": [],
+    "usage_scenario": null,
+    "usage_mapping": {},
     "sort": "recommend",
     "limit": 3,
     "supported": true,
     "unsupported_reason": null,
     "planner": "rule_based",
-    "fallback_reason": null
-  }
+    "fallback_reason": null,
+    "normalization_debug": {},
+    "error_type": null
+  },
+  "diagnostics": [
+    {
+      "code": "ok",
+      "severity": "info",
+      "message": "Catalog query completed successfully.",
+      "recommended_action": "use_result",
+      "details": {}
+    }
+  ]
 }
 ```
 
 排序策略：
 
 - 匹配分优先。
-- 同分时按 `sales_count` 降序。
+- 场景 mapping 的 `preferred` 条件会增加匹配分。
+- 同分时按 `sku_sales_count` 降序。
 - 再按有库存优先。
 - 再按价格升序。
 - 最后按标题稳定排序。
@@ -199,6 +224,171 @@ Orchestrator 可见的 public input：
 - 超出商品表能力的问题会返回 `result_type = "empty"`、`ranking_strategy = "unsupported_query"`，并在 `query_plan.unsupported_reason` 中说明原因。
 - 不直接承诺商品一定可买，最终库存以下单页为准。
 - 无结果时返回 `result_type = "empty"`。
+
+### 受控用途场景与确定性规格映射（2026-07-21）
+
+`catalog.search` 当前只接受以下标准用途场景：
+
+- `office`
+- `gaming`
+- `video_meeting`
+- `live_streaming`
+
+LLM Planner Prompt 和 Rule-based Planner 使用同一组中英文别名。未知自由值会在 Query Guard
+阶段被拒绝，不能以 `supported=true` 进入执行层。当前没有数据库正式用途标签；以下结果全部属于
+`deterministic_spec_mapping`，不能描述为“商品已被数据库标记为办公/游戏商品”。
+
+#### 已指定 category
+
+Tool 按 `usage_scenario + category` 选择版本化规则。规则分为：
+
+- `required`：必须满足，用于候选过滤；
+- `preferred`：满足时增加排序分，不代表未满足的商品绝对不适合该场景；
+- 支持的操作符：`exact`、`eq`、`in`、`gte`、`lte`。
+
+当前 `v1` 覆盖：
+
+- `office`：keyboard、monitor、headset、webcam；
+- `gaming`：mouse、keyboard、headset、monitor、speaker；
+- `video_meeting`：webcam、headset；
+- `live_streaming`：webcam。
+
+应用成功时：
+
+```json
+{
+  "usage_scenario": "office",
+  "usage_mapping": {
+    "status": "applied",
+    "source": "deterministic_spec_mapping",
+    "rule_version": "v1",
+    "scenario": "office",
+    "category": "keyboard",
+    "required": [],
+    "preferred": [
+      {"key": "switches", "operator": "exact", "values": ["静音红轴"]}
+    ]
+  }
+}
+```
+
+已应用 mapping 后，Repository 不再要求商品标题中出现“办公”“游戏”等文字；用途必须通过规则
+过滤或排序真实生效。
+
+#### 未指定 category
+
+例如用户说“推荐办公相关产品”，Planner 会得到 `usage_scenario=office, category=null`。Tool 不再
+返回 `usage_mapping_unavailable`，而是展开为 office 已配置的 keyboard、monitor、headset、
+webcam 四条查询：
+
+```text
+office + keyboard
+office + monitor
+office + headset
+office + webcam
+```
+
+生产路径为每个品类创建独立 SQLAlchemy `AsyncSession`，以最大并发 3 执行；不能让多个并发任务
+共享请求级 `AsyncSession`。结果按品类 round-robin 合并，先保证跨品类多样性，再补充下一轮商品，
+最终数量仍服从 public input 的 `limit`。
+
+以下为结构示例；为控制篇幅省略了 `category_rules` 中每个品类的完整 `required/preferred` 内容，
+真实 Tool Result 会逐品类返回完整 mapping。
+
+```json
+{
+  "ranking_strategy": "scenario_category_diversified_mapping",
+  "query_plan": {
+    "usage_scenario": "office",
+    "usage_mapping": {
+      "status": "expanded",
+      "source": "deterministic_spec_mapping",
+      "rule_version": "v1",
+      "scenario": "office",
+      "category": null,
+      "categories": ["keyboard", "monitor", "headset", "webcam"],
+      "execution": "parallel_independent_sessions",
+      "category_rules": {}
+    }
+  }
+}
+```
+
+这里的“并行”是一次 `catalog_search` 内部的只读品类查询并行，不表示 Tool Contract 本身已经可以
+被主 Orchestrator 任意并发调用。
+
+#### 未配置的 scenario + category
+
+例如当前 `office + mouse` 没有静音按键等可靠数据库字段，Tool 不会忽略 office 后返回普通鼠标：
+
+```json
+{
+  "result_type": "empty",
+  "query_plan": {
+    "usage_scenario": "office",
+    "usage_mapping": {
+      "status": "unavailable",
+      "rule_version": "v1",
+      "scenario": "office",
+      "category": "mouse"
+    },
+    "error_type": "usage_mapping_unavailable"
+  },
+  "diagnostics": [
+    {
+      "code": "usage_mapping_unavailable",
+      "recommended_action": "explain_limitation_and_ask_for_concrete_preferences"
+    }
+  ]
+}
+```
+
+`excluded_usage` 目前仍然是基于商品标题、品类和规格文本的排除启发式，不等同于正式用途标签，
+也没有复用正向场景 mapping。
+
+## 主 Orchestrator 对用途映射的理解与处理要求
+
+主 Orchestrator 调用 `catalog_search` 时仍只传用户原始 `query` 和 `limit`，不得自行构造内部
+`usage_scenario`、`required`、`preferred` 或数据库规格规则。Tool 返回后必须同时读取：
+
+- `result_type`；
+- `query_plan.usage_scenario`；
+- `query_plan.usage_mapping.status/source/rule_version`；
+- `query_plan.error_type`；
+- `diagnostics[*].code/recommended_action/details`。
+
+必须按以下语义处理：
+
+1. **`status=applied`**：说明单品类确定性规格 mapping 已实际进入过滤或排序。回答应使用
+   “根据该场景的规格偏好/要求筛选”之类的措辞，并只引用 Tool Result 中真实返回的规格。
+2. **`status=expanded`**：说明 Tool 已在一次调用内完成跨品类展开、并行查询和多样化聚合。
+   Orchestrator 应按商品 category 组织回答，不要为了同一宽泛请求再拆成多次重复
+   `catalog_search`，除非用户后续指定某一品类或需要更多结果。
+3. **`status=unavailable` / `diagnostics.code=usage_mapping_unavailable`**：说明当前数据库规格不足以
+   支撑该场景与品类组合，不等于“没有库存”或“系统错误”。应解释能力边界，并询问用户是否愿意
+   改用无线、重量、价格、轴体等已有具体条件，或改看已配置的其他品类。
+4. **`result_type=empty` 且 mapping 已 applied/expanded**：说明规则已执行，但叠加品牌、预算、
+   required 等条件后没有匹配商品。不得静默去掉用途条件重新查询普通商品；可以建议放宽条件，
+   需要重查时先取得用户同意或保留用户明确约束。
+5. **区分 `required` 与 `preferred`**：`required` 可以表述为本次筛选必须满足的条件；
+   `preferred` 只能表述为排序偏好，不能据此声称所有返回商品都拥有该规格，也不能把未命中偏好
+   解释成商品不适合该场景。
+6. **不得伪造用途标签**：当 `source=deterministic_spec_mapping` 时，不得说“数据库标注该商品为
+   办公/游戏商品”“这是官方场景认证”。应说明这是依据现有规格规则得到的推荐。
+7. **遵循业务错误而非系统重试**：`usage_mapping_unavailable`、`empty_result`、
+   `unsupported_query` 都可能在 Tool Contract `ok=true` 时出现。Orchestrator 必须依据 diagnostics
+   处理，不能因为 `ok=true` 就把结果当成成功商品列表，也不能对确定性业务空结果机械重试。
+
+推荐回答示例：
+
+```text
+applied：这些键盘是根据办公场景偏好的静音红轴规格优先推荐的，实际商品并没有正式“办公”标签。
+
+expanded：我按办公场景分别从键盘、显示器、耳机和摄像头中筛选了代表性商品，下面按品类列出。
+
+unavailable：当前商品数据没有能可靠判断办公鼠标是否静音的按键噪声规格；如果你愿意，我可以改按
+无线方式、重量或预算继续筛选。
+```
 
 ## 销量字段语义
 
@@ -541,22 +731,29 @@ python -m scripts.build_knowledge_vector_index
 ## 已验证
 
 - `catalog.search` 可以连接 PostgreSQL 并返回商品。
+- `catalog.search` 可以对无 category 的受控场景使用独立数据库 Session 并行展开，并按品类聚合。
 - `order.lookup` 可以连接 PostgreSQL 并返回订单候选。
 - `policy.search` / `knowledge.search` 可以检索本地 JSON 和本地向量索引。
 - 后端验证命令：
 
 ```bash
 cd backend
-.venv/bin/pytest tests/test_tools.py
-.venv/bin/ruff check app/tools tests/test_tools.py app/repositories/catalog.py app/repositories/orders.py app/schemas/catalog.py
+.venv/bin/pytest -q \
+  tests/test_catalog_repository.py tests/test_catalog_eval.py tests/test_tools.py \
+  tests/test_orchestrator.py tests/test_orchestrator_wave_loop_cases.py \
+  tests/test_agent_tool_wiring.py
+.venv/bin/ruff check .
 ```
 
 当前验证结果：
 
 ```text
-8 passed
+238 passed
 All checks passed
 ```
+
+完整后端当前为 `383 passed, 3 failed`；三个失败均位于未由本次 Catalog 改动触及的长期记忆和
+会话历史测试，不能把完整仓库描述为全绿。
 
 ## 阶段二商品 Planner 接入状态
 
@@ -569,6 +766,7 @@ All checks passed
 -> CatalogQueryPlanner
 -> ProductQueryPlan / CatalogComparePlan JSON
 -> Query Guard 白名单校验
+-> Usage Scenario Mapping（如存在受控场景）
 -> ProductSearchRequest
 -> SQLAlchemy 查询 PostgreSQL
 -> 结构化 tool output
@@ -585,6 +783,8 @@ All checks passed
 
 - LLM 只允许返回 JSON plan，不允许返回 SQL。
 - `ProductQueryPlan` / `CatalogComparePlan` 会校验 category、filter、sort、limit、comparison_fields 等白名单字段。
+- `ProductQueryPlan.usage_scenario` 只允许 `office`、`gaming`、`video_meeting`、
+  `live_streaming` 或 `null`；LLM 漏识别时会使用确定性 query 规则补全，未知自由值不能进入执行层。
 - planner 输出非法 JSON、非法字段、过度约束或异常时，tool fallback 到 rule-based planner。
 - fallback 原因会写入 `query_plan.fallback_reason`，主流程可用于调试，但不建议直接展示给用户。
 
@@ -678,7 +878,10 @@ Tool 内部推导的 facet plan 示例，不向 Orchestrator 暴露：
 - `ToolCatalog` 构建时会校验 `llm_name` 唯一、`registry_name` 唯一、handler 存在、handler 输入模型匹配、handler 输出模型匹配。
 - handler 成功输出会在 executor 边界通过 `contract.output_model` 二次校验；业务空结果、`not_found`、`unsupported_query` 都保持 `ok=true`，不和系统错误混同。
 - 依赖异常映射：SQLAlchemy 异常和本地文件/索引 `OSError` 映射为 `dependency_unavailable`；超时映射为 `timeout`；未知异常统一映射为 `execution_error`。
-- 当前没有 tool 验证为可并行执行，全部保持 `parallel_safe=False`；原因是 PostgreSQL tools 共享当前 SQLAlchemy `AsyncSession`。
+- Tool Contract 级别仍保持 `parallel_safe=False`，主 Orchestrator 不应据此并行发起多个共享请求
+  Session 的 PostgreSQL Tool Call。`catalog_search` 在无 category 的受控场景下拥有独立的内部
+  并行路径：每个品类任务创建自己的 `AsyncSession`，并发上限为 3。这是 Tool 内部实现细节，
+  不改变 Contract 级并行声明。
 
 当前验收命令：
 
@@ -691,27 +894,33 @@ cd backend
 当前验收结果：
 
 ```text
-134 passed, 29 skipped
-All checks passed
+Targeted Catalog / Tool / Orchestrator: 238 passed
+Full backend: 383 passed, 3 known unrelated failures
+Ruff: All checks passed
 ```
 
 ## 主流程接入注意事项（2026-07-20 更新）
 
 - 商品类 tool 的公开入参尽量只传用户原始 `query` 和 `limit`；`catalog_search`、`catalog_compare`、`catalog_facets` 内部会做结构化解析、品牌/品类/规格中英文归一化、白名单校验和必要 fallback。
 - 主流程不要自己生成 SQL，也不要把中文 key（例如“连接方式”“颜色”）传给商品 tool；如果外部 LLM 传错 schema，应优先只保留 `query` 重新调用。
-- `catalog_search` 的业务空结果和不支持查询都会以 `ok=true` 返回，主流程需要读取 `diagnostics[0].code` 或 `query_plan.error_type` 区分：`empty_result` 表示条件合法但无商品，`unsupported_query` 表示当前目录字段不支持，`invalid_catalog_plan` 表示 LLM planner 失败后已使用规则 fallback。
+- `catalog_search` 的业务空结果和不支持查询都会以 `ok=true` 返回，主流程需要读取
+  `diagnostics[0].code` 或 `query_plan.error_type` 区分：`empty_result` 表示条件合法但无商品，
+  `unsupported_query` 表示当前目录字段不支持，`usage_mapping_unavailable` 表示缺少该场景与
+  品类的可靠规格映射，`invalid_catalog_plan` 表示 LLM planner 失败后已使用规则 fallback。
 - 白名单是按品类收紧的：例如当前数据库的显示器没有 `connection_type` 字段，所以“蓝牙显示器”会返回 `unsupported_query`，不应被主流程解释成“系统错误”或“库存为 0”。
 - `catalog_facets` 用于回答“你们卖哪些品牌/品类/规格选项”，例如“你们卖哪些品牌的鼠标”“键盘有哪些轴体”“音箱功率有哪些档位”；不要用 `catalog_search` 代替这类元数据问题。
 - `catalog_compare` 可以直接传自然语言对比 query；如果 LLM planner 把可支持的品牌/品类对比误判为 unsupported，tool 内部会规则 fallback，并通过 `diagnostics` 标出。
 - 主流程最终回答里注意销量语义：`sku_sales_count` 是 SKU 级销量，`sales_count` 是 SPU 级聚合销量；比较颜色/版本销量时只能依据 `sku_sales_count`。
 - 订单 tool 仍只需要主流程传 `order_id`（有明确订单号时）或 `query`；`user_id` 由 runtime 注入，主流程不要让外部 LLM 提供或覆盖用户身份。
 
-当前真实评测覆盖：5 类 × 5 个口语化中文 case，共 25 个，覆盖推荐、品牌/预算/颜色/连接方式、facets、compare、empty/unsupported 诊断。
+既有真实评测覆盖 5 类 × 5 个口语化中文 case，共 25 个，覆盖推荐、品牌/预算/颜色/连接方式、
+facets、compare、empty/unsupported 诊断。本次另外通过正式 Tool Contract 对 PostgreSQL 验证了
+办公、游戏、视频会议、直播四个无 category 场景的并行展开、规格约束和返回品类。
 
 当前验收结果：
 
 ```text
-Real LLM + PostgreSQL catalog eval: 25 passed, 0 failed
-Targeted backend tests: 204 passed
+Scenario mapping + PostgreSQL examples: 4 passed
+Targeted Catalog / Tool / Orchestrator tests: 238 passed
 Ruff: All checks passed
 ```

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from decimal import Decimal
@@ -6,12 +7,12 @@ from typing import Literal, Protocol
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.intent import build_product_search
 from app.models import Brand, Category, Sku, Spu
 from app.repositories.catalog import CATEGORY_ALIASES, CatalogRepository
-from app.schemas.catalog import ProductCard, ProductSearchRequest
+from app.schemas.catalog import ProductCard, ProductSearchRequest, ProductSpecCondition
 from app.tools.schemas import (
     CatalogCompareInput,
     CatalogCompareOutput,
@@ -131,6 +132,121 @@ CATEGORY_FILTERS = {
         "resolution",
     },
 }
+ALLOWED_USAGE_SCENARIOS = {
+    "office",
+    "gaming",
+    "video_meeting",
+    "live_streaming",
+}
+USAGE_SCENARIO_ALIASES = {
+    "office": "office",
+    "办公": "office",
+    "工作": "office",
+    "学习": "office",
+    "gaming": "gaming",
+    "game": "gaming",
+    "fps": "gaming",
+    "esports": "gaming",
+    "游戏": "gaming",
+    "电竞": "gaming",
+    "video_meeting": "video_meeting",
+    "video meeting": "video_meeting",
+    "video conference": "video_meeting",
+    "video conferencing": "video_meeting",
+    "视频会议": "video_meeting",
+    "远程会议": "video_meeting",
+    "网课": "video_meeting",
+    "开会": "video_meeting",
+    "live_streaming": "live_streaming",
+    "live streaming": "live_streaming",
+    "livestream": "live_streaming",
+    "直播": "live_streaming",
+    "主播": "live_streaming",
+    "开播": "live_streaming",
+}
+USAGE_MAPPING_VERSION = "v1"
+USAGE_SCENARIO_CATEGORIES = {
+    "office": ("keyboard", "monitor", "headset", "webcam"),
+    "gaming": ("mouse", "keyboard", "headset", "monitor", "speaker"),
+    "video_meeting": ("webcam", "headset"),
+    "live_streaming": ("webcam",),
+}
+USAGE_CATEGORY_CONCURRENCY = 3
+
+
+def _condition(
+    key: str,
+    operator: Literal["exact", "eq", "in", "gte", "lte"],
+    *values: str,
+) -> ProductSpecCondition:
+    return ProductSpecCondition(key=key, operator=operator, values=list(values))
+
+
+USAGE_SCENARIO_RULES: dict[
+    tuple[str, str], dict[str, tuple[ProductSpecCondition, ...]]
+] = {
+    ("office", "keyboard"): {
+        "preferred": (_condition("switches", "exact", "静音红轴"),),
+    },
+    ("office", "monitor"): {
+        "preferred": (
+            _condition("panel_type", "eq", "IPS"),
+            _condition("resolution", "eq", "2560x1440"),
+            _condition("size_inch", "eq", "27"),
+        ),
+    },
+    ("office", "headset"): {
+        "preferred": (
+            _condition("microphone", "eq", "是"),
+            _condition("enclosure_type", "eq", "封闭式"),
+        ),
+    },
+    ("office", "webcam"): {
+        "required": (_condition("microphone", "eq", "是"),),
+        "preferred": (_condition("frame_rate", "gte", "60"),),
+    },
+    ("gaming", "mouse"): {
+        "preferred": (
+            _condition("weight_g", "lte", "65"),
+            _condition("max_dpi", "gte", "16000"),
+        ),
+    },
+    ("gaming", "keyboard"): {
+        "preferred": (
+            _condition("switches", "in", "磁轴", "线性红轴"),
+        ),
+    },
+    ("gaming", "headset"): {
+        "preferred": (
+            _condition("microphone", "eq", "是"),
+            _condition("enclosure_type", "eq", "封闭式"),
+        ),
+    },
+    ("gaming", "monitor"): {
+        "preferred": (
+            _condition("refresh_rate", "gte", "144"),
+            _condition("response_time_ms", "lte", "1"),
+        ),
+    },
+    ("gaming", "speaker"): {
+        "preferred": (_condition("channels", "in", "2.1", "5.1"),),
+    },
+    ("video_meeting", "webcam"): {
+        "required": (_condition("microphone", "eq", "是"),),
+        "preferred": (_condition("frame_rate", "gte", "60"),),
+    },
+    ("video_meeting", "headset"): {
+        "required": (_condition("microphone", "eq", "是"),),
+        "preferred": (_condition("enclosure_type", "eq", "封闭式"),),
+    },
+    ("live_streaming", "webcam"): {
+        "required": (
+            _condition("resolution", "in", "1080p HDR", "1440p", "4K"),
+            _condition("frame_rate", "in", "60fps", "90fps"),
+        ),
+        "preferred": (_condition("field_of_view", "in", "90°", "103°"),),
+    },
+}
 ALLOWED_SORTS = {"recommend", "sales", "price_asc", "price_desc", "stock"}
 BASE_COMPARISON_FIELDS = {
     "price",
@@ -161,6 +277,7 @@ class ProductQueryPlan(BaseModel):
     filters: dict[str, str] = Field(default_factory=dict)
     keywords: list[str] = Field(default_factory=list, max_length=12)
     usage_scenario: str | None = None
+    usage_mapping: dict = Field(default_factory=dict)
     sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
     limit: int = Field(default=3, ge=1, le=20)
     supported: bool = True
@@ -405,12 +522,17 @@ class CatalogToolService:
         self,
         session: AsyncSession,
         planner: CatalogQueryPlanner | None = None,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
     ):
         self.session = session
         self.planner = planner or RuleBasedCatalogQueryPlanner()
+        self.session_factory = session_factory
 
     async def search(self, request: CatalogSearchInput) -> CatalogSearchOutput:
         plan = await self._safe_plan_search(request)
+        if plan.supported and plan.usage_scenario and not plan.category:
+            return await self._search_usage_across_categories(request, plan)
+        plan = _apply_usage_scenario_mapping(plan)
         if not plan.supported:
             diagnostics = _catalog_plan_diagnostics(plan, result_type="empty", count=0)
             return CatalogSearchOutput(
@@ -431,6 +553,94 @@ class CatalogToolService:
             result_type=result_type,
             products=products[: request.limit],
             ranking_strategy="match_score_sales_stock_price",
+            query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
+            diagnostics=diagnostics,
+        )
+
+    async def _search_usage_across_categories(
+        self,
+        request: CatalogSearchInput,
+        plan: ProductQueryPlan,
+    ) -> CatalogSearchOutput:
+        categories = USAGE_SCENARIO_CATEGORIES.get(plan.usage_scenario or "", ())
+        if not categories:
+            plan = _mark_usage_mapping_unavailable(plan)
+            diagnostics = _catalog_plan_diagnostics(plan, result_type="empty", count=0)
+            return CatalogSearchOutput(
+                result_type="empty",
+                products=[],
+                ranking_strategy="unsupported_query",
+                query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
+                diagnostics=diagnostics,
+            )
+
+        per_category_limit = min(20, max(2, request.limit))
+        semaphore = asyncio.Semaphore(USAGE_CATEGORY_CONCURRENCY)
+
+        async def search_category(
+            category: str,
+        ) -> tuple[str, ProductQueryPlan, list[ProductCard]]:
+            category_plan = plan.model_copy(
+                deep=True,
+                update={"category": category, "limit": per_category_limit, "usage_mapping": {}},
+            )
+            category_plan = _apply_usage_scenario_mapping(category_plan)
+            if not category_plan.supported:
+                return category, category_plan, []
+
+            async with semaphore:
+                if self.session_factory is None:
+                    products = await CatalogRepository(self.session).search_products(
+                        _plan_to_product_search(category_plan)
+                    )
+                else:
+                    async with self.session_factory() as category_session:
+                        products = await CatalogRepository(category_session).search_products(
+                            _plan_to_product_search(category_plan)
+                        )
+            products = _filter_brands(products, category_plan.brands)
+            products = _filter_excluded_preferences(
+                products,
+                category_plan.excluded_brands,
+                category_plan.excluded_usage,
+            )
+            return category, category_plan, products[:per_category_limit]
+
+        if self.session_factory is None:
+            category_results = []
+            for category in categories:
+                category_results.append(await search_category(category))
+            execution = "sequential_shared_request_session"
+        else:
+            category_results = await asyncio.gather(
+                *(search_category(category) for category in categories)
+            )
+            execution = "parallel_independent_sessions"
+
+        products = _round_robin_category_products(category_results, limit=request.limit)
+        plan.usage_mapping = {
+            "status": "expanded",
+            "source": "deterministic_spec_mapping",
+            "rule_version": USAGE_MAPPING_VERSION,
+            "scenario": plan.usage_scenario,
+            "category": None,
+            "categories": list(categories),
+            "execution": execution,
+            "category_rules": {
+                category: category_plan.usage_mapping
+                for category, category_plan, _products in category_results
+            },
+        }
+        result_type = "products" if products else "empty"
+        diagnostics = _catalog_plan_diagnostics(
+            plan,
+            result_type=result_type,
+            count=len(products),
+        )
+        return CatalogSearchOutput(
+            result_type=result_type,
+            products=products,
+            ranking_strategy="scenario_category_diversified_mapping",
             query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
             diagnostics=diagnostics,
         )
@@ -657,6 +867,17 @@ def _catalog_plan_diagnostics(
     count: int,
 ) -> list[ToolDiagnostic]:
     if not plan.supported:
+        if plan.usage_mapping.get("status") == "unavailable":
+            return [
+                ToolDiagnostic(
+                    code="usage_mapping_unavailable",
+                    severity="error",
+                    message=plan.unsupported_reason
+                    or "No deterministic specification mapping exists for this usage scenario.",
+                    recommended_action="explain_limitation_and_ask_for_concrete_preferences",
+                    details=plan.usage_mapping,
+                )
+            ]
         return [
             ToolDiagnostic(
                 code="unsupported_query",
@@ -685,7 +906,12 @@ def _catalog_plan_diagnostics(
                 severity="info",
                 message="Catalog query was valid but no products matched the filters.",
                 recommended_action="relax_filters_or_ask_followup",
-                details={"filters": plan.filters, "category": plan.category, "brands": plan.brands},
+                details={
+                    "filters": plan.filters,
+                    "category": plan.category,
+                    "brands": plan.brands,
+                    "usage_mapping": plan.usage_mapping,
+                },
             )
         ]
     if plan.normalization_debug:
@@ -702,8 +928,13 @@ def _catalog_plan_diagnostics(
         ToolDiagnostic(
             code="ok",
             severity="info",
-            message="Catalog query completed successfully.",
+            message=(
+                "Catalog query completed with a deterministic usage specification mapping."
+                if plan.usage_mapping.get("status") in {"applied", "expanded"}
+                else "Catalog query completed successfully."
+            ),
             recommended_action="use_result",
+            details=(plan.usage_mapping if plan.usage_mapping else {}),
         )
     ]
 
@@ -857,6 +1088,12 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if normalized_category and normalized_category.lower() not in ALLOWED_CATEGORIES:
         raise ValueError(f"unsupported category: {plan.category}")
     plan.category = normalized_category
+
+    if plan.usage_scenario:
+        normalized_usage = _canonical_usage_scenario(plan.usage_scenario)
+        if normalized_usage is None:
+            raise ValueError(f"unsupported usage scenario: {plan.usage_scenario}")
+        plan.usage_scenario = normalized_usage
 
     plan.filters, normalization_debug = _normalize_catalog_filters_with_debug(plan.filters)
     plan.filters, pruned_debug = _prune_redundant_filter_values(
@@ -1123,6 +1360,56 @@ def validate_catalog_compare_plan(plan: CatalogComparePlan | dict) -> CatalogCom
     return plan
 
 
+def _canonical_usage_scenario(usage: str | None) -> str | None:
+    if not usage:
+        return None
+    normalized = usage.strip().lower().replace("-", "_")
+    if normalized in ALLOWED_USAGE_SCENARIOS:
+        return normalized
+    return USAGE_SCENARIO_ALIASES.get(normalized) or USAGE_SCENARIO_ALIASES.get(
+        normalized.replace("_", " ")
+    )
+
+
+def _apply_usage_scenario_mapping(plan: ProductQueryPlan) -> ProductQueryPlan:
+    if not plan.supported or not plan.usage_scenario:
+        return plan
+
+    category = _canonical_category(plan.category)
+    rule = USAGE_SCENARIO_RULES.get((plan.usage_scenario, category or ""))
+    if rule is None:
+        return _mark_usage_mapping_unavailable(plan)
+
+    required = list(rule.get("required", ()))
+    preferred = list(rule.get("preferred", ()))
+    plan.usage_mapping = {
+        "status": "applied",
+        "source": "deterministic_spec_mapping",
+        "rule_version": USAGE_MAPPING_VERSION,
+        "scenario": plan.usage_scenario,
+        "category": category,
+        "required": [condition.model_dump(mode="json") for condition in required],
+        "preferred": [condition.model_dump(mode="json") for condition in preferred],
+    }
+    return plan
+
+
+def _mark_usage_mapping_unavailable(plan: ProductQueryPlan) -> ProductQueryPlan:
+    category = _canonical_category(plan.category)
+    plan.supported = False
+    plan.unsupported_reason = (
+        f"No deterministic {plan.usage_scenario} specification mapping is configured "
+        f"for category {category or 'unspecified'}."
+    )
+    plan.usage_mapping = {
+        "status": "unavailable",
+        "rule_version": USAGE_MAPPING_VERSION,
+        "scenario": plan.usage_scenario,
+        "category": category,
+    }
+    return plan
+
+
 def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
     has_exclusions = bool(plan.excluded_brands or plan.excluded_usage)
     if has_exclusions:
@@ -1143,9 +1430,19 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         # keywords such as 144Hz, 2K or red switches as SQL title prefilters can
         # eliminate valid products before post-filtering specs.
         query_parts = [*plan.brands, *_safe_query_prefilter_keywords(plan)]
+    usage_mapping_applied = plan.usage_mapping.get("status") == "applied"
     return ProductSearchRequest(
         query=" ".join(part for part in query_parts if part),
         category=plan.category,
+        usage_scenario=None if usage_mapping_applied else plan.usage_scenario,
+        usage_required_conditions=[
+            ProductSpecCondition.model_validate(item)
+            for item in plan.usage_mapping.get("required", [])
+        ],
+        usage_preferred_conditions=[
+            ProductSpecCondition.model_validate(item)
+            for item in plan.usage_mapping.get("preferred", [])
+        ],
         min_price=plan.min_price,
         max_price=plan.max_price,
         filters=plan.filters,
@@ -1158,6 +1455,7 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
 def _has_structured_catalog_constraints(plan: ProductQueryPlan) -> bool:
     return bool(
         plan.category
+        or plan.usage_scenario
         or plan.brands
         or plan.filters
         or plan.min_price is not None
@@ -1205,6 +1503,18 @@ def _safe_query_prefilter_keywords(plan: ProductQueryPlan) -> list[str]:
         "fps",
         "gaming",
         "office",
+        "video_meeting",
+        "live_streaming",
+        "meeting",
+        "conference",
+        "conferencing",
+        "video",
+        "zoom",
+        "teams",
+        "live",
+        "stream",
+        "streaming",
+        "livestream",
         "mouse",
         "keyboard",
         "headset",
@@ -1256,6 +1566,28 @@ def _filter_brands(products: list[ProductCard], brands: list[str]) -> list[Produ
     return [
         product for product in products if any(brand in product.brand.lower() for brand in lowered)
     ]
+
+
+def _round_robin_category_products(
+    category_results: list[tuple[str, ProductQueryPlan, list[ProductCard]]],
+    *,
+    limit: int,
+) -> list[ProductCard]:
+    selected: list[ProductCard] = []
+    seen_sku_ids: set[int] = set()
+    max_bucket_size = max((len(products) for _, _, products in category_results), default=0)
+    for product_index in range(max_bucket_size):
+        for _category, _plan, products in category_results:
+            if product_index >= len(products):
+                continue
+            product = products[product_index]
+            if product.sku_id in seen_sku_ids:
+                continue
+            selected.append(product)
+            seen_sku_ids.add(product.sku_id)
+            if len(selected) >= limit:
+                return selected
+    return selected
 
 
 def _filters_from_query(query: str) -> dict[str, str]:
@@ -1445,6 +1777,18 @@ def _product_keywords(plan: ProductQueryPlan) -> list[str]:
         "fps",
         "gaming",
         "office",
+        "video_meeting",
+        "live_streaming",
+        "meeting",
+        "conference",
+        "conferencing",
+        "video",
+        "zoom",
+        "teams",
+        "live",
+        "stream",
+        "streaming",
+        "livestream",
         "mouse",
         "keyboard",
         "headset",
@@ -1474,7 +1818,7 @@ Allowed JSON fields:
 - max_price: number or null
 - filters: object with allowed keys only
 - keywords: array of short product intent keywords, max 12
-- usage_scenario: short usage string such as gaming or office, or null
+- usage_scenario: one of office, gaming, video_meeting, live_streaming, or null
 - sort: one of recommend, sales, price_asc, price_desc, stock
 - supported: boolean
 - unsupported_reason: string or null
@@ -1495,6 +1839,12 @@ Filter value rules:
 
 Compact enum examples and aliases:
 - category: mouse, keyboard, headset, monitor, speaker, webcam.
+- usage_scenario aliases: 办公/office/码字/写代码=office;
+  游戏/gaming/FPS/电竞/esports=gaming;
+  开会/视频会议/远程会议/网课/video meeting/video conference=video_meeting;
+  直播/主播/开播/live streaming/livestream=live_streaming.
+  Never invent another usage_scenario value. Prefer the more specific scenario when several
+  aliases occur: live_streaming, then video_meeting, then gaming, then office.
 - brand aliases: 罗技=Logitech, 雷蛇=Razer, 赛睿=SteelSeries, 索尼=Sony,
   华硕=ASUS, 戴尔=Dell, 漫步者=Edifier, 博士=Bose, 圆刚=AVerMedia.
 - connection_type: Wireless covers wireless, wifi, bluetooth, 蓝牙, 无线, 三模, 2.4G;
@@ -1661,6 +2011,8 @@ def _apply_query_inferred_defaults(plan: ProductQueryPlan, query: str) -> None:
     inferred_filters = _filters_from_query(query)
     for key, value in inferred_filters.items():
         plan.filters.setdefault(key, value)
+    if plan.usage_scenario is None:
+        plan.usage_scenario = _usage_from_query(query)
 
 
 def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:
@@ -1734,11 +2086,47 @@ def _json_safe(data: dict) -> dict:
 
 def _usage_from_query(query: str) -> str | None:
     lowered = query.lower()
-    if "fps" in lowered or "游戏" in query or "gaming" in lowered:
+    if _contains_any_usage_term(
+        lowered,
+        {"live streaming", "livestream", "直播", "主播", "开播"},
+    ):
+        return "live_streaming"
+    if _contains_any_usage_term(
+        lowered,
+        {
+            "video meeting",
+            "video conference",
+            "video conferencing",
+            "zoom",
+            "teams",
+            "开会",
+            "会议",
+            "网课",
+            "视频通话",
+        },
+    ):
+        return "video_meeting"
+    if _contains_any_usage_term(
+        lowered,
+        {"fps", "game", "gaming", "esports", "游戏", "电竞"},
+    ):
         return "gaming"
-    if "办公" in query or "office" in lowered:
+    if _contains_any_usage_term(
+        lowered,
+        {"office", "办公", "码字", "写代码", "生产力", "学习"},
+    ):
         return "office"
     return None
+
+
+def _contains_any_usage_term(query: str, terms: set[str]) -> bool:
+    for term in terms:
+        if term.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", query):
+                return True
+        elif term in query:
+            return True
+    return False
 
 
 def _filter_excluded_preferences(

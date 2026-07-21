@@ -6,7 +6,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.catalog import CATEGORY_ALIASES, CatalogRepository
-from app.schemas.catalog import ProductSearchRequest
+from app.schemas.catalog import ProductSearchRequest, ProductSpecCondition
 
 
 def test_category_aliases_include_compact_catalog_categories() -> None:
@@ -66,6 +66,101 @@ def test_usage_exclusions_are_applied_before_result_limit() -> None:
     )
 
     assert [product.sku_id for product in selected] == [21]
+
+
+def test_positive_usage_is_required_before_result_limit() -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=1,
+            title="Generic Keyboard",
+            brand="Other",
+            category="keyboard",
+            price="99.00",
+            stock=1,
+            specs={"switches": "Silent Red"},
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=2,
+            title="Office Keyboard",
+            brand="Other",
+            category="keyboard",
+            price="109.00",
+            stock=1,
+            specs={"usage": "office"},
+        ),
+    ]
+
+    selected = catalog_repository._take_eligible_products(
+        products,
+        excluded_usage=[],
+        usage_scenario="office",
+        limit=3,
+    )
+
+    assert [product.sku_id for product in selected] == [2]
+
+
+def test_usage_spec_requirements_are_applied_before_result_limit() -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=1,
+            title="Webcam without microphone",
+            brand="Other",
+            category="webcam",
+            price="99.00",
+            stock=1,
+            specs={"microphone": "否", "frame_rate": "90fps"},
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=2,
+            title="Meeting Webcam",
+            brand="Other",
+            category="webcam",
+            price="109.00",
+            stock=1,
+            specs={"microphone": "是", "frame_rate": "60fps"},
+        ),
+    ]
+
+    selected = catalog_repository._take_eligible_products(
+        products,
+        excluded_usage=[],
+        required_conditions=[
+            ProductSpecCondition(key="microphone", operator="eq", values=["是"])
+        ],
+        limit=3,
+    )
+
+    assert [product.sku_id for product in selected] == [2]
+
+
+def test_usage_spec_condition_supports_numeric_ranges_and_exact_values() -> None:
+    from app.repositories import catalog as catalog_repository
+
+    specs = {"refresh_rate": "165Hz", "switches": "静音红轴"}
+
+    assert catalog_repository._matches_spec_condition(
+        specs,
+        ProductSpecCondition(key="refresh_rate", operator="gte", values=["144"]),
+    )
+    assert catalog_repository._matches_spec_condition(
+        specs,
+        ProductSpecCondition(key="switches", operator="exact", values=["静音红轴"]),
+    )
+    assert not catalog_repository._matches_spec_condition(
+        specs,
+        ProductSpecCondition(key="switches", operator="exact", values=["线性红轴"]),
+    )
 
 
 @pytest.mark.asyncio

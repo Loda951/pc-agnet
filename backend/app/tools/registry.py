@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.tools.catalog import CatalogQueryPlanner
@@ -77,6 +77,7 @@ def build_tool_registry(
     session: AsyncSession,
     catalog_planner: CatalogQueryPlanner | None = None,
     settings: Settings | None = None,
+    catalog_session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> ToolRegistry:
     from app.core.config import get_settings
 
@@ -85,6 +86,7 @@ def build_tool_registry(
         session,
         settings=settings,
         catalog_planner=catalog_planner,
+        catalog_session_factory=catalog_session_factory,
     )
     registry = ToolRegistry()
     for bound_tool in tool_catalog.list_bound_tools():

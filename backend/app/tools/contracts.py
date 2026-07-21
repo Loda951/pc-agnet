@@ -6,7 +6,7 @@ from typing import Any, Protocol, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.llm import build_chat_model
@@ -196,8 +196,13 @@ class RegistryToolExecutor:
         session: AsyncSession,
         settings: Settings,
         catalog: ToolCatalog | None = None,
+        catalog_session_factory: async_sessionmaker[AsyncSession] | None = None,
     ):
-        self.catalog = catalog or build_tool_catalog(session, settings=settings)
+        self.catalog = catalog or build_tool_catalog(
+            session,
+            settings=settings,
+            catalog_session_factory=catalog_session_factory,
+        )
 
     async def execute(
         self,
@@ -242,10 +247,16 @@ def build_tool_catalog(
     *,
     settings: Settings,
     catalog_planner: CatalogQueryPlanner | None = None,
+    catalog_session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> ToolCatalog:
+    if catalog_session_factory is None:
+        from app.core.database import AsyncSessionLocal
+
+        catalog_session_factory = AsyncSessionLocal
     catalog_service = CatalogToolService(
         session,
         planner=catalog_planner or build_catalog_planner(settings),
+        session_factory=catalog_session_factory,
     )
     orders = OrderToolService(session)
     knowledge = KnowledgeRetrievalToolService()

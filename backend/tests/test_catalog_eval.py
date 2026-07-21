@@ -112,6 +112,28 @@ async def test_catalog_rule_planner_golden_cases(query: str, expected: dict) -> 
             assert actual == expected_value
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected_usage"),
+    [
+        ("推荐办公键盘", "office"),
+        ("FPS 电竞显示器", "gaming"),
+        ("开会用的摄像头", "video_meeting"),
+        ("直播摄像头", "live_streaming"),
+        ("办公开会用的摄像头", "video_meeting"),
+        ("办公直播摄像头", "live_streaming"),
+    ],
+)
+async def test_rule_planner_normalizes_common_usage_scenarios(
+    query: str, expected_usage: str
+) -> None:
+    raw_plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query=query, limit=3)
+    )
+
+    assert raw_plan.usage_scenario == expected_usage
+
+
 @pytest.mark.parametrize(
     ("query", "expected"),
     [

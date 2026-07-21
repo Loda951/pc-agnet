@@ -4,9 +4,18 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class ProductSpecCondition(BaseModel):
+    key: str
+    operator: Literal["exact", "eq", "in", "gte", "lte"] = "eq"
+    values: list[str] = Field(min_length=1)
+
+
 class ProductSearchRequest(BaseModel):
     query: str = ""
     category: str | None = None
+    usage_scenario: str | None = None
+    usage_required_conditions: list[ProductSpecCondition] = Field(default_factory=list)
+    usage_preferred_conditions: list[ProductSpecCondition] = Field(default_factory=list)
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)

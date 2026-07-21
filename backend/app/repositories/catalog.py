@@ -13,7 +13,7 @@ from app.models import (
     Sku,
     Spu,
 )
-from app.schemas.catalog import ProductCard, ProductSearchRequest
+from app.schemas.catalog import ProductCard, ProductSearchRequest, ProductSpecCondition
 
 CATEGORY_ALIASES = {
     "mouse": "鼠标",
@@ -147,6 +147,11 @@ class CatalogRepository:
     async def search_products(self, request: ProductSearchRequest) -> list[ProductCard]:
         query_tokens = _query_tokens(request.query)
         page_size = _candidate_page_size(request.limit)
+        candidate_target = (
+            min(page_size, max(request.limit * 10, 50))
+            if request.usage_preferred_conditions
+            else request.limit
+        )
         eligible_products: list[ProductCard] = []
         offset = 0
         for _ in range(MAX_CANDIDATE_PAGES):
@@ -159,10 +164,12 @@ class CatalogRepository:
                 _take_eligible_products(
                     page,
                     excluded_usage=request.excluded_usage,
+                    usage_scenario=request.usage_scenario,
+                    required_conditions=request.usage_required_conditions,
                     limit=page_size,
                 )
             )
-            if len(eligible_products) >= request.limit or exhausted:
+            if len(eligible_products) >= candidate_target or exhausted:
                 break
             offset += page_size
 
@@ -341,28 +348,47 @@ def _catalog_search_statement(
 
 
 def _take_eligible_products(
-    products: list[ProductCard], *, excluded_usage: list[str], limit: int
+    products: list[ProductCard],
+    *,
+    excluded_usage: list[str],
+    limit: int,
+    usage_scenario: str | None = None,
+    required_conditions: list[ProductSpecCondition] | None = None,
 ) -> list[ProductCard]:
-    if not excluded_usage:
+    required_conditions = required_conditions or []
+    if not excluded_usage and not usage_scenario and not required_conditions:
         return products[:limit]
-    usage_terms = {
-        term
-        for usage in excluded_usage
-        for term in (
-            usage.lower(),
-            "游戏" if usage.lower() == "gaming" else "办公" if usage.lower() == "office" else "",
-        )
-        if term
+    excluded_usage_terms = {
+        term for usage in excluded_usage for term in _usage_terms(usage)
     }
+    required_usage_terms = _usage_terms(usage_scenario) if usage_scenario else set()
     eligible: list[ProductCard] = []
     for product in products:
+        if not all(
+            _matches_spec_condition(product.specs, condition)
+            for condition in required_conditions
+        ):
+            continue
         haystack = " ".join([product.title, product.category, *product.specs.values()]).lower()
-        if any(term in haystack for term in usage_terms):
+        if required_usage_terms and not any(term in haystack for term in required_usage_terms):
+            continue
+        if any(term in haystack for term in excluded_usage_terms):
             continue
         eligible.append(product)
         if len(eligible) >= limit:
             break
     return eligible
+
+
+def _usage_terms(usage: str) -> set[str]:
+    normalized = usage.strip().lower()
+    aliases = {
+        "gaming": {"gaming", "游戏", "电竞"},
+        "office": {"office", "办公"},
+        "video_meeting": {"video_meeting", "video meeting", "视频会议", "开会", "网课"},
+        "live_streaming": {"live_streaming", "live streaming", "直播", "主播"},
+    }
+    return aliases.get(normalized, {normalized})
 
 
 def _category_terms(category: str | None) -> set[str]:
@@ -419,6 +445,9 @@ def _score_product(
     for key, expected in request.filters.items():
         if _matches_single_filter(product.specs, key, expected):
             score += 4
+    for condition in request.usage_preferred_conditions:
+        if _matches_spec_condition(product.specs, condition):
+            score += 6
     if product.stock > 0:
         score += 1
     return score
@@ -429,6 +458,46 @@ def _matches_filters(specs: dict[str, str], filters: dict[str, str]) -> bool:
         if not _matches_single_filter(specs, key, expected):
             return False
     return True
+
+
+def _matches_spec_condition(
+    specs: dict[str, str], condition: ProductSpecCondition
+) -> bool:
+    if condition.operator == "exact":
+        actual = next(
+            (value for key, value in specs.items() if key.lower() == condition.key.lower()),
+            None,
+        )
+        return actual is not None and actual.strip().lower() == condition.values[0].strip().lower()
+    if condition.operator == "eq":
+        return _matches_single_filter(specs, condition.key, condition.values[0])
+    if condition.operator == "in":
+        actual = next(
+            (value for key, value in specs.items() if key.lower() == condition.key.lower()),
+            None,
+        )
+        allowed = {value.strip().lower() for value in condition.values}
+        return actual is not None and actual.strip().lower() in allowed
+
+    actual = next(
+        (value for key, value in specs.items() if key.lower() == condition.key.lower()),
+        None,
+    )
+    if actual is None:
+        return False
+    actual_number = _numeric_value(actual)
+    expected_number = _numeric_value(condition.values[0])
+    if actual_number is None or expected_number is None:
+        return False
+    if condition.operator == "gte":
+        return actual_number >= expected_number
+    return actual_number <= expected_number
+
+
+def _numeric_value(value: str) -> Decimal | None:
+    if match := re.search(r"-?\d+(?:\.\d+)?", value.replace(",", "")):
+        return Decimal(match.group(0))
+    return None
 
 
 def _matches_single_filter(specs: dict[str, str], key: str, expected: str) -> bool:
