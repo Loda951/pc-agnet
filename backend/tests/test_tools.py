@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.tools.catalog as catalog_tools
+import app.tools.knowledge as knowledge_tools
 from app.core.config import Settings
 from app.models import Sku, Spu
 from app.schemas.catalog import ProductCard
@@ -159,6 +160,32 @@ class FakeEmbeddingProvider:
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return [self.embed_query(text) for text in texts]
+
+
+def test_sentence_transformer_model_is_shared_across_provider_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    loads: list[tuple[str, bool]] = []
+
+    def fake_sentence_transformer(model_name: str, *, local_files_only: bool = False):
+        loads.append((model_name, local_files_only))
+        return sentinel
+
+    monkeypatch.setattr(
+        "sentence_transformers.SentenceTransformer",
+        fake_sentence_transformer,
+    )
+    knowledge_tools._load_sentence_transformer_model.cache_clear()
+    try:
+        first = knowledge_tools.SentenceTransformerEmbeddingProvider("test-shared-model")
+        second = knowledge_tools.SentenceTransformerEmbeddingProvider("test-shared-model")
+
+        assert first._get_model() is sentinel
+        assert second._get_model() is sentinel
+        assert loads == [("test-shared-model", True)]
+    finally:
+        knowledge_tools._load_sentence_transformer_model.cache_clear()
 
 
 def _fake_vector_index() -> KnowledgeVectorIndex:
@@ -600,6 +627,31 @@ async def test_llm_catalog_planner_parses_guarded_json() -> None:
     assert plan.max_price == 300
     assert plan.filters == {"wireless": "wireless"}
     assert chat.calls
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_enforces_explicit_count_and_sales_ranking(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    chat = FakeChatModel(
+        '{"category":"monitor","brands":[],"filters":{},'
+        '"keywords":[],"sort":"recommend","supported":true,"unsupported_reason":null}'
+    )
+    async with db_session_factory() as session:
+        result = await CatalogToolService(
+            session,
+            planner=LLMCatalogQueryPlanner(chat),
+        ).search(
+            CatalogSearchInput(
+                query="查找销量最高的两款显示器并进行对比",
+                limit=5,
+            )
+        )
+
+    assert result.query_plan["sort"] == "sales"
+    assert result.query_plan["limit"] == 2
+    assert len(result.products) == 2
+    assert result.products[0].sku_sales_count >= result.products[1].sku_sales_count
 
 
 @pytest.mark.asyncio
@@ -1598,6 +1650,29 @@ async def test_document_search_can_select_retrieval_mode() -> None:
     assert vector.search_strategy == "vector"
     assert vector.result_type == "documents"
     assert vector.documents[0].metadata["retrieval_debug"]["vector_score"] > 0
+    assert vector.documents[0].snippet == "Logitech Razer Wooting brand"
+
+
+@pytest.mark.asyncio
+async def test_bm25_retrieval_does_not_load_embedding_model() -> None:
+    class UnexpectedEmbeddingProvider(FakeEmbeddingProvider):
+        def embed_query(self, text: str) -> list[float]:
+            raise AssertionError("BM25 retrieval must not invoke the embedding provider")
+
+    service = KnowledgeRetrievalToolService(
+        embedding_provider=UnexpectedEmbeddingProvider(),
+        vector_index=_fake_vector_index(),
+    )
+
+    result = await service.search_knowledge(
+        DocumentSearchInput(
+            query="Logitech 品牌",
+            retrieval_mode="bm25",
+            limit=3,
+        )
+    )
+
+    assert result.result_type == "documents"
 
 
 @pytest.mark.asyncio

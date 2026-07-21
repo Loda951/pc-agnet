@@ -395,7 +395,7 @@ class RuleBasedCatalogQueryPlanner:
             filters=filters,
             keywords=_dedupe_keep_order([*request.keywords, *([usage] if usage else [])]),
             usage_scenario=usage,
-            sort=request.sort,
+            sort=_sort_from_query(request.query) or request.sort,
             limit=request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
@@ -437,7 +437,7 @@ class LLMCatalogQueryPlanner:
                 "filters": request.filters,
                 "keywords": request.keywords,
                 "usage_scenario": request.usage,
-                "sort": request.sort,
+                "sort": request.sort if request.sort != "recommend" else None,
             },
             preference_defaults=request.preference_defaults.model_dump(mode="json"),
         )
@@ -529,6 +529,9 @@ class CatalogToolService:
         self.session_factory = session_factory
 
     async def search(self, request: CatalogSearchInput) -> CatalogSearchOutput:
+        requested_limit = _requested_product_count(request.query)
+        if requested_limit is not None:
+            request = request.model_copy(update={"limit": requested_limit})
         plan = await self._safe_plan_search(request)
         if plan.supported and plan.usage_scenario and not plan.category:
             return await self._search_usage_across_categories(request, plan)
@@ -1999,6 +2002,72 @@ def _message_content_to_text(content) -> str:
     return str(content)
 
 
+def _sort_from_query(
+    query: str,
+) -> Literal["recommend", "sales", "price_asc", "price_desc", "stock"] | None:
+    lowered = query.casefold().replace(" ", "")
+    if any(
+        marker in lowered
+        for marker in (
+            "销量最高",
+            "销量最好",
+            "销量排行",
+            "按销量",
+            "最畅销",
+            "最热销",
+            "bestselling",
+            "topselling",
+        )
+    ):
+        return "sales"
+    return None
+
+
+def _requested_product_count(query: str) -> int | None:
+    normalized = query.casefold().replace("，", " ").replace(",", " ")
+    digit_match = re.search(
+        r"(?:前\s*|top\s*)?(\d{1,2})\s*(?:款|个|台|种|件|名|products?|items?|models?)",
+        normalized,
+    )
+    if digit_match:
+        value = int(digit_match.group(1))
+        return value if 1 <= value <= 20 else None
+
+    chinese_match = re.search(
+        r"(?:前\s*)?([一二两三四五六七八九十]+)\s*(?:款|个|台|种|件|名)",
+        normalized,
+    )
+    if not chinese_match:
+        return None
+    value = _parse_small_chinese_number(chinese_match.group(1))
+    return value if value is not None and 1 <= value <= 20 else None
+
+
+def _parse_small_chinese_number(value: str) -> int | None:
+    digits = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if value in digits:
+        return digits[value]
+    if value == "十":
+        return 10
+    if "十" not in value or value.count("十") != 1:
+        return None
+    tens, ones = value.split("十", maxsplit=1)
+    tens_value = digits.get(tens, 1) if tens else 1
+    ones_value = digits.get(ones, 0) if ones else 0
+    return tens_value * 10 + ones_value
+
+
 def _apply_query_inferred_defaults(plan: ProductQueryPlan, query: str) -> None:
     inferred_category = _infer_category_from_text(query.lower())
     if not plan.category and inferred_category:
@@ -2013,6 +2082,9 @@ def _apply_query_inferred_defaults(plan: ProductQueryPlan, query: str) -> None:
         plan.filters.setdefault(key, value)
     if plan.usage_scenario is None:
         plan.usage_scenario = _usage_from_query(query)
+    inferred_sort = _sort_from_query(query)
+    if inferred_sort is not None:
+        plan.sort = inferred_sort
 
 
 def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:

@@ -87,6 +87,18 @@ class LocalKnowledgeChunk:
     text: str
 
 
+@lru_cache(maxsize=4)
+def _load_sentence_transformer_model(model_name: str):
+    from sentence_transformers import SentenceTransformer
+
+    try:
+        return SentenceTransformer(model_name, local_files_only=True)
+    except OSError:
+        # A fresh environment may not have the model yet. Allow one normal Hub download;
+        # subsequent providers in this process reuse the cached model object.
+        return SentenceTransformer(model_name)
+
+
 class SentenceTransformerEmbeddingProvider:
     def __init__(
         self,
@@ -114,9 +126,7 @@ class SentenceTransformerEmbeddingProvider:
 
     def _get_model(self):
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            self._model = SentenceTransformer(self.model_name)
+            self._model = _load_sentence_transformer_model(self.model_name)
         return self._model
 
 
@@ -185,8 +195,16 @@ def _rank_documents(
     if not query_tokens:
         return []
 
-    bm25_ranked = _rank_by_bm25(query_tokens, documents)
-    vector_ranked = _rank_by_vector(query, documents, embedding_provider, vector_index)
+    bm25_ranked = (
+        _rank_by_bm25(query_tokens, documents)
+        if retrieval_mode in {"bm25", "hybrid"}
+        else []
+    )
+    vector_ranked = (
+        _rank_by_vector(query, documents, embedding_provider, vector_index)
+        if retrieval_mode in {"vector", "hybrid"}
+        else []
+    )
     if retrieval_mode == "bm25":
         ranked = bm25_ranked
     elif retrieval_mode == "vector":
@@ -199,7 +217,7 @@ def _rank_documents(
             source_id=item.document.id,
             title=item.document.title,
             document_type=item.document.document_type,
-            snippet=_snippet(item.document.content),
+            snippet=_ranked_snippet(item, vector_index),
             score=item.score,
             metadata=_hit_metadata(item),
         )
@@ -362,6 +380,22 @@ def _hit_metadata(item: RankedDocument) -> dict:
         "vector_chunk_id": item.vector_chunk_id,
     }
     return metadata
+
+
+def _ranked_snippet(
+    item: RankedDocument,
+    vector_index: KnowledgeVectorIndex | None,
+) -> str:
+    if item.vector_chunk_id and vector_index is not None:
+        for chunk in vector_index.chunks:
+            if chunk.chunk_id != item.vector_chunk_id:
+                continue
+            # Generated chunks contain title/type/metadata on the first three lines. Those
+            # fields are already returned separately and should not crowd out the matched text.
+            matched_text = chunk.text.split("\n", 3)[-1].lstrip(" ，。、；;:：")
+            if matched_text:
+                return _snippet(matched_text)
+    return _snippet(item.document.content)
 
 
 @lru_cache(maxsize=8)

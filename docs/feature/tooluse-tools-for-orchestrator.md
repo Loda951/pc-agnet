@@ -621,6 +621,12 @@ Orchestrator 可见的 public input：
 - `bm25`：只走 BM25。
 - `vector`：只走本地向量检索。工具读取 `backend/data/knowledge_vector_index.json` 中的 chunk embedding，使用 `BAAI/bge-small-zh-v1.5` 对 query 生成向量，并按 cosine similarity 聚合到文档级结果。
 - `hybrid`：BM25 + vector，两路结果用 RRF 融合。
+- `bm25` 模式不会初始化或调用 embedding provider；`vector` / `hybrid` 命中向量分块时，返回的
+  `snippet` 来自实际命中的 chunk，而不是固定截取整篇文档开头。
+- `SentenceTransformer` 模型按模型名做进程级懒加载缓存。新的
+  `KnowledgeRetrievalToolService` / provider 实例复用同一个模型对象，不随每个聊天请求重新加载；
+  `uvicorn --reload` 重启或多 worker 部署时，每个新进程仍各自加载一次。已存在本地缓存时优先
+  `local_files_only`，只有首次环境尚未下载模型时才访问 HF Hub。
 
 边界：
 
