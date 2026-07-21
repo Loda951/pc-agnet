@@ -454,7 +454,11 @@ async def test_compare_followup_resolves_ordinals_to_working_memory_sku_ids(
     assert registry.calls == [
         (
             "catalog.compare",
-            {"query": prepared.message, "sku_ids": [101, 102], "limit": 5},
+            {
+                "query": "此前商品需求：mouse；当前补充要求：对比第一个和第二个",
+                "sku_ids": [101, 102],
+                "limit": 5,
+            },
         )
     ]
     assert [product.sku_id for product in response.products] == [101, 102]

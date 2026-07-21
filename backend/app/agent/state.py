@@ -12,6 +12,12 @@ class AgentState(TypedDict, total=False):
     user_message_id: int
     run_id: int
     message: str
+    request_router_call_count: int
+    route_source: str
+    route_plan: dict[str, Any]
+    rewritten_query: str
+    planned_subqueries: list[dict[str, Any]]
+    blocked_subqueries: list[dict[str, Any]]
     intent: str
     decision: dict[str, Any]
     orchestrator_call_count: int

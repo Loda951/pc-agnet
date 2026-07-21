@@ -41,7 +41,9 @@ priority: P0
 - 已完成：会话、消息、agent run、工具调用和简单长期记忆持久化。
 - 已完成：知识库 RAG 基础闭环，`knowledge_document` 可同步到 ChromaDB，售后政策、FAQ、店铺规则和外设知识回答可返回 evidence。
 - 已完成：上下文与记忆 M2 已接入 typed `WorkingMemoryV2`、token 预算、显式长期偏好和 ToolRegistry 主链，可承接商品筛选、序号对比、订单和政策追问。
-- 已完成：`design.md` 要求的 `in_scope_auto` / `human_handoff_required` / `out_of_scope` 三态边界分类基础版本。
+- 已完成：Request Router 在业务 Tool 前完成 query rewrite、working memory 融合、subquery 拆分和
+  逐项准入；边界在原三态基础上扩展 `unsupported` 与 `security_refusal`，mixed intent 只把允许
+  的 subquery 交给 Tool Planner。
 
 ### 数据与种子
 
@@ -97,8 +99,12 @@ priority: P0
 
 - 前端调用 `frontend/src/api.ts`，默认同源请求 `/api`，开发环境由 Vite proxy 转发到 `http://127.0.0.1:8000`。
 - `/api/chat` 接收用户问题后进入 `AgentRuntime`。
-- LangGraph 主流程为 `load_context -> orchestrate -> dispatch_decision`；需要业务事实时进入 `execute_tool_wave -> normalize_tool_results -> update_subquery_ledger -> orchestrate` 循环，形成结构化控制终态后经 `terminal_guard -> finalize_response/render_* -> persist_turn` 返回。
-- `orchestrate` 使用完整 `AIMessage` 选择带 `subquery` 编排元数据的原生业务 Tool Call，或选择原生控制 Tool Call；普通文本终止无效，LLM 不做 token/chunk 流式输出。
+- LangGraph 主流程为 `load_context -> request_router -> dispatch_route`；纯边界请求直接进入确定性
+  模板，需要业务事实的 routed subquery 才进入 `orchestrate(Tool Planner) -> dispatch_decision`。
+  Tool loop 仍为 `execute_tool_wave -> normalize_tool_results -> update_subquery_ledger -> orchestrate`。
+- Request Router 先生成整轮 rewritten query，再拆成带稳定 `sq_n` 的 subquery；Tool Planner 只能
+  原样复制冻结 query 来选择业务 Tool，不能再次 rewrite。普通文本终止无效，LLM 不做 token/chunk
+  流式输出。
 - 商品、订单、物流、政策和知识事实由只读 Tool 提供；Tool Result 可投影为 products、order 和 evidence。
 - `persist_turn` 写入用户消息、助手消息、agent run、工具调用和记忆变更。
 - 售后办理当前不由 Agent 自动执行；前端会通过聊天入口触发人工接管提示，`/api/after-sales` 保留但降级为 `409 human_handoff_required`。
@@ -106,11 +112,13 @@ priority: P0
 ## 已知问题与遗留债务
 
 - 产品边界债务：售后写操作已降级为人工接管入口，但真实人工队列或工单流转尚未接入。
-- 边界分类生产化债务：已实现 `in_scope_auto`、`human_handoff_required`、`out_of_scope` 规则版分类，后续需要评测集和更多可观测指标。
+- Router 生产化债务：结构化 rewrite、subquery 和五类边界已接入，后续需要真实模型离线评测集、
+  typo/自由指代/mixed intent 样例和更多可观测指标。
 - 鉴权基础版已完成：登录、刷新、登出、当前用户依赖和订单/会话/记忆/售后记录隔离已落地；后续仍需生产级身份源、密码重置、账号管理和审计能力。
 - RAG 生产化债务：当前使用本地 deterministic hash embedding 支撑 demo 和测试，后续可接入生产级 embedding provider，并改造为增量同步。
 - Evidence 范围债务：当前 evidence 主要覆盖知识文档；商品、订单、物流事实尚未统一纳入 evidence schema。
-- 多轮能力仍有限：已支持预算内完整轮次、typed working memory、显式偏好和基础序号对比；仍缺多子任务拆分、自由指代评测、跨标签页幂等和生产 token 统计。
+- 多轮能力仍有限：已支持预算内完整轮次、typed working memory、Router 多子任务拆分、显式偏好
+  和基础序号对比；仍缺自由指代评测、跨标签页幂等和生产 token 统计。
 - 数据质量有限：真实外设导入路径已打通，但本地环境仍需按需执行导入脚本；搜索排序还缺离线评测集。
 - 测试覆盖不足：已补 API 集成、边界分类和 RAG 回归测试；仍缺真实鉴权、权限隔离和多轮指代消解测试。
 - 错误处理较薄：LLM 超时、DeepSeek 错误、数据库异常、外部服务降级尚未形成统一错误码和用户可读策略。
@@ -131,15 +139,18 @@ priority: P0
 - 售后政策与流程说明：基础实现，demo 知识文档已接入 RAG；办理类售后请求仍按边界分类转人工。
 - FAQ 与店铺知识问答：基础实现，demo 文档可通过 ChromaDB 检索并返回 evidence。
 - 多轮上下文承接：M2 已支持 conversation_id、token 预算历史、商品/订单/政策结构态和显式偏好；复杂自由指代仍需评测增强。
-- 信息不足时澄清：部分实现，fallback 和 LLM 可能追问，但没有显式澄清状态和规则。
-- 三态边界分类：基础实现，当前为规则分类。
+- 信息不足时澄清：Router 具有显式 `clarification` disposition，只允许提出一个影响安全路由或
+  Tool 选择的必要问题。
+- 边界分类：Router 输出 `human_handoff`、`out_of_scope`、`unsupported`、`security_refusal` 等
+  per-subquery disposition；Runtime 对隐私、写操作和明显越界再做确定性 hard guard。
 
 ### Should Have 能力
 
-- 一轮多子任务拆分：未实现专门规划逻辑。
+- 一轮多子任务拆分：已由 Request Router 结构化实现，先 rewrite 再拆分，并支持 mixed intent。
 - 图片、PDF、docx 辅助信息提取：未实现。
 - 关键事实 evidence 约束：基础实现，知识文档回答可显式输出 evidence；订单和商品事实 evidence 尚未统一化。
-- mixed-intent 分段回复：依赖 LLM 自然生成，没有结构化保障。
+- mixed-intent 分段回复：Router 逐 subquery 准入，Planner 只处理允许部分，Runtime 追加被阻断
+  部分的确定性模板。
 
 ### Safety 和质量要求
 
@@ -167,7 +178,8 @@ priority: P0
 - 目标：实现 `in_scope_auto` / `human_handoff_required` / `out_of_scope` 统一边界分类，并决定售后创建是降级为人工接管入口还是升级为正式可写 workflow。
 - 对核心价值的影响：直接决定系统可信度和安全边界，是从 demo 走向业务可用的前置条件。
 - 技术复杂度评估：中等；需要新增边界分类模块、响应 schema、Agent 路由分支、前端展示和测试。
-- 与现有架构的衔接方式：扩展 `backend/app/agent/intent.py` 或新增 boundary classifier，在 `route_intent` 前后加入边界节点；前端根据分类显示自动回答、人工接管或拒答说明。
+- 当前实现：已新增 Request Router、Runtime hard guard 和五态前端展示；原规则 classifier 作为
+  无 LLM fallback 与防御层保留。
 
 ### P0：接入知识库 RAG 与 evidence 输出
 
@@ -206,7 +218,8 @@ priority: P0
 5. P1：商品、订单、物流事实统一 evidence。RAG evidence 已覆盖知识文档，但商品推荐和订单查询仍没有统一来源结构。
 6. P1：外部图片源接入。`sku.image_url` 字段已存在，但真实导入和前端展示尚未建立图片来源、许可、缓存和降级策略。
 7. P1：推荐、对比、兼容性继续增强。真实数据导入基础完成，但搜索排序仍是轻量规则，缺少离线评测集、对比结构化输出和指代承接。
-8. P2：边界分类生产化。规则分类已可用，后续需要评测集、误判样例、可观测指标和可选模型分类器。
+8. P2：Request Router 生产化。结构化模型路由与规则 hard guard 已可用，后续需要评测集、误判
+   样例、rewrite 保真率、subquery 覆盖率和安全误放行指标。
 9. P2：MCP 工具试点。当前内部 repository 工具足够支撑核心链路，MCP 更适合作为外部只读能力和人工系统集成的扩展层。
 
 ## 第二阶段优化点清单
@@ -272,7 +285,9 @@ priority: P0
 
 - 所属维度：功能完善。
 - 简明描述：规则分类已适合当前 demo，但进入真实客服语料后要能发现误判，尤其是把写操作误判为自动回答的风险。
-- 需要实现的功能点：整理边界分类评测集，覆盖商品咨询、订单查询、政策说明、售后办理、退款承诺、订单修改、越界闲聊和混合意图；记录每次分类的规则命中、分类结果、置信度和人工修正结果；增加边界分类指标面板或日志报表；必要时引入 LLM/小模型分类器作为二级判断，但写操作召回优先于自动回答覆盖率；所有分类器输出仍落到三态 schema。
+- 需要实现的功能点：整理 Router 评测集，覆盖 typo、working memory 指代、商品/订单/政策、售后
+  办理、越界闲聊、第三方数据、能力白名单和 mixed intent；记录 rewrite 保真、subquery 覆盖、
+  disposition、Runtime override 和人工修正；写操作与安全召回优先于自动回答覆盖率。
 
 ## P2：MCP 工具增强试点
 

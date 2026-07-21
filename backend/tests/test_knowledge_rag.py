@@ -164,6 +164,41 @@ async def test_after_sales_fallback_answer_includes_knowledge_evidence() -> None
     assert result["suggested_actions"] == []
 
 
+@pytest.mark.asyncio
+async def test_multi_document_fallback_does_not_dump_raw_snippets() -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    evidence = [
+        EvidenceItem(
+            source_type="knowledge_document",
+            source_id=index,
+            title=title,
+            document_type="faq",
+            snippet=f"raw snippet {index}",
+            score=0.4,
+            metadata={},
+        )
+        for index, title in enumerate(("商家说明", "订单规则", "常见问题"), start=1)
+    ]
+    state = {
+        "message": "你们商店的理念是什么",
+        "intent": "knowledge_search",
+        "boundary": classify_boundary("你们商店的理念是什么").model_dump(mode="json"),
+        "decision": {
+            "type": "grounded_response",
+            "response": "",
+            "reason": "test",
+            "tool_calls": [],
+        },
+        "parsed": {},
+        "evidence": evidence,
+    }
+
+    result = await runtime._finalize_response(state)
+
+    assert "暂时无法可靠归纳出直接答案" in result["answer"]
+    assert "raw snippet" not in result["answer"]
+
+
 def test_local_hash_embedding_is_deterministic() -> None:
     provider = LocalHashEmbeddingProvider(dimensions=32)
 

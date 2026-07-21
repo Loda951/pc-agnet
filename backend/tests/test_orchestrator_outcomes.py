@@ -4,7 +4,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall, decision_from_ai_message
-from app.agent.graph import AgentRuntime, _fallback_answer, _has_successful_tool_result
+from app.agent.graph import (
+    AgentRuntime,
+    _fallback_answer,
+    _fallback_unavailable_answer,
+    _has_successful_tool_result,
+)
 from app.agent.outcomes import (
     build_subquery_ledger,
     has_usable_information,
@@ -378,8 +383,110 @@ def test_catalog_fallback_distinguishes_sku_and_spu_sales_counts() -> None:
 
     answer = _fallback_answer(state)
 
-    assert "SKU 销量 5" in answer
-    assert "SPU 总销量 12" in answer
+    assert "当前版本销量 5" in answer
+    assert "整个商品系列累计销量 12" in answer
+    assert "SKU" not in answer
+    assert "SPU" not in answer
+
+
+def test_catalog_fallback_uses_customer_language_for_applied_usage_mapping() -> None:
+    state = cast(
+        AgentState,
+        {
+            "message": "推荐办公键盘",
+            "parsed": {
+                "product_search": {
+                    "usage_mapping": {
+                        "status": "applied",
+                        "source": "deterministic_spec_mapping",
+                    }
+                }
+            },
+            "products": [
+                ProductCard(
+                    spu_id=10,
+                    sku_id=101,
+                    title="Test Office Keyboard",
+                    brand="Test",
+                    category="keyboard",
+                    price="399.00",
+                    stock=8,
+                    specs={"switches": "静音红轴"},
+                )
+            ],
+        },
+    )
+
+    answer = _fallback_answer(state)
+
+    assert "使用场景相关的规格要求和偏好" in answer
+    assert "轴体: 静音红轴" in answer
+    assert "switches" not in answer
+    assert "告诉我主要用途" not in answer
+    assert "usage_mapping" not in answer
+    assert "deterministic_spec_mapping" not in answer
+
+
+def test_usage_mapping_unavailable_fallback_is_not_empty_or_system_error() -> None:
+    result = _result(
+        "catalog_search",
+        {
+            "result_type": "empty",
+            "products": [],
+            "ranking_strategy": "unsupported_query",
+            "query_plan": {
+                "supported": False,
+                "error_type": "usage_mapping_unavailable",
+            },
+            "diagnostics": [{"code": "usage_mapping_unavailable"}],
+        },
+    )
+    state = cast(
+        AgentState,
+        {
+            "tool_results": [result],
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "call-1",
+                            "name": "catalog_search",
+                            "arguments": {"query": "办公鼠标"},
+                            "subquery": "推荐办公鼠标",
+                        }
+                    ],
+                    "results": [result],
+                }
+            ],
+            "subquery_ledger": [
+                entry.model_dump(mode="json")
+                for entry in build_subquery_ledger(
+                    [
+                        {
+                            "wave": 1,
+                            "calls": [
+                                {
+                                    "id": "call-1",
+                                    "name": "catalog_search",
+                                    "arguments": {"query": "办公鼠标"},
+                                    "subquery": "推荐办公鼠标",
+                                }
+                            ],
+                            "results": [result],
+                        }
+                    ]
+                )
+            ],
+        },
+    )
+
+    answer = _fallback_unavailable_answer(state)
+
+    assert "缺少能够可靠判断这个使用场景的规格依据" in answer
+    assert "没有匹配" not in answer
+    assert "系统" not in answer
+    assert "usage_mapping" not in answer
 
 
 def test_duplicate_tool_call_ids_are_normalized_before_ledger_execution() -> None:
@@ -523,9 +630,10 @@ class _FakeChatModel:
     def __init__(self, responses: list[AIMessage]):
         self.responses = responses
         self.call_count = 0
+        self.bound_tool_sets: list[set[str]] = []
 
     def bind_tools(self, tools: list[dict[str, Any]]):
-        assert len(tools) == 13
+        self.bound_tool_sets.append({tool["function"]["name"] for tool in tools})
         return self
 
     async def ainvoke(self, messages: list[Any]) -> AIMessage:

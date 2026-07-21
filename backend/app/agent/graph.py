@@ -28,6 +28,8 @@ from app.agent.intent import (
     classify_boundary,
     classify_intent,
     extract_order_id,
+    requires_security_refusal,
+    requires_static_unsupported,
 )
 from app.agent.outcomes import (
     active_usable_tool_call_ids,
@@ -39,8 +41,18 @@ from app.agent.outcomes import (
     validate_terminal_decision,
 )
 from app.agent.prompts import (
+    REQUEST_ROUTER_SYSTEM_PROMPT,
     build_orchestrator_system_prompt,
     build_orchestrator_user_prompt,
+    build_request_router_user_prompt,
+)
+from app.agent.routing import (
+    RequestRoutePlan,
+    RoutedSubquery,
+    blocked_subqueries,
+    request_route_tool_definition,
+    route_plan_from_ai_message,
+    tool_planning_subqueries,
 )
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -73,6 +85,34 @@ from app.tools.schemas import (
 
 MAX_ORCHESTRATOR_CALLS = 3
 MAX_TOOL_WAVES = 2
+MAX_REQUEST_ROUTER_CALLS = 1
+
+CUSTOMER_SPEC_LABELS = {
+    "backlit": "背光",
+    "channels": "声道",
+    "color": "颜色",
+    "connection_type": "连接方式",
+    "enclosure_type": "耳罩类型",
+    "field_of_view": "视野范围",
+    "frame_rate": "帧率",
+    "frequency_response": "频响范围",
+    "hand_orientation": "持握方向",
+    "max_dpi": "最高 DPI",
+    "microphone": "麦克风",
+    "panel_type": "面板类型",
+    "power_w": "功率",
+    "refresh_rate": "刷新率",
+    "resolution": "分辨率",
+    "response_time_ms": "响应时间",
+    "size_inch": "尺寸",
+    "style": "款式",
+    "switches": "轴体",
+    "tenkeyless": "键盘布局",
+    "tracking_method": "传感方式",
+    "type": "类型",
+    "weight_g": "重量",
+    "wireless": "无线连接",
+}
 
 
 class AgentRuntime:
@@ -84,6 +124,7 @@ class AgentRuntime:
         contract_provider: ToolContractProvider | None = None,
         tool_executor: ToolExecutor | None = None,
         chat_model: Any | None = None,
+        router_model: Any | None = None,
         context_service: ConversationContextService | None = None,
         memory_service: MemoryService | None = None,
     ):
@@ -94,16 +135,42 @@ class AgentRuntime:
         self.context_service = context_service or ConversationContextService(session, settings)
         self.memory_service = memory_service or MemoryService()
         self.llm = chat_model if chat_model is not None else build_chat_model(settings)
-        self.orchestrator = (
-            self.llm.bind_tools(
-                [
-                    *(
-                        _orchestrator_business_tool_definition(contract)
-                        for contract in self.contract_provider.list_contracts()
-                    ),
-                    *control_tool_definitions(),
-                ]
+        business_tools = [
+            _orchestrator_business_tool_definition(contract)
+            for contract in self.contract_provider.list_contracts()
+        ]
+        controls_by_name = {
+            definition["function"]["name"]: definition
+            for definition in control_tool_definitions()
+        }
+        observation_controls = [
+            controls_by_name[name]
+            for name in (
+                "finish_answer",
+                "finish_partial",
+                "finish_unavailable",
+                "ask_clarification",
             )
+        ]
+        router_base_model = router_model
+        if router_base_model is None and chat_model is None:
+            router_base_model = self.llm
+        self.request_router = (
+            router_base_model.bind_tools([request_route_tool_definition()])
+            if router_base_model
+            else None
+        )
+        self.orchestrator = (
+            self.llm.bind_tools([*business_tools, *controls_by_name.values()])
+            if self.llm
+            else None
+        )
+        self.tool_planner = self.llm.bind_tools(business_tools) if self.llm else None
+        self.answer_synthesizer = (
+            self.llm.bind_tools(observation_controls) if self.llm else None
+        )
+        self.recovery_planner = (
+            self.llm.bind_tools([*business_tools, *observation_controls])
             if self.llm
             else None
         )
@@ -140,7 +207,7 @@ class AgentRuntime:
                     state.update(node_state)
                     if node_name == "load_context":
                         yield _stream_event("run_started", state)
-                    elif node_name == "orchestrate":
+                    elif node_name == "request_router":
                         yield _stream_event("boundary", state, boundary=state["boundary"])
                     elif node_name == "execute_tool_wave":
                         yield _context_event(state)
@@ -148,6 +215,10 @@ class AgentRuntime:
                         "finalize_response",
                         "render_handoff_template",
                         "render_out_of_scope_template",
+                        "render_unsupported_template",
+                        "render_security_template",
+                        "render_clarification_template",
+                        "render_direct_template",
                     }:
                         yield _stream_event("delta", state, delta=state["answer"])
                     elif node_name == "persist_turn":
@@ -174,6 +245,7 @@ class AgentRuntime:
             "user_id": user_id,
             "conversation_id": request.conversation_id,
             "message": request.message,
+            "request_router_call_count": 0,
             "orchestrator_call_count": 0,
             "tool_wave_count": 0,
             "tool_waves": [],
@@ -189,6 +261,7 @@ class AgentRuntime:
     def _build_graph(self):
         workflow = StateGraph(AgentState)
         workflow.add_node("load_context", self._load_context)
+        workflow.add_node("request_router", self._request_route)
         workflow.add_node("orchestrate", self._orchestrate)
         workflow.add_node("execute_tool_wave", self._execute_tool_wave)
         workflow.add_node("normalize_tool_results", self._normalize_tool_results)
@@ -197,10 +270,27 @@ class AgentRuntime:
         workflow.add_node("finalize_response", self._finalize_response)
         workflow.add_node("render_handoff_template", self._render_handoff_template)
         workflow.add_node("render_out_of_scope_template", self._render_out_of_scope_template)
+        workflow.add_node("render_unsupported_template", self._render_unsupported_template)
+        workflow.add_node("render_security_template", self._render_security_template)
+        workflow.add_node("render_clarification_template", self._render_clarification_template)
+        workflow.add_node("render_direct_template", self._render_direct_template)
         workflow.add_node("persist_turn", self._persist_turn)
 
         workflow.set_entry_point("load_context")
-        workflow.add_edge("load_context", "orchestrate")
+        workflow.add_edge("load_context", "request_router")
+        workflow.add_conditional_edges(
+            "request_router",
+            self._dispatch_route,
+            {
+                "plan": "orchestrate",
+                "human_handoff": "render_handoff_template",
+                "out_of_scope": "render_out_of_scope_template",
+                "unsupported": "render_unsupported_template",
+                "security_refusal": "render_security_template",
+                "clarification": "render_clarification_template",
+                "direct_response": "render_direct_template",
+            },
+        )
         workflow.add_conditional_edges(
             "orchestrate",
             self._dispatch_decision,
@@ -225,6 +315,10 @@ class AgentRuntime:
         workflow.add_edge("finalize_response", "persist_turn")
         workflow.add_edge("render_handoff_template", "persist_turn")
         workflow.add_edge("render_out_of_scope_template", "persist_turn")
+        workflow.add_edge("render_unsupported_template", "persist_turn")
+        workflow.add_edge("render_security_template", "persist_turn")
+        workflow.add_edge("render_clarification_template", "persist_turn")
+        workflow.add_edge("render_direct_template", "persist_turn")
         workflow.add_edge("persist_turn", END)
         return workflow.compile()
 
@@ -243,16 +337,102 @@ class AgentRuntime:
         state["memory"] = [item.model_dump(mode="json") for item in prepared.memory]
         return state
 
+    async def _request_route(self, state: AgentState) -> AgentState:
+        call_count = state.get("request_router_call_count", 0)
+        plan = _deterministic_pre_route_plan(state["message"])
+        route_source = "deterministic_fast_path"
+        if (
+            plan is None
+            and self.request_router is not None
+            and call_count < MAX_REQUEST_ROUTER_CALLS
+        ):
+            call_count += 1
+            try:
+                message = await self.request_router.ainvoke(_request_router_messages(state))
+                if not isinstance(message, AIMessage):
+                    raise TypeError("request router returned a non-AI message")
+                plan = route_plan_from_ai_message(message)
+                route_source = "request_router_llm"
+            except (ValidationError, ValueError, TypeError):
+                plan = self._fallback_route_plan(state)
+                route_source = "request_router_fallback"
+            except Exception:
+                plan = self._fallback_route_plan(state)
+                route_source = "request_router_fallback"
+        elif plan is None:
+            plan = self._fallback_route_plan(state)
+            route_source = "deterministic_fallback"
+
+        plan = _enforce_route_boundaries(plan, original_message=state["message"])
+        state["request_router_call_count"] = call_count
+        state["route_source"] = route_source
+        state["route_plan"] = plan.model_dump(mode="json")
+        state["rewritten_query"] = plan.rewritten_query
+        state["planned_subqueries"] = [
+            item.model_dump(mode="json") for item in tool_planning_subqueries(plan)
+        ]
+        state["blocked_subqueries"] = [
+            item.model_dump(mode="json") for item in blocked_subqueries(plan)
+        ]
+        state["boundary"] = _boundary_from_route_plan(plan)
+        state["intent"] = _intent_from_route_plan(plan)
+        return state
+
+    def _fallback_route_plan(self, state: AgentState) -> RequestRoutePlan:
+        rewritten = _fallback_rewritten_query(state, self.memory_service)
+        segments = _split_request_subqueries(rewritten)
+        subqueries: list[RoutedSubquery] = []
+        for index, query in enumerate(segments, start=1):
+            disposition = _fallback_route_disposition(
+                query,
+                state.get("working_memory", {}),
+            )
+            clarification_question = (
+                "你具体想咨询哪款商品、哪笔订单或哪项商城服务？"
+                if disposition == "clarification"
+                else ""
+            )
+            subqueries.append(
+                RoutedSubquery(
+                    id=f"sq_{index}",
+                    query=query,
+                    disposition=disposition,
+                    reason_code=f"fallback_{disposition}",
+                    missing_information=(
+                        ["具体咨询对象"] if disposition == "clarification" else []
+                    ),
+                    clarification_question=clarification_question,
+                )
+            )
+        return RequestRoutePlan(rewritten_query=rewritten, subqueries=subqueries)
+
+    def _dispatch_route(self, state: AgentState) -> str:
+        plan = RequestRoutePlan.model_validate(state["route_plan"])
+        if tool_planning_subqueries(plan):
+            return "plan"
+        dispositions = {item.disposition for item in plan.subqueries}
+        for disposition in (
+            "security_refusal",
+            "human_handoff",
+            "clarification",
+            "unsupported",
+            "out_of_scope",
+            "direct_response",
+        ):
+            if disposition in dispositions:
+                return disposition
+        return "clarification"
+
     async def _orchestrate(self, state: AgentState) -> AgentState:
         call_count = state.get("orchestrator_call_count", 0) + 1
         boundary = classify_boundary(state["message"])
-        if boundary.classification == "human_handoff_required":
+        if not state.get("route_plan") and boundary.classification == "human_handoff_required":
             decision = OrchestratorDecision(
                 type="handoff",
                 reason=boundary.reason,
                 control_action="request_handoff",
             )
-        elif boundary.classification == "out_of_scope":
+        elif not state.get("route_plan") and boundary.classification == "out_of_scope":
             decision = OrchestratorDecision(
                 type="out_of_scope",
                 reason=boundary.reason,
@@ -278,7 +458,12 @@ class AgentRuntime:
         state["orchestrator_call_count"] = call_count
         state["decision"] = decision.model_dump(mode="json")
         state["intent"] = _tag_from_decision(decision, state.get("intent"))
-        state["boundary"] = _boundary_from_decision(decision)
+        if state.get("route_plan"):
+            state["boundary"] = _boundary_from_route_plan(
+                RequestRoutePlan.model_validate(state["route_plan"])
+            )
+        else:
+            state["boundary"] = _boundary_from_decision(decision)
         return state
 
     async def _invoke_orchestrator_decision(
@@ -286,14 +471,28 @@ class AgentRuntime:
         state: AgentState,
         call_count: int,
     ) -> OrchestratorDecision:
-        message = await self.orchestrator.ainvoke(
+        model = self._orchestrator_model_for_state(state)
+        message = await model.ainvoke(
             _orchestrator_messages(state, call_count)
         )
         if not isinstance(message, AIMessage):
             raise TypeError("orchestrator returned a non-AI message")
-        return decision_from_ai_message(
-            message,
-        )
+        try:
+            return decision_from_ai_message(message)
+        except ValueError:
+            recovered = _plain_text_observation_decision(state, message)
+            if recovered is not None:
+                return recovered
+            raise
+
+    def _orchestrator_model_for_state(self, state: AgentState) -> Any:
+        if not state.get("route_plan"):
+            return self.orchestrator
+        if not state.get("tool_waves"):
+            return self.tool_planner
+        if _planner_requires_business_tools(state):
+            return self.recovery_planner
+        return self.answer_synthesizer
 
     def _validate_decision_budget(
         self,
@@ -316,6 +515,19 @@ class AgentRuntime:
                 "我暂时无法安全选择业务工具，请换一种方式描述你的需求。",
                 "unknown_or_empty_tool_call",
             )
+        if state.get("route_plan") and state.get("tool_wave_count", 0) == 0:
+            constrained_calls = _constrain_calls_to_route_plan(state, decision.tool_calls)
+            if not constrained_calls:
+                routed_subqueries = tool_planning_subqueries(state.get("route_plan"))
+                fallback = self._fallback_routed_tool_decision(
+                    state,
+                    routed_subqueries,
+                )
+                decision = fallback.model_copy(
+                    update={"reason": "tool_planner_subquery_binding_fallback"}
+                )
+            else:
+                decision = decision.model_copy(update={"tool_calls": constrained_calls})
         decision = decision.model_copy(
             update={
                 "tool_calls": _unique_tool_call_ids(
@@ -506,7 +718,7 @@ class AgentRuntime:
             fallback = _terminal_fallback_decision(state, validation.reason)
             state["decision"] = fallback.model_dump(mode="json")
             state["intent"] = _tag_from_decision(fallback, state.get("intent"))
-            state["boundary"] = _boundary_from_decision(fallback)
+            state["boundary"] = _boundary_for_state_decision(state, fallback)
             state["terminal_guard_status"] = "fallback"
             return state
 
@@ -526,7 +738,7 @@ class AgentRuntime:
         fallback = _terminal_fallback_decision(state, validation.reason)
         state["decision"] = fallback.model_dump(mode="json")
         state["intent"] = _tag_from_decision(fallback, state.get("intent"))
-        state["boundary"] = _boundary_from_decision(fallback)
+        state["boundary"] = _boundary_for_state_decision(state, fallback)
         state["terminal_guard_status"] = "fallback"
         return state
 
@@ -546,6 +758,10 @@ class AgentRuntime:
         call: PlannedToolCall,
     ) -> tuple[PlannedToolCall, list[int]]:
         arguments = dict(call.arguments)
+        routed_query = _routed_query_for_call(state, call)
+        if routed_query is not None:
+            arguments["query"] = routed_query
+        effective_message = routed_query or state["message"]
 
         if call.name == "catalog_compare":
             request = CatalogCompareInput.model_validate(arguments)
@@ -557,16 +773,18 @@ class AgentRuntime:
             arguments = request.model_dump(mode="json", exclude_none=True)
 
         elif call.name == "order_lookup":
-            arguments.setdefault("query", state["message"])
+            arguments.setdefault("query", effective_message)
             arguments["order_id"] = _resolve_order_id(
-                state["message"],
+                effective_message,
                 arguments.get("order_id"),
                 state.get("working_memory", {}),
                 self.memory_service,
             )
 
-        elif call.name in {"policy_search", "knowledge_search"} and _is_v2_policy_followup(
-            state["message"], state.get("working_memory", {})
+        elif (
+            not state.get("route_plan")
+            and call.name in {"policy_search", "knowledge_search"}
+            and _is_v2_policy_followup(state["message"], state.get("working_memory", {}))
         ):
             arguments["query"] = self.memory_service.resolve_knowledge_query(
                 state["message"],
@@ -591,29 +809,65 @@ class AgentRuntime:
 
     async def _finalize_response(self, state: AgentState) -> AgentState:
         decision = OrchestratorDecision.model_validate(state["decision"])
-        state["answer"] = decision.response.strip() or _fallback_answer(state)
+        answer = decision.response.strip() or _fallback_answer(state)
+        state["answer"] = _append_blocked_route_notices(answer, state)
         state["suggested_actions"] = _suggest_actions(state)
         return state
 
     async def _render_handoff_template(self, state: AgentState) -> AgentState:
         boundary = boundary_for_classification("human_handoff_required")
         state["boundary"] = boundary.model_dump(mode="json")
-        state["answer"] = boundary.display_message
+        state["answer"] = _route_terminal_answer(state, "human_handoff")
         state["suggested_actions"] = _suggest_actions(state)
         return state
 
     async def _render_out_of_scope_template(self, state: AgentState) -> AgentState:
         boundary = boundary_for_classification("out_of_scope")
         state["boundary"] = boundary.model_dump(mode="json")
-        state["answer"] = boundary.display_message
+        state["answer"] = _route_terminal_answer(state, "out_of_scope")
+        state["suggested_actions"] = _suggest_actions(state)
+        return state
+
+    async def _render_unsupported_template(self, state: AgentState) -> AgentState:
+        boundary = boundary_for_classification("unsupported")
+        state["boundary"] = boundary.model_dump(mode="json")
+        state["answer"] = _route_terminal_answer(state, "unsupported")
+        state["suggested_actions"] = _suggest_actions(state)
+        return state
+
+    async def _render_security_template(self, state: AgentState) -> AgentState:
+        boundary = boundary_for_classification("security_refusal")
+        state["boundary"] = boundary.model_dump(mode="json")
+        state["answer"] = _route_terminal_answer(state, "security_refusal")
+        state["suggested_actions"] = _suggest_actions(state)
+        return state
+
+    async def _render_clarification_template(self, state: AgentState) -> AgentState:
+        state["boundary"] = boundary_for_classification("in_scope_auto").model_dump(
+            mode="json"
+        )
+        state["answer"] = _route_terminal_answer(state, "clarification")
+        state["suggested_actions"] = []
+        return state
+
+    async def _render_direct_template(self, state: AgentState) -> AgentState:
+        state["boundary"] = boundary_for_classification("in_scope_auto").model_dump(
+            mode="json"
+        )
+        state["answer"] = _route_terminal_answer(state, "direct_response")
         state["suggested_actions"] = _suggest_actions(state)
         return state
 
     async def _persist_turn(self, state: AgentState) -> AgentState:
         state["assistant_metadata"] = {
             "intent": state["intent"],
-            "decision": state["decision"],
+            "route_source": state.get("route_source"),
+            "decision": state.get(
+                "decision",
+                {"type": "request_route_terminal", "route_plan": state.get("route_plan")},
+            ),
             "boundary": state["boundary"],
+            "route_plan": state.get("route_plan"),
             "subquery_ledger": state.get("subquery_ledger", []),
             "evidence": _dump_evidence(state.get("evidence", [])),
             "products": [
@@ -672,6 +926,10 @@ class AgentRuntime:
                 control_action="finish_unavailable",
                 unavailable_parts=["请求所需的业务信息"],
             )
+
+        routed_subqueries = tool_planning_subqueries(state.get("route_plan"))
+        if routed_subqueries:
+            return self._fallback_routed_tool_decision(state, routed_subqueries)
 
         boundary = classify_boundary(state["message"])
         if boundary.classification == "human_handoff_required":
@@ -762,6 +1020,70 @@ class AgentRuntime:
             "knowledge_search",
             {"query": state["message"], "limit": 3, "retrieval_mode": "hybrid"},
         )
+
+    def _fallback_routed_tool_decision(
+        self,
+        state: AgentState,
+        subqueries: list[RoutedSubquery],
+    ) -> OrchestratorDecision:
+        calls: list[PlannedToolCall] = []
+        for subquery in subqueries:
+            query = subquery.query
+            facet_arguments = _fallback_catalog_facets_arguments(query)
+            if facet_arguments:
+                name = "catalog_facets"
+                arguments = facet_arguments
+            else:
+                intent = classify_intent(query)
+                if intent == "product_recommendation":
+                    compare_sku_ids = _resolve_compare_sku_ids(
+                        state["message"], state.get("working_memory", {})
+                    )
+                    if compare_sku_ids:
+                        name = "catalog_compare"
+                        arguments = {
+                            "query": query,
+                            "sku_ids": compare_sku_ids,
+                            "limit": 5,
+                        }
+                    else:
+                        name = "catalog_search"
+                        arguments = {"query": query, "limit": 3}
+                elif intent == "order_status":
+                    name = "order_lookup"
+                    arguments = {
+                        "query": query,
+                        "order_id": _resolve_order_id(
+                            query,
+                            extract_order_id(query),
+                            state.get("working_memory", {}),
+                            self.memory_service,
+                        ),
+                        "limit": 1,
+                    }
+                elif intent == "after_sales":
+                    name = "policy_search"
+                    arguments = {
+                        "query": query,
+                        "limit": 3,
+                        "retrieval_mode": "hybrid",
+                    }
+                else:
+                    name = "knowledge_search"
+                    arguments = {
+                        "query": query,
+                        "limit": 3,
+                        "retrieval_mode": "hybrid",
+                    }
+            calls.append(
+                PlannedToolCall(
+                    id=f"fallback_{subquery.id}_{name}",
+                    name=name,
+                    arguments=arguments,
+                    subquery=subquery.id,
+                )
+            )
+        return OrchestratorDecision(type="tool_calls", tool_calls=calls)
 
     async def _mark_run_failed(
         self, state: AgentState, error_type: str, message: str
@@ -991,6 +1313,344 @@ def _tool_result_payload(result: Any) -> dict[str, Any]:
     return result.model_dump(mode="json", exclude={"output"})
 
 
+def _request_router_messages(
+    state: AgentState,
+) -> list[SystemMessage | HumanMessage | AIMessage]:
+    messages: list[SystemMessage | HumanMessage | AIMessage] = [
+        SystemMessage(content=REQUEST_ROUTER_SYSTEM_PROMPT)
+    ]
+    for item in state.get("history", []):
+        content = item.get("content", "")
+        if not content:
+            continue
+        if item.get("role") == "user":
+            messages.append(HumanMessage(content=content))
+        elif item.get("role") == "assistant":
+            messages.append(AIMessage(content=content))
+    messages.append(
+        HumanMessage(
+            content=build_request_router_user_prompt(
+                message=state["message"],
+                working_memory=state.get("working_memory", {}),
+                explicit_user_preferences=state.get("memory", []),
+            )
+        )
+    )
+    return messages
+
+
+def _fallback_rewritten_query(
+    state: AgentState,
+    memory_service: MemoryService,
+) -> str:
+    message = " ".join(state["message"].split())
+    working_memory = state.get("working_memory", {})
+    intent = _contextual_intent(message, working_memory, memory_service)
+    if intent == "product_recommendation":
+        return _fallback_catalog_query({**state, "message": message})
+    if intent == "after_sales":
+        return memory_service.resolve_knowledge_query(
+            message,
+            _knowledge_memory_view(working_memory),
+        )
+    if intent == "order_status" and extract_order_id(message) is None:
+        order_id = _resolve_order_id(
+            message,
+            None,
+            working_memory,
+            memory_service,
+        )
+        if order_id is not None:
+            return f"{message}，订单号 {order_id}"
+    return message
+
+
+def _split_request_subqueries(rewritten_query: str) -> list[str]:
+    segments = re.split(
+        r"(?:，|,)?(?:另外|顺便|同时还|再帮我|并且帮我|also\s+help\s+me)",
+        rewritten_query,
+        flags=re.IGNORECASE,
+    )
+    cleaned = [" ".join(segment.strip(" ，,；;。").split()) for segment in segments]
+    return [segment for segment in cleaned if segment] or [rewritten_query.strip()]
+
+
+def _deterministic_pre_route_plan(message: str) -> RequestRoutePlan | None:
+    """Return a terminal route plan only when every raw segment is unambiguous."""
+    normalized = " ".join(message.split())
+    if not normalized:
+        return None
+
+    subqueries: list[RoutedSubquery] = []
+    for segment in _split_boundary_guard_segments(normalized):
+        hard_boundary = _hard_route_boundary(segment)
+        if hard_boundary is not None:
+            disposition, reason_code = hard_boundary
+        elif _is_high_confidence_direct_request(segment):
+            disposition = "direct_response"
+            reason_code = "runtime_direct_fast_path"
+        elif subqueries and _is_terminal_boundary_continuation(segment):
+            previous = subqueries[-1]
+            if previous.disposition == "direct_response":
+                return None
+            subqueries[-1] = previous.model_copy(
+                update={"query": f"{previous.query}，{segment}"}
+            )
+            continue
+        else:
+            # One executable or ambiguous segment means the Router must still rewrite and split
+            # the complete request. This preserves mixed-intent and working-memory behavior.
+            return None
+        subqueries.append(
+            RoutedSubquery(
+                id=f"sq_{len(subqueries) + 1}",
+                query=segment,
+                disposition=disposition,
+                reason_code=reason_code,
+            )
+        )
+    return RequestRoutePlan(rewritten_query=normalized, subqueries=subqueries)
+
+
+def _is_terminal_boundary_continuation(message: str) -> bool:
+    compact = re.sub(r"\s+", "", message.casefold())
+    if any(
+        marker in compact
+        for marker in (
+            "推荐",
+            "比较",
+            "对比",
+            "查询订单",
+            "查订单",
+            "物流",
+            "退货政策",
+            "发票政策",
+        )
+    ):
+        return False
+    return any(
+        marker in compact
+        for marker in ("对应", "这个", "这款", "它", "结果", "sku", "型号", "编号")
+    )
+
+
+def _is_high_confidence_direct_request(message: str) -> bool:
+    compact = re.sub(r"[\s，。！？!?、,.]", "", message.casefold())
+    if compact in {
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "谢谢",
+        "谢谢你",
+        "再见",
+    }:
+        return True
+    identity = compact.removeprefix("请问")
+    if identity in {
+        "你是谁",
+        "你是什么",
+        "你能做什么",
+        "你能帮我做什么",
+        "你会什么",
+        "怎么用你",
+    }:
+        return True
+    return classify_intent(message) == "purchase_guidance"
+
+
+def _fallback_route_disposition(
+    query: str,
+    working_memory: dict[str, Any],
+) -> str:
+    if requires_security_refusal(query):
+        return "security_refusal"
+    if requires_static_unsupported(query):
+        return "unsupported"
+    boundary = classify_boundary(query)
+    if boundary.classification == "human_handoff_required":
+        return "human_handoff"
+    if boundary.classification == "out_of_scope":
+        return "out_of_scope"
+    if boundary.classification == "security_refusal":
+        return "security_refusal"
+    if _is_identity_or_capability_question(query) or _is_safe_direct_request(query):
+        return "direct_response"
+    if classify_intent(query) == "purchase_guidance":
+        return "direct_response"
+    compact = re.sub(r"\s+", "", query.casefold())
+    if compact in {"这个呢", "这个怎么样", "帮我查一下", "看看这个", "那这个呢"}:
+        has_context = any(
+            bool(working_memory.get(key)) for key in ("catalog", "order", "policy")
+        )
+        if not has_context:
+            return "clarification"
+    unsupported_markers = (
+        "历史价格",
+        "价格预测",
+        "未来价格",
+        "销量趋势",
+        "销量增长率",
+        "销量环比",
+        "图片故障诊断",
+        "自动检测兼容性",
+    )
+    if any(marker in compact for marker in unsupported_markers):
+        return "unsupported"
+    return "tool_planning"
+
+
+def _enforce_route_boundaries(
+    plan: RequestRoutePlan,
+    *,
+    original_message: str = "",
+) -> RequestRoutePlan:
+    enforced: list[RoutedSubquery] = []
+    for item in plan.subqueries:
+        hard_boundary = _hard_route_boundary(item.query)
+        disposition = hard_boundary[0] if hard_boundary else item.disposition
+        reason_code = hard_boundary[1] if hard_boundary else item.reason_code
+        enforced.append(
+            item.model_copy(
+                update={
+                    "query": " ".join(item.query.split()),
+                    "disposition": disposition,
+                    "reason_code": reason_code,
+                }
+            )
+        )
+
+    raw_segments = _split_boundary_guard_segments(original_message)
+    raw_hard_boundaries = [
+        (segment, hard_boundary)
+        for segment in raw_segments
+        if (hard_boundary := _hard_route_boundary(segment)) is not None
+    ]
+    if raw_hard_boundaries:
+        has_safe_raw_segment = any(
+            _hard_route_boundary(segment) is None for segment in raw_segments
+        )
+        if not has_safe_raw_segment:
+            raw_dispositions = {
+                hard_boundary[0] for _, hard_boundary in raw_hard_boundaries
+            }
+            if any(item.disposition not in raw_dispositions for item in enforced):
+                segment, (disposition, reason_code) = raw_hard_boundaries[0]
+                enforced = [
+                    RoutedSubquery(
+                        id="sq_1",
+                        query=segment,
+                        disposition=disposition,
+                        reason_code=f"{reason_code}_original_request",
+                    )
+                ]
+        else:
+            existing_dispositions = {item.disposition for item in enforced}
+            next_index = max(
+                (int(item.id.removeprefix("sq_")) for item in enforced),
+                default=0,
+            )
+            for segment, (disposition, reason_code) in raw_hard_boundaries:
+                if disposition in existing_dispositions:
+                    continue
+                next_index += 1
+                enforced.append(
+                    RoutedSubquery(
+                        id=f"sq_{next_index}",
+                        query=segment,
+                        disposition=disposition,
+                        reason_code=f"{reason_code}_original_request",
+                    )
+                )
+                existing_dispositions.add(disposition)
+    return plan.model_copy(
+        update={
+            "rewritten_query": " ".join(plan.rewritten_query.split()),
+            "subqueries": enforced,
+        }
+    )
+
+
+def _hard_route_boundary(query: str) -> tuple[str, str] | None:
+    if requires_security_refusal(query):
+        return "security_refusal", "runtime_security_guard"
+    if requires_static_unsupported(query):
+        return "unsupported", "runtime_static_capability_guard"
+    boundary = classify_boundary(query)
+    if boundary.classification == "human_handoff_required":
+        return "human_handoff", "runtime_handoff_guard"
+    if boundary.classification == "out_of_scope":
+        return "out_of_scope", "runtime_scope_guard"
+    return None
+
+
+def _split_boundary_guard_segments(message: str) -> list[str]:
+    normalized = " ".join(message.split())
+    if not normalized:
+        return []
+    segments = re.split(
+        r"[；;。！？!?]+|(?:，|,)(?=\s*(?:另外|顺便|同时|再|并|然后|告诉|帮我|"
+        r"写|查|查询|推荐|取消|修改|申请|把))|(?:另外|顺便|同时还|再帮我|并且帮我)|"
+        r"并(?=(?:告诉|帮我|写|查|查询|推荐|取消|修改|申请|把))",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    cleaned = [segment.strip(" ，,；;。") for segment in segments]
+    return [segment for segment in cleaned if segment] or [normalized]
+
+
+def _boundary_from_route_plan(plan: RequestRoutePlan) -> dict[str, Any]:
+    tool_subqueries = tool_planning_subqueries(plan)
+    blocked = blocked_subqueries(plan)
+    if tool_subqueries:
+        reason = (
+            "请求包含可自动处理的只读子任务；其他子任务将按各自边界单独说明"
+            if blocked
+            else "所有子任务均已通过只读能力准入"
+        )
+        return boundary_for_classification(
+            "in_scope_auto", reason=reason
+        ).model_dump(mode="json")
+    dispositions = {item.disposition for item in plan.subqueries}
+    if "security_refusal" in dispositions:
+        classification = "security_refusal"
+    elif "human_handoff" in dispositions:
+        classification = "human_handoff_required"
+    elif "unsupported" in dispositions:
+        classification = "unsupported"
+    elif "out_of_scope" in dispositions:
+        classification = "out_of_scope"
+    else:
+        classification = "in_scope_auto"
+    return boundary_for_classification(classification).model_dump(mode="json")
+
+
+def _boundary_for_state_decision(
+    state: AgentState,
+    decision: OrchestratorDecision,
+) -> dict[str, Any]:
+    if state.get("route_plan"):
+        return _boundary_from_route_plan(
+            RequestRoutePlan.model_validate(state["route_plan"])
+        )
+    return _boundary_from_decision(decision)
+
+
+def _intent_from_route_plan(plan: RequestRoutePlan) -> str:
+    tool_subqueries = tool_planning_subqueries(plan)
+    if tool_subqueries:
+        return "request_router"
+    dispositions = list(dict.fromkeys(item.disposition for item in plan.subqueries))
+    return " + ".join(dispositions) or "clarification"
+
+
+def _routed_query_for_call(state: AgentState, call: PlannedToolCall) -> str | None:
+    for item in tool_planning_subqueries(state.get("route_plan")):
+        if item.id == call.subquery.strip():
+            return item.query
+    return None
+
+
 def _orchestrator_messages(
     state: AgentState,
     call_count: int,
@@ -1003,28 +1663,44 @@ def _orchestrator_messages(
             )
         )
     ]
-    for item in state.get("history", []):
-        content = item.get("content", "")
-        if not content:
-            continue
-        if item.get("role") == "user":
-            messages.append(HumanMessage(content=content))
-        elif item.get("role") == "assistant":
-            messages.append(AIMessage(content=content))
+    route_plan = state.get("route_plan")
+    if not route_plan:
+        for item in state.get("history", []):
+            content = item.get("content", "")
+            if not content:
+                continue
+            if item.get("role") == "user":
+                messages.append(HumanMessage(content=content))
+            elif item.get("role") == "assistant":
+                messages.append(AIMessage(content=content))
+    routed_subqueries = [
+        {"id": item.id, "canonical_query": item.query}
+        for item in tool_planning_subqueries(route_plan)
+    ]
+    planner_request = (
+        None
+        if route_plan
+        else str(state.get("rewritten_query") or state["message"])
+    )
     messages.append(
         HumanMessage(
             content=build_orchestrator_user_prompt(
-                message=state["message"],
+                message=planner_request,
                 tool_wave_count=state.get("tool_wave_count", 0),
                 orchestrator_call_count=call_count,
-                memory_context={
-                    "priority": (
-                        "current request and tool results > working memory > "
-                        "explicit user preferences > recent history"
-                    ),
-                    "working_memory": state.get("working_memory", {}),
-                    "explicit_user_preferences": state.get("memory", []),
-                },
+                memory_context=(
+                    None
+                    if route_plan
+                    else {
+                        "priority": (
+                            "current request and tool results > working memory > "
+                            "explicit user preferences > recent history"
+                        ),
+                        "working_memory": state.get("working_memory", {}),
+                        "explicit_user_preferences": state.get("memory", []),
+                    }
+                ),
+                routed_subqueries=routed_subqueries,
                 subquery_ledger=state.get("subquery_ledger", []),
                 terminal_guard_feedback=state.get("terminal_guard_feedback"),
             )
@@ -1078,21 +1754,67 @@ def _tool_decision(name: str, arguments: dict[str, Any]) -> OrchestratorDecision
 
 def _orchestrator_business_tool_definition(contract: ToolContract) -> dict[str, Any]:
     definition = copy.deepcopy(contract.as_llm_tool())
-    parameters = definition["function"]["parameters"]
+    function = definition["function"]
+    function["description"] = (
+        f"{function['description']} The runtime injects the frozen routed canonical query; "
+        "do not provide or rewrite a query field."
+    )
+    parameters = function["parameters"]
     properties = parameters.setdefault("properties", {})
+    properties.pop("query", None)
     properties["subquery"] = {
         "type": "string",
         "minLength": 1,
         "maxLength": 300,
         "description": (
-            "One atomic part of the user's current request that this tool call is intended "
-            "to answer. Keep the same wording across waves when replanning the same subquery."
+            "Copy the sq_n ID of exactly one routed subquery. Do not invent, rewrite, merge, "
+            "or split routed subqueries. Keep the same ID across dependent or recovery waves."
         ),
     }
     required = parameters.setdefault("required", [])
+    if "query" in required:
+        required.remove("query")
     if "subquery" not in required:
         required.append("subquery")
     return definition
+
+
+def _constrain_calls_to_route_plan(
+    state: AgentState,
+    calls: list[PlannedToolCall],
+) -> list[PlannedToolCall]:
+    routed = {
+        item.id: item for item in tool_planning_subqueries(state.get("route_plan"))
+    }
+    only_routed = next(iter(routed.values())) if len(routed) == 1 else None
+    constrained: list[PlannedToolCall] = []
+    for call in calls:
+        raw_subquery = call.subquery.strip()
+        subquery = routed.get(raw_subquery)
+        if (
+            subquery is None
+            and only_routed is not None
+            and not re.fullmatch(r"sq_\d+", raw_subquery, flags=re.IGNORECASE)
+        ):
+            # When only one admitted task exists, a missing subquery ID is unambiguous. Older
+            # model responses may contain an inferred natural-language label here instead of
+            # the sq_n metadata. Explicit unknown sq_n IDs remain rejected.
+            subquery = only_routed
+        if subquery is None:
+            continue
+        arguments = dict(call.arguments)
+        # The Router owns query rewrite. Never ask the model to reproduce trusted canonical
+        # text byte-for-byte; overwrite any model-provided query before public input validation.
+        arguments["query"] = subquery.query
+        constrained.append(
+            call.model_copy(
+                update={
+                    "arguments": arguments,
+                    "subquery": subquery.id,
+                }
+            )
+        )
+    return constrained
 
 
 def _unique_tool_call_ids(
@@ -1156,8 +1878,52 @@ def _find_reusable_tool_result(
     return None
 
 
+def _planner_requires_business_tools(state: AgentState) -> bool:
+    """Return whether an observation turn can still make an admissible business call."""
+    if state.get("tool_wave_count", 0) >= MAX_TOOL_WAVES:
+        return False
+
+    routed_ids = {
+        item.id for item in tool_planning_subqueries(state.get("route_plan"))
+    }
+    called_ids = {
+        str(call.get("subquery") or "").strip()
+        for wave in state.get("tool_waves", [])
+        for call in wave.get("calls", [])
+        if isinstance(call, dict)
+    }
+    called_ids.update(
+        str(entry.get("subquery") or "").strip()
+        for entry in state.get("subquery_ledger", [])
+        if isinstance(entry, dict)
+    )
+    if routed_ids - called_ids:
+        return True
+
+    active_ledger = [
+        entry
+        for entry in state.get("subquery_ledger", [])
+        if is_active_ledger_entry(entry)
+    ]
+    if any(entry.get("status") == "failed" for entry in active_ledger):
+        return True
+
+    tool_names = {str(entry.get("tool_name") or "") for entry in active_ledger}
+    if (
+        "catalog_search" in tool_names
+        and "catalog_compare" not in tool_names
+        and _request_explicitly_requires_comparison(state.get("message", ""))
+    ):
+        return True
+    return any(
+        entry.get("tool_name") == "order_lookup"
+        and entry.get("result_type") == "order_candidates"
+        for entry in active_ledger
+    )
+
+
 def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> bool:
-    """Admit only a recovery or a known result-dependent call after the first wave."""
+    """Admit only same-tool recovery or an original-request dependent call."""
     ledger = state.get("subquery_ledger", [])
     if not ledger and state.get("tool_waves"):
         ledger = [
@@ -1186,6 +1952,15 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
         return False
 
     outcome = str(latest.get("outcome") or "")
+    if (
+        outcome == "usable"
+        and call.name != str(latest.get("tool_name") or "")
+        and _is_supported_dependent_call(state, call)
+    ):
+        # A usable discovery result may be the prerequisite for a different Tool in the same
+        # routed task, for example catalog_search -> catalog_compare. Do not mark the whole
+        # subquery complete before admitting that explicitly requested dependent step.
+        return True
     if outcome in {"usable", "empty", "not_found", "unsupported", "insufficient"}:
         return False
 
@@ -1214,6 +1989,8 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
         )
         return same_failures < 2 and next_fingerprint == previous_fingerprint
     if action == "replan_arguments":
+        if call.name != str(latest.get("tool_name") or ""):
+            return False
         attempts = sum(
             entry.get("outcome") == "error"
             and str(entry.get("subquery") or "").strip().casefold() == key
@@ -1224,17 +2001,89 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
 
 
 def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bool:
+    """Allow only bounded continuations that the original request already requires."""
     active = [
         entry
         for entry in state.get("subquery_ledger", [])
         if is_active_ledger_entry(entry) and entry.get("has_usable_information")
     ]
     if call.name == "catalog_compare":
-        return any(entry.get("tool_name") == "catalog_search" for entry in active)
+        if not any(entry.get("tool_name") == "catalog_search" for entry in active):
+            return False
+        if not _request_explicitly_requires_comparison(state.get("message", "")):
+            return False
+        requested_sku_ids = call.arguments.get("sku_ids")
+        if not isinstance(requested_sku_ids, list):
+            return False
+        normalized_sku_ids = {
+            value
+            for value in requested_sku_ids
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        if len(normalized_sku_ids) < 2:
+            return False
+        return normalized_sku_ids <= _active_catalog_search_sku_ids(state)
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
-        return bool(output and output.get("result_type") == "order_candidates")
+        if not output or output.get("result_type") != "order_candidates":
+            return False
+        order_id = call.arguments.get("order_id")
+        if not isinstance(order_id, int) or isinstance(order_id, bool):
+            return False
+        candidates = output.get("candidates")
+        if not isinstance(candidates, list):
+            return False
+        candidate_ids = {
+            item.get("id")
+            for item in candidates
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), int)
+            and not isinstance(item.get("id"), bool)
+        }
+        return order_id in candidate_ids
     return False
+
+
+def _request_explicitly_requires_comparison(message: str) -> bool:
+    compact = re.sub(r"\s+", "", message.casefold())
+    return any(
+        marker in compact
+        for marker in (
+            "对比",
+            "比较",
+            "区别",
+            "差异",
+            "差别",
+            "哪个好",
+            "哪款更",
+            "哪个更",
+            "选哪个",
+            "怎么选",
+            "compare",
+            "comparison",
+            "difference",
+            "whichisbetter",
+        )
+    )
+
+
+def _active_catalog_search_sku_ids(state: AgentState) -> set[int]:
+    sku_ids: set[int] = set()
+    for result in _active_tool_results(state):
+        if result.get("name") != "catalog_search":
+            continue
+        execution = result.get("execution")
+        if not isinstance(execution, dict) or not execution.get("ok"):
+            continue
+        output = execution.get("output")
+        products = output.get("products") if isinstance(output, dict) else None
+        if not isinstance(products, list):
+            continue
+        for product in products:
+            sku_id = product.get("sku_id") if isinstance(product, dict) else None
+            if isinstance(sku_id, int) and not isinstance(sku_id, bool):
+                sku_ids.add(sku_id)
+    return sku_ids
 
 
 def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] | None:
@@ -1270,6 +2119,52 @@ def _clarification_decision(response: str, reason: str) -> OrchestratorDecision:
         reason=reason,
         control_action="ask_clarification",
     )
+
+
+def _plain_text_observation_decision(
+    state: AgentState,
+    message: AIMessage,
+) -> OrchestratorDecision | None:
+    """Recover a customer answer when an observation model omits the control Tool Call."""
+    if message.tool_calls or not state.get("tool_results"):
+        return None
+    response = _ai_message_text(message).strip()
+    usable_ids = _usable_tool_call_ids(state)
+    if not response or not usable_ids:
+        return None
+
+    unresolved = _unresolved_initial_subqueries(state)
+    if unresolved:
+        return OrchestratorDecision(
+            type="partial_response",
+            response=response,
+            reason="plain_text_observation_recovery",
+            control_action="finish_partial",
+            used_tool_call_ids=usable_ids,
+            unavailable_parts=unresolved,
+        )
+    return OrchestratorDecision(
+        type="grounded_response",
+        response=response,
+        reason="plain_text_observation_recovery",
+        control_action="finish_answer",
+        used_tool_call_ids=usable_ids,
+    )
+
+
+def _ai_message_text(message: AIMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "".join(parts)
 
 
 def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDecision:
@@ -1478,25 +2373,54 @@ def _tool_call_arguments(state: AgentState, call_id: str) -> dict[str, Any]:
 def _fallback_answer(state: AgentState) -> str:
     products = state.get("products", [])
     if products:
-        lines = ["我根据商品目录找到了这些候选："]
+        product_search = state.get("parsed", {}).get("product_search", {})
+        usage_mapping = (
+            product_search.get("usage_mapping", {})
+            if isinstance(product_search, dict)
+            else {}
+        )
+        usage_status = (
+            str(usage_mapping.get("status") or "")
+            if isinstance(usage_mapping, dict)
+            else ""
+        )
+        if usage_status == "applied":
+            intro = "我根据这个使用场景相关的规格要求和偏好，找到了这些候选："
+        elif usage_status == "expanded":
+            intro = "我根据这个使用场景，从多个相关外设品类中找到了这些候选："
+        else:
+            intro = "我根据商品目录找到了这些候选："
+        lines = [intro]
         asks_sales = any(
             term in state.get("message", "").lower()
             for term in ("销量", "热销", "畅销", "sales")
         )
         for product in products[:3]:
-            specs = "，".join(
-                f"{key}: {value}" for key, value in list(product.specs.items())[:4]
-            )
+            customer_specs = [
+                (CUSTOMER_SPEC_LABELS[key.casefold()], value)
+                for key, value in product.specs.items()
+                if key.casefold() in CUSTOMER_SPEC_LABELS
+            ][:4]
+            specs = "，".join(f"{label}: {value}" for label, value in customer_specs)
             suffix = f"，{specs}" if specs else ""
             if asks_sales:
                 suffix += (
-                    f"，SKU 销量 {product.sku_sales_count}，"
-                    f"SPU 总销量 {product.sales_count}"
+                    f"，当前版本销量 {product.sku_sales_count}，"
+                    f"整个商品系列累计销量 {product.sales_count}"
                 )
             lines.append(
                 f"- {product.title}：¥{product.price}，库存 {product.stock}{suffix}。"
             )
-        lines.append("告诉我主要用途后，我可以继续判断哪一款更适合；实际价格和库存以下单页为准。")
+        if usage_status in {"applied", "expanded"}:
+            lines.append(
+                "如果你想继续缩小范围，可以补充预算或最在意的具体规格；"
+                "实际价格和库存以下单页为准。"
+            )
+        else:
+            lines.append(
+                "告诉我主要用途后，我可以继续判断哪一款更适合；"
+                "实际价格和库存以下单页为准。"
+            )
         return "\n".join(lines)
 
     order = state.get("order")
@@ -1521,6 +2445,12 @@ def _fallback_answer(state: AgentState) -> str:
 
     evidence = state.get("evidence", [])
     if evidence:
+        if len(evidence) > 1:
+            titles = "、".join(item.title for item in evidence[:3])
+            return (
+                f"我找到了可能相关的资料（{titles}），但暂时无法可靠归纳出直接答案。"
+                "请稍后重试，或把问题描述得更具体一些。"
+            )
         lines = ["我根据知识库查到以下信息："]
         lines.extend(f"- {item.title}：{item.snippet}" for item in evidence)
         lines.append("依据：" + "、".join(item.title for item in evidence))
@@ -1611,6 +2541,14 @@ def _fallback_unavailable_answer(state: AgentState) -> str:
     ]
     kinds = {outcome.outcome for outcome in outcomes}
     tool_names = {outcome.tool_name for outcome in outcomes}
+    catalog_output = _latest_successful_tool_output(state, "catalog_search")
+    if catalog_output and _has_catalog_diagnostic(
+        catalog_output, "usage_mapping_unavailable"
+    ):
+        return (
+            "目前商品数据缺少能够可靠判断这个使用场景的规格依据，我不能仅凭商品名称推荐。"
+            "你可以补充预算、连接方式、重量或最在意的具体规格，我再继续筛选。"
+        )
     if "unsupported" in kinds:
         return (
             "这个请求属于 PC 外设相关，但当前商品查询能力不支持这类信息。"
@@ -1627,6 +2565,16 @@ def _fallback_unavailable_answer(state: AgentState) -> str:
     if tool_names <= {"catalog_search", "catalog_compare", "catalog_facets"}:
         return "当前商品目录没有找到匹配信息。你可以补充型号，或放宽一个筛选条件。"
     return "本次查询没有得到可用于回答的信息，请补充更具体的商品、订单或政策问题。"
+
+
+def _has_catalog_diagnostic(output: dict[str, Any], code: str) -> bool:
+    diagnostics = output.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return False
+    return any(
+        isinstance(diagnostic, dict) and diagnostic.get("code") == code
+        for diagnostic in diagnostics
+    )
 
 
 def _catalog_facets_fallback_answer(output: dict[str, Any]) -> str:
@@ -1663,6 +2611,19 @@ def _purchase_guidance_answer() -> str:
     )
 
 
+def _store_philosophy_answer() -> str:
+    return (
+        "我们的服务理念是：围绕 PC 外设，用清晰、克制、有依据的信息帮助你做选择。"
+        "商品建议尽量结合真实价格、库存、销量和规格；订单与政策问题尊重隐私和权限，"
+        "需要实际执行或人工确认的事项不会替你擅自承诺。"
+    )
+
+
+def _is_store_philosophy_question(message: str) -> bool:
+    compact = re.sub(r"\s+", "", message.casefold())
+    return any(term in compact for term in ("理念", "使命", "价值观", "宗旨"))
+
+
 def _is_identity_or_capability_question(message: str) -> bool:
     compact = message.lower().replace(" ", "")
     return any(
@@ -1688,12 +2649,84 @@ def _is_safe_direct_request(message: str) -> bool:
     }
 
 
+def _route_notice(subquery: RoutedSubquery) -> str:
+    if subquery.disposition == "clarification":
+        return subquery.clarification_question.strip()
+    if subquery.disposition == "direct_response":
+        if _is_store_philosophy_question(subquery.query):
+            return _store_philosophy_answer()
+        if classify_intent(subquery.query) == "purchase_guidance":
+            return _purchase_guidance_answer()
+        if _is_identity_or_capability_question(subquery.query):
+            return (
+                "我是 PC 外设商城客服 AI，可以帮你推荐和对比外设、查询当前账号的订单物流，"
+                "以及说明商城政策和外设选购知识。"
+            )
+        if any(term in subquery.query.casefold() for term in ("谢谢", "thank")):
+            return "不客气，有外设、订单物流或商城政策问题都可以继续问我。"
+        if any(term in subquery.query.casefold() for term in ("再见", "bye")):
+            return "再见，有外设、订单物流或商城政策问题时欢迎再来。"
+        return "你好，我可以帮你处理 PC 外设推荐、本人订单物流和商城政策咨询。"
+    classification_by_disposition = {
+        "human_handoff": "human_handoff_required",
+        "out_of_scope": "out_of_scope",
+        "unsupported": "unsupported",
+        "security_refusal": "security_refusal",
+    }
+    classification = classification_by_disposition.get(subquery.disposition)
+    if classification is None:
+        return ""
+    return boundary_for_classification(classification).display_message
+
+
+def _route_terminal_answer(state: AgentState, disposition: str) -> str:
+    route_plan = state.get("route_plan")
+    if route_plan:
+        plan = RequestRoutePlan.model_validate(route_plan)
+        notices = [
+            _route_notice(item)
+            for item in plan.subqueries
+            if item.disposition != "tool_planning"
+        ]
+        unique = [notice for notice in dict.fromkeys(notices) if notice]
+        if unique:
+            return "\n\n".join(unique)
+    classification_by_disposition = {
+        "human_handoff": "human_handoff_required",
+        "out_of_scope": "out_of_scope",
+        "unsupported": "unsupported",
+        "security_refusal": "security_refusal",
+    }
+    classification = classification_by_disposition.get(disposition)
+    if classification is not None:
+        return boundary_for_classification(classification).display_message
+    if disposition == "clarification":
+        return "你具体想咨询哪款商品、哪笔订单或哪项商城服务？"
+    return "你好，我可以帮你处理 PC 外设推荐、本人订单物流和商城政策咨询。"
+
+
+def _append_blocked_route_notices(answer: str, state: AgentState) -> str:
+    blocked = blocked_subqueries(state.get("route_plan"))
+    if not blocked:
+        return answer
+    notices = [_route_notice(item) for item in blocked]
+    unique = [notice for notice in dict.fromkeys(notices) if notice and notice not in answer]
+    if not unique:
+        return answer
+    return f"{answer.rstrip()}\n\n另外：\n" + "\n".join(f"- {notice}" for notice in unique)
+
+
 def _suggest_actions(state: AgentState) -> list[dict[str, Any]]:
     boundary = state["boundary"]["classification"]
     if boundary == "human_handoff_required":
         return [{"label": "转人工客服", "payload": _handoff_payload(state["message"])}]
-    if boundary == "out_of_scope":
+    if boundary in {"out_of_scope", "unsupported", "security_refusal"}:
         return [{"label": "咨询外设推荐", "payload": {"message": "推荐 300 元以内无线鼠标"}}]
+    if any(
+        item.disposition == "human_handoff"
+        for item in blocked_subqueries(state.get("route_plan"))
+    ):
+        return [{"label": "转人工客服", "payload": _handoff_payload(state["message"])}]
     if state.get("products"):
         return [
             {"label": "查询最近订单", "payload": {"message": "帮我查最近订单"}},

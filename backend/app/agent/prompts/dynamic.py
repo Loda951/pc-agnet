@@ -8,7 +8,11 @@ from app.agent.outcomes import (
     is_active_ledger_entry,
     normalize_tool_result,
 )
-from app.agent.prompts.static import ORCHESTRATOR_BASE_PROMPT
+from app.agent.prompts.static import (
+    ORCHESTRATOR_OBSERVATION_PROMPT,
+    ORCHESTRATOR_PLANNING_PROMPT,
+)
+from app.agent.prompts.tool_call import TOOL_RECOVERY_PROTOCOL
 
 FAILURE_ACTION_RULES = {
     "retry_once": (
@@ -44,13 +48,35 @@ def build_orchestrator_system_prompt(
     tool_waves: Sequence[Mapping[str, Any]] | None = None,
     tool_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
+    base_prompt = (
+        ORCHESTRATOR_OBSERVATION_PROMPT
+        if _has_tool_observations(tool_waves or (), tool_results or ())
+        else ORCHESTRATOR_PLANNING_PROMPT
+    )
     failure_prompt = build_tool_failure_prompt(
         tool_waves=tool_waves,
         tool_results=tool_results,
     )
     if not failure_prompt:
-        return ORCHESTRATOR_BASE_PROMPT
-    return f"{ORCHESTRATOR_BASE_PROMPT}\n\n{failure_prompt}"
+        return base_prompt
+    return (
+        f"{base_prompt}\n\n<tool_recovery_protocol>\n{TOOL_RECOVERY_PROTOCOL}\n"
+        f"</tool_recovery_protocol>\n\n{failure_prompt}"
+    )
+
+
+def _has_tool_observations(
+    tool_waves: Sequence[Mapping[str, Any]],
+    tool_results: Sequence[Mapping[str, Any]],
+) -> bool:
+    if any(isinstance(result, Mapping) for result in tool_results):
+        return True
+    return any(
+        isinstance(wave, Mapping)
+        and isinstance(wave.get("results"), Sequence)
+        and any(isinstance(result, Mapping) for result in wave["results"])
+        for wave in tool_waves
+    )
 
 
 def build_tool_failure_prompt(
@@ -102,10 +128,11 @@ def build_tool_failure_prompt(
 
 def build_orchestrator_user_prompt(
     *,
-    message: str,
+    message: str | None,
     tool_wave_count: int,
     orchestrator_call_count: int,
     memory_context: dict[str, Any] | None = None,
+    routed_subqueries: Sequence[Mapping[str, Any]] | None = None,
     subquery_ledger: Sequence[Mapping[str, Any]] | None = None,
     terminal_guard_feedback: str | None = None,
 ) -> str:
@@ -119,13 +146,29 @@ def build_orchestrator_user_prompt(
         "must_terminate_now": tool_wave_count >= 2 or orchestrator_call_count >= 3,
     }
     parts = [
-        "<current_request>",
-        json.dumps(message, ensure_ascii=False),
-        "</current_request>",
         "<execution_state>",
         json.dumps(execution_state, ensure_ascii=False, sort_keys=True),
         "</execution_state>",
     ]
+    if message is not None:
+        parts[0:0] = [
+            "<planner_request>",
+            json.dumps(message, ensure_ascii=False),
+            "</planner_request>",
+        ]
+    if routed_subqueries:
+        parts.extend(
+            [
+                "<routed_subqueries>",
+                json.dumps(
+                    list(routed_subqueries),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+                "</routed_subqueries>",
+            ]
+        )
     if memory_context:
         parts.extend(
             [

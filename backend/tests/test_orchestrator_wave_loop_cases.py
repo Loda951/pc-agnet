@@ -414,6 +414,40 @@ def test_wave_loop_outcome_cases(
             False,
             id="16-block-stop-error-retry",
         ),
+        pytest.param(
+            [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "invalid-1",
+                            "name": "catalog_search",
+                            "arguments": {"query": "办公键盘", "limit": 0},
+                            "subquery": "推荐办公键盘",
+                        }
+                    ],
+                    "results": [
+                        _result(
+                            "invalid-1",
+                            "catalog_search",
+                            error={
+                                "code": "invalid_input",
+                                "retryable": True,
+                                "recommended_action": "replan_arguments",
+                            },
+                        )
+                    ],
+                }
+            ],
+            PlannedToolCall(
+                id="switch-tool",
+                name="knowledge_search",
+                arguments={"query": "办公键盘"},
+                subquery="推荐办公键盘",
+            ),
+            False,
+            id="17-invalid-input-cannot-switch-tools",
+        ),
     ],
 )
 def test_wave_loop_followup_policy_cases(
@@ -424,6 +458,109 @@ def test_wave_loop_followup_policy_cases(
     state = _state_from_waves(waves)
 
     assert _followup_tool_call_allowed(state, next_call) is expected_allowed
+
+
+def test_dependent_compare_requires_original_request_and_returned_sku_ids() -> None:
+    result = _result(
+        "search-1",
+        "catalog_search",
+        output={
+            "result_type": "products",
+            "products": [_product(101), _product(102, brand="Keychron")],
+        },
+    )
+    state = _state_from_waves(
+        [
+            _wave(
+                1,
+                "search-1",
+                "catalog_search",
+                "办公键盘",
+                "查找办公键盘候选",
+                result,
+            )
+        ]
+    )
+    call = PlannedToolCall(
+        id="compare-1",
+        name="catalog_compare",
+        arguments={"query": "比较这两款办公键盘", "sku_ids": [101, 102], "limit": 5},
+        subquery="比较候选办公键盘",
+    )
+
+    state["message"] = "先推荐办公键盘，再比较候选商品的区别"
+    assert _followup_tool_call_allowed(state, call) is True
+
+    state["message"] = "Find office keyboards and compare the returned products"
+    assert _followup_tool_call_allowed(state, call) is True
+
+    state["message"] = "推荐办公键盘"
+    assert _followup_tool_call_allowed(state, call) is False
+
+    state["message"] = "先推荐办公键盘，再比较候选商品的区别"
+    unknown_sku_call = call.model_copy(
+        update={"arguments": {"query": "比较候选", "sku_ids": [101, 999], "limit": 5}}
+    )
+    assert _followup_tool_call_allowed(state, unknown_sku_call) is False
+
+
+def test_dependent_compare_is_allowed_within_the_same_routed_subquery() -> None:
+    query = "查找销量最高的两款显示器并进行对比"
+    result = _result(
+        "search-1",
+        "catalog_search",
+        output={
+            "result_type": "products",
+            "products": [_product(101), _product(102, brand="Keychron")],
+        },
+    )
+    state = _state_from_waves(
+        [_wave(1, "search-1", "catalog_search", query, "sq_1", result)]
+    )
+    state["message"] = "比较两个销量最高的显示器"
+    call = PlannedToolCall(
+        id="compare-1",
+        name="catalog_compare",
+        arguments={"query": query, "sku_ids": [101, 102], "limit": 2},
+        subquery="sq_1",
+    )
+
+    assert _followup_tool_call_allowed(state, call) is True
+
+
+def test_dependent_order_lookup_requires_a_returned_candidate_id() -> None:
+    result = _result(
+        "orders-1",
+        "order_lookup",
+        output={
+            "result_type": "order_candidates",
+            "candidates": [{"id": 202607210001}, {"id": 202607210002}],
+        },
+    )
+    state = _state_from_waves(
+        [
+            _wave(
+                1,
+                "orders-1",
+                "order_lookup",
+                "查询最近订单",
+                "查询最近订单候选",
+                result,
+            )
+        ]
+    )
+    valid_call = PlannedToolCall(
+        id="order-detail",
+        name="order_lookup",
+        arguments={"order_id": 202607210001, "limit": 1},
+        subquery="读取最近一笔订单详情",
+    )
+    invalid_call = valid_call.model_copy(
+        update={"arguments": {"order_id": 202607219999, "limit": 1}}
+    )
+
+    assert _followup_tool_call_allowed(state, valid_call) is True
+    assert _followup_tool_call_allowed(state, invalid_call) is False
 
 
 def test_timeout_retry_cannot_rewrite_canonical_query() -> None:

@@ -19,18 +19,30 @@ CATEGORY_KEYWORDS = {
 }
 
 AFTER_SALES_TERMS = ["退货", "换货", "退款", "维修", "售后", "工单", "保修", "赔付"]
-AFTER_SALES_INFO_TERMS = ["政策", "规则", "流程", "说明", "多久", "条件", "材料", "怎么", "如何"]
-AFTER_SALES_WRITE_TERMS = [
-    "创建",
-    "申请",
-    "提交",
-    "办理",
-    "发起",
-    "开",
-    "帮我",
-    "我要",
-    "想退",
-    "想换",
+AFTER_SALES_INFO_TERMS = [
+    "政策",
+    "规则",
+    "流程",
+    "说明",
+    "多久",
+    "几天",
+    "期限",
+    "时效",
+    "多长时间",
+    "条件",
+    "材料",
+    "怎么",
+    "如何",
+    "是否",
+    "能否",
+    "能不能",
+    "可以",
+    "什么",
+    "哪些",
+    "了解",
+    "咨询",
+    "问一下",
+    "知道",
 ]
 ORDER_CHANGE_WRITE_TERMS = [
     "取消订单",
@@ -68,6 +80,17 @@ PURCHASE_INFO_TERMS = [
     "能不能",
     "可以",
 ]
+ACCOUNT_HANDOFF_TERMS = [
+    "修改密码",
+    "重置密码",
+    "找回密码",
+    "注销账号",
+    "删除账号",
+    "导出账户数据",
+    "账号被盗",
+    "账户被盗",
+]
+EXPLICIT_HANDOFF_TERMS = ["转人工", "人工客服", "找人工", "真人客服", "人工服务"]
 OUT_OF_SCOPE_TERMS = [
     "天气",
     "新闻",
@@ -88,6 +111,38 @@ OUT_OF_SCOPE_TERMS = [
     "汽车",
     "衣服",
 ]
+THIRD_PARTY_TERMS = [
+    "别人的",
+    "他人的",
+    "其他客户",
+    "其他用户",
+    "某个客户",
+    "客户名单",
+    "购买过的人",
+    "哪些用户",
+    "哪些客户",
+    "同事的",
+    "朋友的",
+    "家人的",
+]
+PROTECTED_CUSTOMER_DATA_TERMS = [
+    "订单",
+    "购买记录",
+    "买过",
+    "收货地址",
+    "地址",
+    "手机号",
+    "电话",
+    "联系方式",
+    "物流",
+    "退款",
+    "支付",
+    "售后",
+    "聊天记录",
+    "客户信息",
+    "个人信息",
+]
+SECRET_TERMS = ["密码", "验证码", "访问令牌", "access token", "api key", "支付凭证"]
 IN_SCOPE_READ_ONLY_TERMS = [
     "订单",
     "物流",
@@ -132,6 +187,20 @@ BOUNDARY_MESSAGES = {
             "或说明售后政策。"
         ),
     },
+    "unsupported": {
+        "reason": "属于 PC 外设商城语境，但超出当前只读能力白名单",
+        "display_message": (
+            "这个需求属于商城相关场景，但当前客服能力还不能可靠完成。"
+            "我可以继续协助商品查询、本人订单物流和商城政策咨询。"
+        ),
+    },
+    "security_refusal": {
+        "reason": "请求涉及其他客户数据或敏感凭证，不能查询或披露",
+        "display_message": (
+            "为了保护客户隐私和账户安全，我不能查询或披露其他客户的信息，也不能处理密码、"
+            "验证码或支付凭证。你可以查询当前登录账号本人的订单和物流。"
+        ),
+    },
 }
 
 
@@ -150,6 +219,9 @@ def classify_boundary(message: str) -> BoundaryClassification:
     lowered = message.lower()
     compact = re.sub(r"\s+", "", lowered)
 
+    if requires_security_refusal(message):
+        return boundary_for_classification("security_refusal")
+
     if _requires_human_handoff(message, compact):
         return boundary_for_classification("human_handoff_required")
 
@@ -162,32 +234,110 @@ def classify_boundary(message: str) -> BoundaryClassification:
     return boundary_for_classification("in_scope_auto")
 
 
-def _requires_human_handoff(message: str, compact: str) -> bool:
+def requires_security_refusal(message: str) -> bool:
+    lowered = message.casefold()
+    compact = re.sub(r"\s+", "", lowered)
+    normalized_secret_terms = [re.sub(r"\s+", "", term.casefold()) for term in SECRET_TERMS]
+    secret_expression = "|".join(re.escape(term) for term in normalized_secret_terms)
+    discloses_secret = re.search(
+        rf"(?:{secret_expression})(?:是|为|如下|[:：])",
+        compact,
+    )
+    requests_secret = re.search(
+        rf"(?:告诉|查看|读取|显示|导出|保存|记录|验证|处理).{{0,8}}"
+        rf"(?:{secret_expression})",
+        compact,
+    )
+    if discloses_secret or requests_secret:
+        return True
+    has_third_party = any(term in compact for term in THIRD_PARTY_TERMS)
+    has_protected_data = any(term in compact for term in PROTECTED_CUSTOMER_DATA_TERMS)
+    return has_third_party and has_protected_data
+
+
+def requires_static_unsupported(message: str) -> bool:
+    """Return whether a requested commerce action is outside the read-only capability list."""
+    compact = re.sub(r"\s+", "", message.casefold())
+    if _is_purchase_guidance(compact):
+        return False
     if _requires_order_handoff(message, compact):
+        return True
+    unsupported_patterns = (
+        r"(?:识别|扫描|扫一下|读取|提取).{0,8}(?:图片|照片|条形码|二维码|发票文件|pdf)",
+        r"(?:图片|照片|条形码|二维码|发票文件|pdf).{0,8}(?:识别|扫描|读取|提取)",
+        r"(?:到货|降价|价格).{0,6}(?:提醒|通知)",
+        r"(?:设置|创建).{0,6}(?:到货|降价|价格).{0,6}(?:提醒|通知)",
+        r"(?:锁定|预留|保留).{0,8}(?:商品|鼠标|键盘|耳机|显示器|库存)",
+        r"(?:联系|询问).{0,6}(?:顺丰|快递|物流公司|承运商)",
+        r"(?:视频|摄像头).{0,8}(?:诊断|检测|判断).{0,8}(?:故障|硬件|闪屏|损坏)",
+    )
+    unavailable_analytics = (
+        "历史价格",
+        "价格预测",
+        "未来价格",
+        "销量趋势",
+        "销量增长率",
+        "销量环比",
+        "自动检测兼容性",
+    )
+    return any(re.search(pattern, compact) for pattern in unsupported_patterns) or any(
+        marker in compact for marker in unavailable_analytics
+    )
+
+
+def _requires_human_handoff(message: str, compact: str) -> bool:
+    if any(term in compact for term in EXPLICIT_HANDOFF_TERMS):
+        return True
+    if any(term in compact for term in ACCOUNT_HANDOFF_TERMS):
+        return True
+    if _requires_order_handoff(message, compact):
+        return True
+    account_workflow = (
+        r"(?:修改|更改|改|绑定).{0,6}(?:登录邮箱|绑定邮箱|账户邮箱|账号邮箱)",
+        r"(?:登录邮箱|绑定邮箱|账户邮箱|账号邮箱).{0,6}(?:修改|更改|改|绑定)",
+        r"(?:导出).{0,12}(?:订单|账户数据|账号数据)",
+        r"(?:订单|账户数据|账号数据).{0,12}(?:导出)",
+        r"(?:删除|清除).{0,8}(?:偏好|记忆|个人数据)",
+    )
+    if any(re.search(pattern, compact) for pattern in account_workflow):
         return True
 
     has_after_sales = any(term in message for term in AFTER_SALES_TERMS)
     if not has_after_sales:
         return False
 
-    asks_for_policy = any(term in message for term in AFTER_SALES_INFO_TERMS)
-    asks_for_write = any(term in message for term in AFTER_SALES_WRITE_TERMS)
-    explicit_after_sales_action = re.search(
-        r"(退货|换货|退款|维修|售后).{0,8}(申请|办理|处理|安排|提交|创建|开)",
-        message,
-    )
-    user_wants_after_sales_action = re.search(
-        r"(我要|帮我|给我|想要|需要).{0,8}(退货|换货|退款|维修|售后|工单)",
-        message,
-    )
-    bare_after_sales_action = any(term in compact for term in ["退货", "换货", "退款", "维修"])
+    after_sales_object = r"(?:退货|换货|退款|维修|保修|赔付|售后|工单)"
+    action_verb = r"(?:申请|办理|提交|发起|创建|处理|安排)"
 
-    return bool(
-        explicit_after_sales_action
-        or user_wants_after_sales_action
-        or asks_for_write
-        or (bare_after_sales_action and not asks_for_policy)
+    # Assistance language is an explicit execution request even when phrased politely as a
+    # question, for example “可以帮我申请退货吗”. Keep it narrower than a loose “帮我...退货”
+    # match so “帮我看一下退货政策” remains an information request.
+    assisted_action = re.search(
+        rf"(?:帮我|给我|替我|为我|麻烦帮我)(?:{action_verb}(?:一下)?)?"
+        rf"(?:把.{{0,8}})?{after_sales_object}",
+        compact,
     )
+    if assisted_action:
+        return True
+
+    asks_for_policy = any(term in compact for term in AFTER_SALES_INFO_TERMS)
+    if asks_for_policy:
+        return False
+
+    first_person_action = re.search(
+        rf"(?:我要|我想|我需要)(?:{action_verb}(?:一下)?)?"
+        rf"(?:把.{{0,8}})?{after_sales_object}",
+        compact,
+    )
+    explicit_operation = re.search(
+        rf"{action_verb}.{{0,4}}{after_sales_object}",
+        compact,
+    )
+    imperative_suffix = re.search(
+        rf"{after_sales_object}(?:一下|吧|处理一下|办理一下)$",
+        compact,
+    )
+    return bool(first_person_action or explicit_operation or imperative_suffix)
 
 
 def _requires_order_handoff(message: str, compact: str) -> bool:

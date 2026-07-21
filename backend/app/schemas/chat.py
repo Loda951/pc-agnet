@@ -7,7 +7,11 @@ from app.schemas.memory import MemoryChange
 from app.schemas.order import OrderCard
 
 BoundaryClassificationValue = Literal[
-    "in_scope_auto", "human_handoff_required", "out_of_scope"
+    "in_scope_auto",
+    "human_handoff_required",
+    "out_of_scope",
+    "unsupported",
+    "security_refusal",
 ]
 
 

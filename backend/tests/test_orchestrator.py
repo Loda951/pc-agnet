@@ -15,13 +15,18 @@ from app.agent.graph import (
     _tag_from_decision,
 )
 from app.agent.prompts import (
-    FACT_SOURCE_POLICY,
-    MEMORY_CONTEXT_POLICY,
-    ORCHESTRATOR_BASE_PROMPT,
+    BASE_CUSTOMER_VOICE,
+    BUSINESS_RESULT_RESPONSE_POLICY,
+    CUSTOMER_RESPONSE_POLICY,
+    ORCHESTRATOR_OBSERVATION_PROMPT,
+    ORCHESTRATOR_PLANNING_PROMPT,
     ORCHESTRATOR_SYSTEM_PROMPT,
-    ROUTING_EXAMPLES,
+    REQUEST_ROUTER_SYSTEM_PROMPT,
     SECURITY_AND_PRIVACY_POLICY,
     TOOL_CALL_PROTOCOL,
+    TOOL_INPUT_PROTOCOL,
+    TOOL_RECOVERY_PROTOCOL,
+    TOOL_RESULT_INTERPRETATION_POLICY,
     TOOL_SELECTION_RULES,
     build_orchestrator_system_prompt,
     build_orchestrator_user_prompt,
@@ -44,21 +49,17 @@ class FakeChatModel:
     def __init__(self, responses: list[AIMessage]):
         self.responses = responses
         self.call_count = 0
+        self.bound_tool_sets: list[set[str]] = []
 
     def bind_tools(self, tools: list[dict]):
-        assert len(tools) == 13
         tools_by_name = {tool["function"]["name"]: tool for tool in tools}
-        assert set(tools_by_name) >= {
-            "catalog_search",
-            "finish_answer",
-            "finish_unavailable",
-            "reject_out_of_scope",
-            "request_handoff",
-        }
-        for name in LLM_SAFE_TOOL_NAMES:
+        self.bound_tool_sets.append(set(tools_by_name))
+        for name in set(LLM_SAFE_TOOL_NAMES) & set(tools_by_name):
             parameters = tools_by_name[name]["function"]["parameters"]
             assert "subquery" in parameters["properties"]
             assert "subquery" in parameters["required"]
+            assert "query" not in parameters["properties"]
+            assert "query" not in parameters["required"]
         return self
 
     async def ainvoke(self, messages):
@@ -66,6 +67,23 @@ class FakeChatModel:
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
+
+
+class RecordingBoundModel:
+    def __init__(self, tool_names: set[str]):
+        self.tool_names = tool_names
+
+
+class RecordingBindableModel:
+    def __init__(self):
+        self.bindings: list[RecordingBoundModel] = []
+
+    def bind_tools(self, tools: list[dict]) -> RecordingBoundModel:
+        binding = RecordingBoundModel(
+            {tool["function"]["name"] for tool in tools}
+        )
+        self.bindings.append(binding)
+        return binding
 
 
 def _control_message(name: str, **arguments) -> AIMessage:
@@ -83,114 +101,214 @@ def _control_message(name: str, **arguments) -> AIMessage:
 
 
 def test_orchestrator_prompt_separates_fact_sources_without_repeating_schemas() -> None:
-    structured = FACT_SOURCE_POLICY["structured_business_facts"]
-    documents = FACT_SOURCE_POLICY["document_evidence"]
-
-    assert structured["tools"] == [
-        "catalog_search",
-        "catalog_compare",
-        "catalog_facets",
-        "order_lookup",
-    ]
-    assert documents["tools"] == ["policy_search", "knowledge_search"]
-    assert "字段级事实" in structured["use_for"]
-    assert "文档证据" in documents["authority"]
+    assert "catalog_search、catalog_compare、catalog_facets、order_lookup" in (
+        ORCHESTRATOR_OBSERVATION_PROMPT
+    )
+    assert "policy_search、knowledge_search" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "文档不能覆盖" in ORCHESTRATOR_OBSERVATION_PROMPT
     assert "parameters" not in ORCHESTRATOR_SYSTEM_PROMPT
+
+
+def test_route_path_uses_phase_specific_tool_bindings() -> None:
+    model = RecordingBindableModel()
+    runtime = AgentRuntime(
+        cast(object, None),
+        Settings(llm_api_key=""),
+        chat_model=model,
+    )
+    route_plan = {
+        "rewritten_query": "推荐无线鼠标",
+        "subqueries": [
+            {
+                "id": "sq_1",
+                "query": "推荐无线鼠标",
+                "disposition": "tool_planning",
+                "reason_code": "catalog_read",
+            }
+        ],
+    }
+    initial = cast(AgentState, {"route_plan": route_plan, "tool_waves": []})
+    observed = cast(
+        AgentState,
+        {
+            "route_plan": route_plan,
+            "tool_waves": [{"wave": 1}],
+            "tool_wave_count": 1,
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "call-1",
+                    "tool_name": "catalog_search",
+                    "subquery": "sq_1",
+                    "status": "ready_to_answer",
+                    "outcome": "usable",
+                    "has_usable_information": True,
+                }
+            ],
+        },
+    )
+    failed = cast(
+        AgentState,
+        {
+            **observed,
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "call-1",
+                    "tool_name": "catalog_search",
+                    "subquery": "sq_1",
+                    "status": "failed",
+                    "outcome": "error",
+                    "has_usable_information": False,
+                }
+            ],
+        },
+    )
+
+    business_names = set(LLM_SAFE_TOOL_NAMES)
+    answer_names = {
+        "finish_answer",
+        "finish_partial",
+        "finish_unavailable",
+        "ask_clarification",
+    }
+    assert runtime._orchestrator_model_for_state(initial).tool_names == business_names
+    assert runtime._orchestrator_model_for_state(observed).tool_names == answer_names
+    assert runtime._orchestrator_model_for_state(failed).tool_names == (
+        business_names | answer_names
+    )
+    assert runtime._orchestrator_model_for_state(
+        cast(AgentState, {"tool_waves": []})
+    ).tool_names == business_names | {
+        "reject_out_of_scope",
+        "ask_clarification",
+        "finish_direct",
+        "finish_answer",
+        "finish_partial",
+        "finish_unavailable",
+        "request_handoff",
+    }
 
 
 def test_orchestrator_prompt_covers_high_confusion_tool_boundaries() -> None:
     rules = "\n".join(TOOL_SELECTION_RULES)
-    examples = {item["request"]: item["decision"] for item in ROUTING_EXAMPLES}
 
     assert "具体 SKU" in rules
     assert "一般性的配送" in rules
-    assert examples["有什么鼠标"] == ["catalog_search"]
-    assert examples["你们有什么牌子的鼠标"] == ["catalog_facets"]
-    assert examples["你们有哪些鼠标品牌"] == ["catalog_facets"]
-    assert examples["Logitech 是什么品牌"] == ["knowledge_search"]
-    assert examples["Logitech 有哪些鼠标"] == ["catalog_search"]
-    assert examples["我的订单发货了吗"] == ["order_lookup"]
-    assert examples["商城一般多久发货"] == ["policy_search"]
-    assert examples["哪些用户购买过 Logitech 鼠标"] == ["policy_search"]
-    assert examples["这单发货了吗，收到后不合适能退吗"] == [
-        "order_lookup",
-        "policy_search",
-    ]
+    assert "catalog_search" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "catalog_facets" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "knowledge_search" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "order_lookup" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "policy_search" in ORCHESTRATOR_PLANNING_PROMPT
 
 
 def test_orchestrator_prompt_defines_memory_precedence_and_fact_refresh() -> None:
-    policy = "\n".join(MEMORY_CONTEXT_POLICY)
-
-    assert "当前请求中的显式条件和当前 Tool Result > working_memory" in policy
-    assert "不得把其中的展示身份当作当前价格或库存" in policy
-    assert "只作为缺省" in policy
-    assert "不得重复同一个已经成功且信息充分的调用" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "<memory_policy>" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "working_memory" not in ORCHESTRATOR_PLANNING_PROMPT
+    assert "working_memory" not in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "working memory" in REQUEST_ROUTER_SYSTEM_PROMPT
 
 
 def test_orchestrator_prompt_preserves_sku_and_spu_sales_semantics() -> None:
-    assert "sku_sales_count 是当前 SKU 的销量" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "sales_count 是该 SPU 下所有 SKU" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "不得把它当成单个版本销量" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "sku_sales_count 是当前版本销量" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "sales_count 是整个商品系列累计销量" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "不得混用" in ORCHESTRATOR_OBSERVATION_PROMPT
     rules = "\n".join(TOOL_SELECTION_RULES)
-    examples = {item["request"]: item["decision"] for item in ROUTING_EXAMPLES}
     assert "sku_sales_count 表示当前 SKU" in rules
-    assert "不得用当前累计销量推断趋势" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert examples["G502 黑色版本当前销量多少"] == ["catalog_search"]
-    assert examples["这两个颜色哪个更畅销"] == ["catalog_compare"]
-    assert examples["鼠标近三个月销量趋势"] == ["catalog_search"]
+    assert "不得用当前累计销量推断趋势" in ORCHESTRATOR_PLANNING_PROMPT
 
 
 def test_orchestrator_prompt_requires_native_control_action_without_type_protocol() -> None:
-    assert "不要直接输出正文、TYPE 头" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "第一行必须且只能输出 TYPE" not in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "只返回一个或多个原生业务 Tool Call" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "只调用一个已绑定控制动作" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "第一行必须且只能输出 TYPE" not in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
 def test_orchestrator_prompt_is_split_into_agent_runtime_and_response_blocks() -> None:
-    expected_blocks = [
-        "agent_identity",
-        "primary_objective",
-        "runtime_model",
-        "decision_policy",
-        "instruction_priority",
-        "scope_and_safety",
-        "security_and_privacy_policy",
-        "fact_sources",
-        "memory_policy",
-        "subquery_protocol",
+    planning_blocks = [
+        "planner_identity",
+        "planning_contract",
+        "planner_safety_guard",
         "tool_routing",
-        "tool_call_protocol",
-        "tool_loop_policy",
+        "tool_input_protocol",
+        "planning_output_contract",
+    ]
+    observation_blocks = [
+        "observation_identity",
+        "observation_contract",
+        "fact_sources",
+        "subquery_protocol",
+        "tool_result_interpretation",
+        "observation_loop_policy",
         "control_action_policy",
+        "customer_voice",
+        "business_result_response_policy",
         "terminal_response_contract",
-        "response_style",
     ]
 
-    for block in expected_blocks:
-        assert f"<{block}>" in ORCHESTRATOR_SYSTEM_PROMPT
-        assert f"</{block}>" in ORCHESTRATOR_SYSTEM_PROMPT
+    for block in planning_blocks:
+        assert f"<{block}>" in ORCHESTRATOR_PLANNING_PROMPT
+        assert f"</{block}>" in ORCHESTRATOR_PLANNING_PROMPT
+    for block in observation_blocks:
+        assert f"<{block}>" in ORCHESTRATOR_OBSERVATION_PROMPT
+        assert f"</{block}>" in ORCHESTRATOR_OBSERVATION_PROMPT
+
+
+def test_tool_result_prompt_explains_scenario_semantics_without_copying_rules() -> None:
+    policy = TOOL_RESULT_INTERPRETATION_POLICY
+
+    assert "只有 `ok=false` 才是调用错误" in policy
+    assert "usage_mapping.status=applied" in policy
+    assert "`expanded`" in policy
+    assert "usage_mapping_unavailable" in policy
+    assert "usage_mapping.required" in policy
+    assert "`preferred` 只影响排序" in policy
+    assert "厂商认证" in policy
+    assert "静音红轴" not in policy
+    assert "weight_g" not in policy
+    assert policy in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert policy not in ORCHESTRATOR_PLANNING_PROMPT
+
+
+def test_customer_response_prompt_hides_internal_terms_and_translates_sales_scope() -> None:
+    policy = CUSTOMER_RESPONSE_POLICY
+
+    assert "不向用户展示 Tool" in policy
+    assert "不展示 spu_id、sku_id" in policy
+    assert "当前版本销量" in policy
+    assert "整个商品" in policy and "系列累计销量" in policy
+    assert "不得直接输出“SKU 销量”“SPU 总销量”" in policy
+    assert "语气自然、耐心" in policy
+    assert BASE_CUSTOMER_VOICE in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert BUSINESS_RESULT_RESPONSE_POLICY in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert BASE_CUSTOMER_VOICE not in ORCHESTRATOR_PLANNING_PROMPT
+
+
+def test_prompt_forbids_successful_business_observation_requery() -> None:
+    assert "Tool 正常完成后，无论结果是否 usable" in TOOL_RESULT_INTERPRETATION_POLICY
+    assert "empty、not_found、unsupported 和 insufficient" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "原请求明确要求的依赖步骤" in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
 def test_orchestrator_prompt_defines_sensitive_customer_data_boundary() -> None:
     assert "其他用户的身份与联系方式" in SECURITY_AND_PRIVACY_POLICY
-    assert "不得使用\n  `reject_out_of_scope`" in SECURITY_AND_PRIVACY_POLICY
+    assert "不得把它误标为 out_of_scope" in SECURITY_AND_PRIVACY_POLICY
     assert "不得调用 `order_lookup`" in SECURITY_AND_PRIVACY_POLICY
-    assert "调用 `policy_search`" in SECURITY_AND_PRIVACY_POLICY
+    assert "固定\n  安全拒绝模板" in SECURITY_AND_PRIVACY_POLICY
     assert "商品级公开统计" in SECURITY_AND_PRIVACY_POLICY
-    assert SECURITY_AND_PRIVACY_POLICY in ORCHESTRATOR_SYSTEM_PROMPT
+    assert SECURITY_AND_PRIVACY_POLICY in REQUEST_ROUTER_SYSTEM_PROMPT
+    assert SECURITY_AND_PRIVACY_POLICY not in ORCHESTRATOR_SYSTEM_PROMPT
 
 
 def test_orchestrator_prompt_enforces_schema_fidelity_and_error_recovery() -> None:
     assert "不得翻译字段名、创造别名" in TOOL_CALL_PROTOCOL
-    assert "[Tool input]" in TOOL_CALL_PROTOCOL
-    assert "query-first 工具" in TOOL_CALL_PROTOCOL
-    assert "不要生成或覆盖 Tool 内部查询计划" in TOOL_CALL_PROTOCOL
-    assert "invalid_catalog_plan" in TOOL_CALL_PROTOCOL
-    assert "code=invalid_input" in TOOL_CALL_PROTOCOL
-    assert "code=execution_error" in TOOL_CALL_PROTOCOL
-    assert "不得修改 key/value 猜测原因" in TOOL_CALL_PROTOCOL
-    assert "reused_from_tool_call_id" in TOOL_CALL_PROTOCOL
-    assert TOOL_CALL_PROTOCOL in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "canonical query 由 Runtime" in TOOL_INPUT_PROTOCOL
+    assert "Planner 不输出" in TOOL_INPUT_PROTOCOL
+    assert "不要生成或覆盖 Tool 内部查询计划" in TOOL_INPUT_PROTOCOL
+    assert "code=invalid_input" in TOOL_RECOVERY_PROTOCOL
+    assert "code=execution_error" in TOOL_RECOVERY_PROTOCOL
+    assert "不得修改 key/value 猜测原因" in TOOL_RECOVERY_PROTOCOL
+    assert "reused_from_tool_call_id" in TOOL_RECOVERY_PROTOCOL
+    assert TOOL_INPUT_PROTOCOL in ORCHESTRATOR_PLANNING_PROMPT
+    assert TOOL_RECOVERY_PROTOCOL not in ORCHESTRATOR_PLANNING_PROMPT
+    assert TOOL_RECOVERY_PROTOCOL not in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
 def test_empty_tool_result_does_not_load_failure_recovery_prompt() -> None:
@@ -217,7 +335,51 @@ def test_empty_tool_result_does_not_load_failure_recovery_prompt() -> None:
     ]
 
     assert build_tool_failure_prompt(tool_waves=tool_waves) == ""
-    assert build_orchestrator_system_prompt(tool_waves=tool_waves) == ORCHESTRATOR_BASE_PROMPT
+    assert (
+        build_orchestrator_system_prompt(tool_waves=tool_waves)
+        == ORCHESTRATOR_OBSERVATION_PROMPT
+    )
+
+
+def test_orchestrator_prompt_loads_only_the_current_phase_policy() -> None:
+    planning_prompt = build_orchestrator_system_prompt()
+    observation_prompt = build_orchestrator_system_prompt(
+        tool_results=[
+            {
+                "tool_call_id": "call-1",
+                "name": "catalog_search",
+                "execution": {
+                    "ok": True,
+                    "output": {"result_type": "empty", "products": []},
+                },
+            }
+        ]
+    )
+
+    assert planning_prompt == ORCHESTRATOR_PLANNING_PROMPT
+    assert "<tool_routing>" in planning_prompt
+    assert "<tool_input_protocol>" in planning_prompt
+    assert "<customer_voice>" not in planning_prompt
+    assert "<tool_result_interpretation>" not in planning_prompt
+    assert "<business_result_response_policy>" not in planning_prompt
+
+    assert observation_prompt == ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "<tool_result_interpretation>" in observation_prompt
+    assert "<business_result_response_policy>" in observation_prompt
+    assert "<customer_voice>" in observation_prompt
+    assert "<tool_routing>" not in observation_prompt
+    assert "<routing_examples>" not in observation_prompt
+    assert TOOL_INPUT_PROTOCOL not in observation_prompt
+    assert TOOL_RECOVERY_PROTOCOL not in observation_prompt
+    assert len(planning_prompt) < 4_000
+    assert len(observation_prompt) < 7_000
+
+
+def test_phase_prompts_keep_the_stable_runtime_contract() -> None:
+    assert "不做 rewrite、边界分类或客服回答" in ORCHESTRATOR_PLANNING_PROMPT
+    assert "只解释可信 ToolMessage" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "human_handoff" not in ORCHESTRATOR_PLANNING_PROMPT
+    assert "out_of_scope" not in ORCHESTRATOR_PLANNING_PROMPT
 
 
 def test_timeout_loads_only_relevant_failure_recovery_rule() -> None:
@@ -320,7 +482,7 @@ def test_user_prompt_separates_request_execution_and_memory_data() -> None:
         memory_context={"working_memory": {"catalog": {"category": "mouse"}}},
     )
 
-    assert '<current_request>\n"换成无线"\n</current_request>' in prompt
+    assert '<planner_request>\n"换成无线"\n</planner_request>' in prompt
     assert '"completed_tool_waves": 1' in prompt
     assert '"remaining_tool_waves": 1' in prompt
     assert '"remaining_orchestrator_calls": 1' in prompt
@@ -880,11 +1042,10 @@ def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
 
 
 def test_orchestrator_prompt_uses_tool_specific_sufficiency_without_internal_limits() -> None:
-    assert "`catalog_search` 返回至少一个" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "`catalog_compare` 返回至少两款" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "至少一篇能直接支持核心问题" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "同一套 `finish_answer`" in ORCHESTRATOR_SYSTEM_PROMPT
-    assert "最终回复不得提及调用次数" in ORCHESTRATOR_SYSTEM_PROMPT
+    assert "usable 结果只要直接覆盖核心问题就立即回答" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "不得为了更多候选、品牌或文档而继续查询" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "`finish_answer`" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "编排过程" in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
 @pytest.mark.asyncio
