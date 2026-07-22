@@ -27,7 +27,7 @@ priority: P1
 ## Session history 与 token 预算
 
 - `AGENT_CONTEXT_BUDGET_TOKENS` 默认 `6000`。
-- 最多保留最近 6 个完整 `user -> assistant` 轮次，按确定性 token 估算从新到旧选择。
+- 最多保留最近 2 个完整 `user -> assistant` 轮次（最多 4 条消息），按确定性 token 估算从新到旧选择。
 - 未完成或失败后遗留的单边用户消息不进入 LLM history。
 - 裁剪结果记录 estimated token、保留轮数和丢弃轮数，不生成 LLM 摘要；丢弃轮数通过完整 assistant 轮次计数校准，不受最近 64 条消息读取窗口影响。
 

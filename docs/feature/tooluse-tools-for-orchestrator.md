@@ -24,7 +24,8 @@
   不需要自行猜测 `facet`。
 - `order.lookup`：`user_id` 只能由 Runtime 注入；Tool 可以从 `query` 提取明确长数字订单号，
   主流程已稳定拿到 `order_id` 时也可以直接传入。
-- `policy.search` / `knowledge.search`：保持 query-only 检索。
+- `policy.search` / `knowledge.search`：Runtime 保持 query-first，并统一传入 `limit=3`；
+  该 limit 表示返回的 Top-K chunk 数量。
 
 ## ToolRegistry
 
@@ -574,8 +575,7 @@ Orchestrator 可见的 public input：
 {
   "query": "退货多久退款",
   "document_type": null,
-  "limit": 3,
-  "retrieval_mode": "hybrid"
+  "limit": 3
 }
 ```
 
@@ -583,8 +583,9 @@ Orchestrator 可见的 public input：
 
 - `query`：必填，用户政策问题。
 - `document_type`：可选，如果主流程明确要限定文档类型，可以传 `policy`, `store_rule`, `faq`。
-- `limit`：默认 `3`，范围 `1..10`。
-- `retrieval_mode`：默认 `hybrid`，可选 `bm25`, `vector`, `hybrid`。
+- `limit`：请求的 chunk Top-K，默认 `3`，范围 `1..10`；Tool 内部最小值为 `2`，传入
+  `1` 时仍按 Top-2 检索。
+- `retrieval_mode` 不暴露给主流程 LLM，由 Tool 内部固定为 `hybrid`。
 
 输出：
 
@@ -607,6 +608,7 @@ Orchestrator 可见的 public input：
           "rrf_score": 0.18,
           "bm25_rank": 1,
           "vector_rank": 1,
+          "chunk_id": "1:0",
           "vector_chunk_id": "1:0"
         }
       }
@@ -618,11 +620,17 @@ Orchestrator 可见的 public input：
 
 检索模式：
 
+- 主流程固定使用 `hybrid`；以下单路模式只保留给 Tool 内部测试与检索评估。
 - `bm25`：只走 BM25。
-- `vector`：只走本地向量检索。工具读取 `backend/data/knowledge_vector_index.json` 中的 chunk embedding，使用 `BAAI/bge-small-zh-v1.5` 对 query 生成向量，并按 cosine similarity 聚合到文档级结果。
-- `hybrid`：BM25 + vector，两路结果用 RRF 融合。
+- `vector`：只走本地向量检索。工具读取 `backend/data/knowledge_vector_index.json` 中的
+  chunk embedding，使用 `BAAI/bge-small-zh-v1.5` 对 query 生成向量，并按 cosine
+  similarity 对 chunk 排名。
+- `hybrid`：BM25 + vector，两路结果在 chunk 级使用 RRF 融合；同一文档可以返回多个
+  相关 chunk。
 - `bm25` 模式不会初始化或调用 embedding provider；`vector` / `hybrid` 命中向量分块时，返回的
-  `snippet` 来自实际命中的 chunk，而不是固定截取整篇文档开头。
+  `snippet` 是完整命中 chunk，不再额外截成 180 字。
+- 固定大小切分不会保留仅由 overlap 构成的短尾 chunk，避免返回重复内容或从半句话开始的
+  末尾碎片。
 - `SentenceTransformer` 模型按模型名做进程级懒加载缓存。新的
   `KnowledgeRetrievalToolService` / provider 实例复用同一个模型对象，不随每个聊天请求重新加载；
   `uvicorn --reload` 重启或多 worker 部署时，每个新进程仍各自加载一次。已存在本地缓存时优先
@@ -662,14 +670,14 @@ Orchestrator 可见的 public input：
 {
   "query": "Wooting 磁轴键盘适合什么场景",
   "document_type": null,
-  "limit": 3,
-  "retrieval_mode": "hybrid"
+  "limit": 3
 }
 ```
 
 输出结构：
 
 - 与 `policy.search` 相同。
+- `limit` 同样表示 chunk Top-K，Runtime 默认传 `3`，Tool 内部最小为 `2`。
 - `search_strategy` 会返回实际检索模式。
 - 每条文档 metadata 会包含 `retrieval_debug`，便于调试不同检索模式效果。
 
