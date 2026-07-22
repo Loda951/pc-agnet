@@ -15,12 +15,19 @@ from app.agent.responses import (
 from app.agent.route_runtime import _resolve_compare_sku_ids, _resolve_order_id
 from app.agent.routing import RoutedSubquery, tool_planning_subqueries
 from app.agent.state import AgentState
-from app.agent.tool_loop import _clarification_decision, _tool_decision
+from app.agent.tool_loop import (
+    _clarification_decision,
+    _ready_unattempted_tool_subqueries,
+    _tool_decision,
+)
 
 
 def fallback_planner_decision(runtime: Any, state: AgentState) -> OrchestratorDecision:
     """Provide an offline decision without bypassing the routed control flow."""
     if state.get("tool_results"):
+        ready_tasks = _ready_unattempted_tool_subqueries(state)
+        if ready_tasks:
+            return fallback_routed_tool_decision(runtime, state, ready_tasks)
         order_output = _latest_successful_tool_output(state, "order_lookup")
         order_candidates = (
             order_output.get("candidates")

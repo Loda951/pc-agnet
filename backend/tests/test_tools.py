@@ -720,6 +720,36 @@ async def test_rule_catalog_planner_fills_missing_fields_from_typed_preferences(
 
 
 @pytest.mark.asyncio
+async def test_rule_catalog_planner_recognizes_sales_rank_wording() -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query="查询键盘品类销量排名第二的商品", limit=6)
+    )
+
+    assert plan.sort == "sales"
+    assert plan.limit == 6
+
+
+@pytest.mark.asyncio
+async def test_llm_catalog_planner_cannot_reject_supported_sales_rank() -> None:
+    chat = FakeChatModel(
+        '{"category":"keyboard","brands":[],"filters":{},"keywords":[],'
+        '"sort":"sales","supported":false,'
+        '"unsupported_reason":"Only sorting is supported"}'
+    )
+    planner = LLMCatalogQueryPlanner(chat)
+
+    plan = await planner.plan_search(
+        CatalogSearchInput(query="查询键盘品类中销量排名第二的SPU商品", limit=20)
+    )
+
+    assert plan.supported is True
+    assert plan.unsupported_reason is None
+    assert plan.sort == "sales"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("query", "expected_usage"),
     [

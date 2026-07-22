@@ -43,6 +43,62 @@ def _contextual_intent(
     return intent
 
 
+def _reuse_comparison_context(
+    plan: RequestRoutePlan,
+    working_memory: dict[str, Any],
+) -> RequestRoutePlan:
+    """Collapse redundant discovery tasks when Router targets an existing comparison pair."""
+    sku_ids = _context_comparison_sku_ids(working_memory)
+    if len(sku_ids) < 2:
+        return plan
+
+    tasks = {item.id: item for item in tool_planning_subqueries(plan)}
+    if len(tasks) == 1:
+        only_task = next(iter(tasks.values()))
+        sources = {item.source for item in only_task.input_requirements}
+        if only_task.capability == "catalog_compare" and sources == {"comparison_context"}:
+            return plan
+
+    for comparison_task in tasks.values():
+        if comparison_task.capability != "catalog_compare" or not comparison_task.depends_on:
+            continue
+        dependency_ids = set(comparison_task.depends_on)
+        if set(tasks) != dependency_ids | {comparison_task.id}:
+            continue
+        dependencies = [tasks[item_id] for item_id in comparison_task.depends_on]
+        if not all(
+            item.capability == "catalog_search" and item.result_selector is None
+            for item in dependencies
+        ):
+            continue
+        matched_ids = {
+            sku_id
+            for item in dependencies
+            for sku_id in sku_ids
+            if re.search(rf"(?<!\d){sku_id}(?!\d)", item.query)
+        }
+        if matched_ids != set(sku_ids):
+            continue
+        collapsed = RoutedSubquery.model_validate(
+            {
+                **comparison_task.model_dump(mode="python"),
+                "depends_on": [],
+                "input_requirements": [
+                    {
+                        "name": "comparison_products",
+                        "source": "comparison_context",
+                    }
+                ],
+                "reason_code": "reuse_confirmed_comparison_context",
+            }
+        )
+        return RequestRoutePlan(
+            rewritten_query=plan.rewritten_query,
+            subqueries=[collapsed],
+        )
+    return plan
+
+
 def _resolve_compare_sku_ids(message: str, working_memory: dict[str, Any]) -> list[int]:
     catalog = working_memory.get("catalog")
     if not isinstance(catalog, dict):
@@ -369,12 +425,22 @@ def _enforce_route_boundaries(
         hard_boundary = _hard_route_boundary(item.query)
         disposition = hard_boundary[0] if hard_boundary else item.disposition
         reason_code = hard_boundary[1] if hard_boundary else item.reason_code
+        task_updates: dict[str, Any] = {}
+        if disposition != "tool_planning":
+            task_updates = {
+                "capability": None,
+                "depends_on": [],
+                "input_requirements": [],
+                "produces": None,
+                "result_selector": None,
+            }
         enforced.append(
             item.model_copy(
                 update={
                     "query": " ".join(item.query.split()),
                     "disposition": disposition,
                     "reason_code": reason_code,
+                    **task_updates,
                 }
             )
         )
@@ -422,11 +488,37 @@ def _enforce_route_boundaries(
                     )
                 )
                 existing_dispositions.add(disposition)
-    return plan.model_copy(
-        update={
-            "rewritten_query": " ".join(plan.rewritten_query.split()),
-            "subqueries": enforced,
+    while True:
+        admitted_ids = {
+            item.id for item in enforced if item.disposition == "tool_planning"
         }
+        changed = False
+        normalized: list[RoutedSubquery] = []
+        for item in enforced:
+            if item.disposition != "tool_planning" or set(item.depends_on) <= admitted_ids:
+                normalized.append(item)
+                continue
+            changed = True
+            normalized.append(
+                item.model_copy(
+                    update={
+                        "disposition": "clarification",
+                        "reason_code": "dependency_not_admitted",
+                        "clarification_question": "请补充需要用于后续查询或比较的具体对象。",
+                        "capability": None,
+                        "depends_on": [],
+                        "input_requirements": [],
+                        "produces": None,
+                        "result_selector": None,
+                    }
+                )
+            )
+        enforced = normalized
+        if not changed:
+            break
+    return RequestRoutePlan(
+        rewritten_query=" ".join(plan.rewritten_query.split()),
+        subqueries=enforced,
     )
 
 
@@ -488,3 +580,158 @@ def _routed_query_for_call(state: AgentState, call: PlannedToolCall) -> str | No
         if item.id == call.subquery.strip():
             return item.query
     return None
+
+
+def _bound_compare_sku_ids(state: AgentState, call: PlannedToolCall) -> list[int]:
+    """Resolve declared comparison inputs from context and upstream task artifacts."""
+    task = next(
+        (
+            item
+            for item in tool_planning_subqueries(state.get("route_plan"))
+            if item.id == call.subquery.strip()
+        ),
+        None,
+    )
+    if task is None or not task.input_requirements:
+        return []
+
+    resolved: list[int] = []
+    tasks = {
+        item.id: item for item in tool_planning_subqueries(state.get("route_plan"))
+    }
+    for requirement in task.input_requirements:
+        if requirement.source == "comparison_context":
+            for sku_id in _context_comparison_sku_ids(state.get("working_memory", {})):
+                if sku_id not in resolved:
+                    resolved.append(sku_id)
+            continue
+
+        sku_id: int | None = None
+        if requirement.source == "context_product":
+            sku_id = _context_product_sku_id(state.get("working_memory", {}))
+        elif requirement.task_id is not None:
+            dependency = tasks.get(requirement.task_id)
+            products = _task_result_products(state, requirement.task_id)
+            sku_id = _select_task_product_sku_id(products, dependency)
+        if sku_id is not None and sku_id not in resolved:
+            resolved.append(sku_id)
+    return resolved
+
+
+def _context_comparison_sku_ids(working_memory: dict[str, Any]) -> list[int]:
+    catalog = working_memory.get("catalog")
+    if not isinstance(catalog, dict):
+        return []
+    comparison = catalog.get("comparison")
+    values = comparison.get("sku_ids") if isinstance(comparison, dict) else None
+    if not isinstance(values, list):
+        return []
+    return list(
+        dict.fromkeys(
+            item
+            for item in values
+            if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        )
+    )[:10]
+
+
+def _context_product_sku_id(working_memory: dict[str, Any]) -> int | None:
+    catalog = working_memory.get("catalog")
+    if not isinstance(catalog, dict):
+        return None
+    referenced = catalog.get("referenced_sku_id")
+    if isinstance(referenced, int) and not isinstance(referenced, bool):
+        return referenced
+    candidates = catalog.get("candidate_sku_ids")
+    if not isinstance(candidates, list):
+        return None
+    return next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, int) and not isinstance(item, bool)
+        ),
+        None,
+    )
+
+
+def _task_result_products(state: AgentState, task_id: str) -> list[dict[str, Any]]:
+    for wave in reversed(state.get("tool_waves", [])):
+        calls = {
+            str(item.get("id") or ""): item
+            for item in wave.get("calls", [])
+            if isinstance(item, dict)
+        }
+        for result in reversed(wave.get("results", [])):
+            if not isinstance(result, dict):
+                continue
+            call_data = calls.get(str(result.get("tool_call_id") or ""), {})
+            if str(call_data.get("subquery") or "").strip() != task_id:
+                continue
+            execution = result.get("execution")
+            output = execution.get("output") if isinstance(execution, dict) else None
+            products = output.get("products") if isinstance(output, dict) else None
+            if isinstance(products, list):
+                return [item for item in products if isinstance(item, dict)]
+    return []
+
+
+def _select_task_product_sku_id(
+    products: list[dict[str, Any]],
+    task: RoutedSubquery | None,
+) -> int | None:
+    if not products:
+        return None
+    selector = task.result_selector if task is not None else None
+    if selector is None:
+        return _product_sku_id(products[0])
+
+    if selector.scope == "sku":
+        ranked = sorted(
+            products,
+            key=lambda item: (
+                -_non_negative_int(item.get("sku_sales_count")),
+                _non_negative_int(item.get("sku_id")),
+            ),
+        )
+    else:
+        representatives: dict[int, dict[str, Any]] = {}
+        for product in products:
+            spu_id = _optional_positive_int(product.get("spu_id"))
+            if spu_id is None:
+                continue
+            current = representatives.get(spu_id)
+            if current is None or _representative_sku_key(product) < _representative_sku_key(
+                current
+            ):
+                representatives[spu_id] = product
+        ranked = sorted(
+            representatives.values(),
+            key=lambda item: (
+                -_non_negative_int(item.get("sales_count")),
+                _non_negative_int(item.get("spu_id")),
+            ),
+        )
+    index = selector.rank - 1
+    return _product_sku_id(ranked[index]) if index < len(ranked) else None
+
+
+def _representative_sku_key(product: dict[str, Any]) -> tuple[int, int]:
+    return (
+        -_non_negative_int(product.get("sku_sales_count")),
+        _non_negative_int(product.get("sku_id")),
+    )
+
+
+def _product_sku_id(product: dict[str, Any]) -> int | None:
+    return _optional_positive_int(product.get("sku_id"))
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _non_negative_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0

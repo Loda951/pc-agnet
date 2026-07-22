@@ -35,11 +35,11 @@ def _render_tool_routing() -> str:
 
 
 PLANNING_SUBQUERY_PROTOCOL = """
-- `<routed_subqueries>` 是唯一允许规划的任务集合；Router 已完成 rewrite、上下文融合、拆分和准入。
-- 每个业务 Tool Call 必须复制一个 `sq_n`。Runtime 会按该 ID 注入对应 canonical query；Planner
-  不输出或复写 query，也不得重新理解、拆分或添加条件。
-- 一个调用只服务一个 subquery；相互独立且必要的调用应在同一 wave 并列发出。
-- 必须覆盖所有 routed subquery；只有明确依赖前一结果的调用才留到下一 wave。
+- `<routed_subqueries>` 只包含当前 ready task；Router 已完成 rewrite、Task DAG、上下文融合和准入。
+- 每个业务 Tool Call 必须复制一个 `sq_n`。Runtime 会按该 ID 从 task canonical query 派生 Tool
+  query；Planner 不输出或复写 query，也不得重新理解、拆分或添加其他 task 的条件。
+- 一个调用只服务一个 task；当前集合中的相互独立 task 应在同一 wave 并列发出。
+- 必须覆盖当前全部 ready task；等待 depends_on 的 task 不会出现在本次集合中，也不得提前调用。
 """.strip()
 
 OBSERVATION_SUBQUERY_PROTOCOL = """

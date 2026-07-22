@@ -18,6 +18,67 @@ def test_category_aliases_include_compact_catalog_categories() -> None:
     assert CATEGORY_ALIASES["摄像头"] == "摄像头"
 
 
+def test_sales_rank_control_terms_do_not_become_catalog_keywords() -> None:
+    from app.repositories import catalog as catalog_repository
+
+    assert (
+        catalog_repository._query_tokens("查询键盘品类中销量排名第二的 SPU 是什么")
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_spu_sales_search_returns_one_representative_per_series() -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=10,
+            sku_id=101,
+            title="Series A standard",
+            brand="Test",
+            category="keyboard",
+            price="100.00",
+            stock=5,
+            sku_sales_count=20,
+            sales_count=100,
+        ),
+        ProductCard(
+            spu_id=10,
+            sku_id=102,
+            title="Series A alternate",
+            brand="Test",
+            category="keyboard",
+            price="90.00",
+            stock=5,
+            sku_sales_count=10,
+            sales_count=100,
+        ),
+        ProductCard(
+            spu_id=20,
+            sku_id=201,
+            title="Series B standard",
+            brand="Test",
+            category="keyboard",
+            price="80.00",
+            stock=5,
+            sku_sales_count=15,
+            sales_count=90,
+        ),
+    ]
+
+    class SeriesRepository(catalog_repository.CatalogRepository):
+        async def _fetch_candidate_page(self, request, *, offset: int, limit: int):
+            return products, True
+
+    result = await SeriesRepository(None).search_product_series_by_sales(
+        ProductSearchRequest(query="keyboard sales rank", limit=2)
+    )
+
+    assert [product.sku_id for product in result] == [101, 201]
+
+
 def test_search_statement_pushes_excluded_brands_into_sql() -> None:
     from app.repositories import catalog as catalog_repository
 

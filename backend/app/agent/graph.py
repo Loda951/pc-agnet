@@ -51,6 +51,7 @@ from app.agent.responses import (
     _has_successful_tool_result as _has_successful_tool_result,
 )
 from app.agent.route_runtime import (
+    _bound_compare_sku_ids,
     _boundary_from_route_plan,
     _deterministic_pre_route_plan,
     _enforce_route_boundaries,
@@ -59,6 +60,7 @@ from app.agent.route_runtime import (
     _intent_from_route_plan,
     _resolve_compare_sku_ids,
     _resolve_order_id,
+    _reuse_comparison_context,
     _routed_query_for_call,
     _split_request_subqueries,
 )
@@ -78,6 +80,7 @@ from app.agent.routing import (
 )
 from app.agent.state import AgentState
 from app.agent.tool_loop import (
+    _admissible_tool_subqueries,
     _all_planned_subqueries_usable,
     _clarification_decision,
     _constrain_calls_to_route_plan,
@@ -315,6 +318,7 @@ class AgentRuntime:
             route_source = "deterministic_fallback"
 
         plan = _enforce_route_boundaries(plan, original_message=state["message"])
+        plan = _reuse_comparison_context(plan, state.get("working_memory", {}))
         state["request_router_call_count"] = call_count
         state["route_source"] = route_source
         state["route_plan"] = plan.model_dump(mode="json")
@@ -376,11 +380,9 @@ class AgentRuntime:
 
     async def _orchestrate(self, state: AgentState) -> AgentState:
         previous_call_count = state.get("orchestrator_call_count", 0)
-        capability_decision = None
-        if not state.get("tool_waves"):
-            capability_decision = decision_from_route_capabilities(
-                RequestRoutePlan.model_validate(state["route_plan"])
-            )
+        capability_decision = decision_from_route_capabilities(
+            RequestRoutePlan.model_validate(state["route_plan"]), state
+        )
 
         if capability_decision is not None:
             call_count = previous_call_count
@@ -488,10 +490,10 @@ class AgentRuntime:
                 "我暂时无法安全选择业务工具，请换一种方式描述你的需求。",
                 "unknown_or_empty_tool_call",
             )
-        if state.get("tool_wave_count", 0) == 0:
+        if state.get("route_plan"):
             constrained_calls = _constrain_calls_to_route_plan(state, decision.tool_calls)
             if not constrained_calls:
-                routed_subqueries = tool_planning_subqueries(state.get("route_plan"))
+                routed_subqueries = _admissible_tool_subqueries(state)
                 fallback = self._fallback_routed_tool_decision(
                     state,
                     routed_subqueries,
@@ -626,13 +628,35 @@ class AgentRuntime:
             arguments["query"] = routed_query
         effective_message = routed_query or state["message"]
 
-        if call.name == "catalog_compare":
+        if call.name == "catalog_search":
+            task = next(
+                (
+                    item
+                    for item in tool_planning_subqueries(state.get("route_plan"))
+                    if item.id == call.subquery.strip()
+                ),
+                None,
+            )
+            if task is not None and task.result_selector is not None:
+                selector = task.result_selector
+                arguments["limit"] = max(
+                    int(arguments.get("limit") or 0),
+                    selector.rank,
+                )
+
+        elif call.name == "catalog_compare":
             request = CatalogCompareInput.model_validate(arguments)
+            bound_sku_ids = _bound_compare_sku_ids(state, call)
             resolved_sku_ids = _resolve_compare_sku_ids(
                 state["message"], state.get("working_memory", {})
             )
-            if resolved_sku_ids:
-                request = request.model_copy(update={"sku_ids": resolved_sku_ids})
+            sku_ids = list(
+                dict.fromkeys(
+                    [*bound_sku_ids, *request.sku_ids, *resolved_sku_ids]
+                )
+            )[:10]
+            if sku_ids:
+                request = request.model_copy(update={"sku_ids": sku_ids})
             arguments = request.model_dump(mode="json", exclude_none=True)
 
         elif call.name == "order_lookup":
@@ -650,7 +674,13 @@ class AgentRuntime:
 
         contract = self.contract_provider.get_contract(call.name)
         if contract is None:
-            return call.model_copy(update={"arguments": arguments}), []
+            return call.model_copy(
+                update={
+                    "arguments": arguments,
+                    "canonical_query": routed_query or call.canonical_query,
+                    "tool_query": str(arguments.get("query") or call.tool_query),
+                }
+            ), []
         public_input = contract.public_input_model.model_validate(arguments)
         return (
             call.model_copy(
@@ -658,7 +688,9 @@ class AgentRuntime:
                     "arguments": public_input.model_dump(
                         mode="json",
                         exclude_none=True,
-                    )
+                    ),
+                    "canonical_query": routed_query or call.canonical_query,
+                    "tool_query": str(arguments.get("query") or call.tool_query),
                 }
             ),
             [],

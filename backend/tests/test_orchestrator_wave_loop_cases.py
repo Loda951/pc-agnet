@@ -98,6 +98,37 @@ def _state_from_waves(waves: list[dict[str, Any]]) -> AgentState:
     return state
 
 
+def test_unsupported_catalog_result_does_not_clear_working_memory_candidates() -> None:
+    state = _state_from_waves(
+        [
+            _wave(
+                1,
+                "catalog-unsupported",
+                "catalog_search",
+                "查询键盘销量第二",
+                "sq_1",
+                _result(
+                    "catalog-unsupported",
+                    "catalog_search",
+                    output={
+                        "result_type": "empty",
+                        "products": [],
+                        "diagnostics": [
+                            {
+                                "code": "unsupported_query",
+                                "severity": "error",
+                                "message": "unsupported",
+                            }
+                        ],
+                    },
+                ),
+            )
+        ]
+    )
+
+    assert state["catalog_tool_succeeded"] is False
+
+
 @pytest.mark.parametrize(
     ("case_result", "expected_outcome", "expected_usable"),
     [

@@ -76,8 +76,16 @@ QUERY_STOP_WORDS = {
     "音箱",
     "摄像头",
     "外设",
+    "是什么",
     "pc",
     "rgb",
+    "sku",
+    "spu",
+    "sale",
+    "sales",
+    "rank",
+    "ranking",
+    "top",
 }
 
 TRUE_VALUES = {"是", "true", "yes", "1", "有", "支持", "wireless"}
@@ -187,6 +195,49 @@ class CatalogRepository:
             )
         )
         return [product for _, product in ranked_products[: request.limit]]
+
+    async def search_product_series_by_sales(
+        self,
+        request: ProductSearchRequest,
+    ) -> list[ProductCard]:
+        """Return one representative SKU per SPU, ordered by aggregate SPU sales."""
+        page_size = _candidate_page_size(request.limit)
+        eligible_products: list[ProductCard] = []
+        offset = 0
+        for _ in range(MAX_CANDIDATE_PAGES):
+            page, exhausted = await self._fetch_candidate_page(
+                request,
+                offset=offset,
+                limit=page_size,
+            )
+            eligible_products.extend(
+                _take_eligible_products(
+                    page,
+                    excluded_usage=request.excluded_usage,
+                    usage_scenario=request.usage_scenario,
+                    required_conditions=request.usage_required_conditions,
+                    limit=page_size,
+                )
+            )
+            if exhausted:
+                break
+            offset += page_size
+
+        representatives: dict[int, ProductCard] = {}
+        for product in eligible_products:
+            current = representatives.get(product.spu_id)
+            if current is None or _series_representative_key(product) < (
+                _series_representative_key(current)
+            ):
+                representatives[product.spu_id] = product
+        ranked = sorted(
+            representatives.values(),
+            key=lambda product: (
+                -product.sales_count,
+                product.spu_id,
+            ),
+        )
+        return ranked[: request.limit]
 
     async def list_facets(
         self,
@@ -303,6 +354,15 @@ class CatalogRepository:
 
 def _candidate_page_size(limit: int) -> int:
     return min(max(limit * 50, 100), 1000)
+
+
+def _series_representative_key(product: ProductCard) -> tuple[int, int, Decimal, int]:
+    return (
+        -product.sku_sales_count,
+        0 if product.stock > 0 else 1,
+        product.price,
+        product.sku_id,
+    )
 
 
 def _catalog_search_statement(

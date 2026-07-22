@@ -27,7 +27,7 @@ from app.agent.responses import (
     _latest_successful_tool_output,
     _usable_tool_call_ids,
 )
-from app.agent.routing import tool_planning_subqueries
+from app.agent.routing import RoutedSubquery, ready_tool_subqueries, tool_planning_subqueries
 from app.agent.state import AgentState
 from app.tools.contracts import LLM_SAFE_TOOL_NAMES, ToolContract
 
@@ -44,10 +44,23 @@ def _orchestrator_messages(
             )
         )
     ]
-    route_plan = state["route_plan"]
     routed_subqueries = [
-        {"id": item.id, "canonical_query": item.query}
-        for item in tool_planning_subqueries(route_plan)
+        {
+            "id": item.id,
+            "canonical_query": item.query,
+            "depends_on": item.depends_on,
+            "input_requirements": [
+                requirement.model_dump(mode="json")
+                for requirement in item.input_requirements
+            ],
+            "produces": item.produces,
+            "result_selector": (
+                item.result_selector.model_dump(mode="json")
+                if item.result_selector is not None
+                else None
+            ),
+        }
+        for item in _prompt_tool_subqueries(state)
     ]
     messages.append(
         HumanMessage(
@@ -139,9 +152,7 @@ def _constrain_calls_to_route_plan(
     state: AgentState,
     calls: list[PlannedToolCall],
 ) -> list[PlannedToolCall]:
-    routed = {
-        item.id: item for item in tool_planning_subqueries(state.get("route_plan"))
-    }
+    routed = {item.id: item for item in _admissible_tool_subqueries(state)}
     only_routed = next(iter(routed.values())) if len(routed) == 1 else None
     constrained: list[PlannedToolCall] = []
     for call in calls:
@@ -167,6 +178,8 @@ def _constrain_calls_to_route_plan(
                 update={
                     "arguments": arguments,
                     "subquery": subquery.id,
+                    "canonical_query": subquery.query,
+                    "tool_query": subquery.query,
                 }
             )
         )
@@ -239,21 +252,7 @@ def _planner_requires_business_tools(state: AgentState) -> bool:
     if state.get("tool_wave_count", 0) >= MAX_TOOL_WAVES:
         return False
 
-    routed_ids = {
-        item.id for item in tool_planning_subqueries(state.get("route_plan"))
-    }
-    called_ids = {
-        str(call.get("subquery") or "").strip()
-        for wave in state.get("tool_waves", [])
-        for call in wave.get("calls", [])
-        if isinstance(call, dict)
-    }
-    called_ids.update(
-        str(entry.get("subquery") or "").strip()
-        for entry in state.get("subquery_ledger", [])
-        if isinstance(entry, dict)
-    )
-    if routed_ids - called_ids:
+    if _ready_unattempted_tool_subqueries(state):
         return True
 
     active_ledger = [
@@ -264,18 +263,62 @@ def _planner_requires_business_tools(state: AgentState) -> bool:
     if any(entry.get("status") == "failed" for entry in active_ledger):
         return True
 
-    tool_names = {str(entry.get("tool_name") or "") for entry in active_ledger}
-    if (
-        "catalog_search" in tool_names
-        and "catalog_compare" not in tool_names
-        and _request_explicitly_requires_comparison(state.get("message", ""))
-    ):
-        return True
     return any(
         entry.get("tool_name") == "order_lookup"
         and entry.get("result_type") == "order_candidates"
         for entry in active_ledger
     )
+
+
+def _task_execution_sets(state: AgentState) -> tuple[set[str], set[str]]:
+    usable: set[str] = set()
+    attempted: set[str] = set()
+    for entry in state.get("subquery_ledger", []):
+        if not isinstance(entry, dict) or not is_active_ledger_entry(entry):
+            continue
+        task_id = str(entry.get("subquery") or "").strip()
+        if not task_id:
+            continue
+        attempted.add(task_id)
+        if entry.get("outcome") == "usable" and entry.get("has_usable_information"):
+            usable.add(task_id)
+    return usable, attempted
+
+
+def _ready_unattempted_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
+    usable, attempted = _task_execution_sets(state)
+    return ready_tool_subqueries(
+        state.get("route_plan"),
+        usable_task_ids=usable,
+        attempted_task_ids=attempted,
+    )
+
+
+def _admissible_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
+    ready = _ready_unattempted_tool_subqueries(state)
+    recoverable_ids = {
+        str(entry.get("subquery") or "").strip()
+        for entry in state.get("subquery_ledger", [])
+        if is_active_ledger_entry(entry)
+        and entry.get("status") in {"failed", "needs_replan"}
+    }
+    recoverable_ids.update(
+        str(entry.get("subquery") or "").strip()
+        for entry in state.get("subquery_ledger", [])
+        if is_active_ledger_entry(entry)
+        and entry.get("tool_name") == "order_lookup"
+        and entry.get("result_type") == "order_candidates"
+    )
+    by_id = {
+        item.id: item for item in tool_planning_subqueries(state.get("route_plan"))
+    }
+    return [*ready, *(by_id[item_id] for item_id in recoverable_ids if item_id in by_id)]
+
+
+def _prompt_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
+    if not state.get("tool_waves") or _planner_requires_business_tools(state):
+        return _admissible_tool_subqueries(state)
+    return tool_planning_subqueries(state.get("route_plan"))
 
 
 def _all_planned_subqueries_usable(state: AgentState) -> bool:
@@ -313,6 +356,8 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
         and str(entry.get("subquery") or "").strip().casefold() == key
     ]
     if not matching:
+        if state.get("route_plan") and not _call_targets_ready_task(state, call):
+            return False
         return _is_supported_dependent_call(state, call)
 
     latest = matching[-1]
@@ -325,11 +370,7 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
         return False
 
     outcome = str(latest.get("outcome") or "")
-    if (
-        outcome == "usable"
-        and call.name != str(latest.get("tool_name") or "")
-        and _is_supported_dependent_call(state, call)
-    ):
+    if outcome == "usable" and _is_supported_dependent_call(state, call):
         # A usable discovery result may be the prerequisite for a different Tool in the same
         # routed task, for example catalog_search -> catalog_compare. Do not mark the whole
         # subquery complete before admitting that explicitly requested dependent step.
@@ -395,7 +436,10 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         }
         if len(normalized_sku_ids) < 2:
             return False
-        return normalized_sku_ids <= _active_catalog_search_sku_ids(state)
+        trusted_sku_ids = _active_catalog_search_sku_ids(state) | _context_catalog_sku_ids(
+            state
+        )
+        return normalized_sku_ids <= trusted_sku_ids
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
         if not output or output.get("result_type") != "order_candidates":
@@ -415,6 +459,16 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         }
         return order_id in candidate_ids
     return False
+
+
+def _call_targets_ready_task(state: AgentState, call: PlannedToolCall) -> bool:
+    ready = {item.id: item for item in _ready_unattempted_tool_subqueries(state)}
+    task = ready.get(call.subquery.strip())
+    if task is None:
+        return False
+    if task.capability not in {None, "planner_required", call.name}:
+        return False
+    return query_fingerprint(call.arguments.get("query")) == query_fingerprint(task.query)
 
 
 def _request_explicitly_requires_comparison(message: str) -> bool:
@@ -457,6 +511,22 @@ def _active_catalog_search_sku_ids(state: AgentState) -> set[int]:
             if isinstance(sku_id, int) and not isinstance(sku_id, bool):
                 sku_ids.add(sku_id)
     return sku_ids
+
+
+def _context_catalog_sku_ids(state: AgentState) -> set[int]:
+    catalog = state.get("working_memory", {}).get("catalog")
+    if not isinstance(catalog, dict):
+        return set()
+    values = catalog.get("candidate_sku_ids")
+    candidates = values if isinstance(values, list) else []
+    referenced = catalog.get("referenced_sku_id")
+    if referenced is not None:
+        candidates = [referenced, *candidates]
+    return {
+        value
+        for value in candidates
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
 
 
 def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] | None:

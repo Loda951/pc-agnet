@@ -25,6 +25,8 @@ class PlannedToolCall(BaseModel):
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     subquery: str = ""
+    canonical_query: str = ""
+    tool_query: str = ""
 
 
 class OrchestratorDecision(BaseModel):

@@ -184,7 +184,9 @@ def build_subquery_ledger(
                 or infer_tool_subquery(outcome.tool_name, dict(argument_mapping))
             )
             subquery_key = _normalized_text(subquery)
-            query = _display_query(argument_mapping.get("query"))
+            query = _display_query(
+                call.get("canonical_query") or argument_mapping.get("query")
+            )
             identity = initial_query_by_subquery.setdefault(
                 subquery_key,
                 (

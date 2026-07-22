@@ -547,7 +547,13 @@ class CatalogToolService:
             )
 
         product_request = _plan_to_product_search(plan)
-        products = await CatalogRepository(self.session).search_products(product_request)
+        repository = CatalogRepository(self.session)
+        if _is_spu_sales_rank_query(plan.query):
+            products = await repository.search_product_series_by_sales(product_request)
+            ranking_strategy = "spu_sales_representative"
+        else:
+            products = await repository.search_products(product_request)
+            ranking_strategy = "match_score_sales_stock_price"
         products = _filter_brands(products, plan.brands)
         products = _filter_excluded_preferences(products, plan.excluded_brands, plan.excluded_usage)
         result_type = "products" if products else "empty"
@@ -555,7 +561,7 @@ class CatalogToolService:
         return CatalogSearchOutput(
             result_type=result_type,
             products=products[: request.limit],
-            ranking_strategy="match_score_sales_stock_price",
+            ranking_strategy=ranking_strategy,
             query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
             diagnostics=diagnostics,
         )
@@ -1861,6 +1867,8 @@ Compact enum examples and aliases:
 Set supported=false when the user asks for analytics not available in the
 catalog tables, such as time-series growth, revenue, profit, or user purchase
 statistics. Otherwise set supported=true.
+Current cumulative sales sorting and selecting the Nth-ranked product/SPU are supported;
+do not mark requests such as "销量第二" or "sales rank 2" unsupported.
 
 The current query and explicit_overrides always take precedence.
 preference_defaults only fill fields that the current request leaves unspecified.
@@ -2012,6 +2020,8 @@ def _sort_from_query(
             "销量最高",
             "销量最好",
             "销量排行",
+            "销量排名",
+            "销量第",
             "按销量",
             "最畅销",
             "最热销",
@@ -2085,6 +2095,31 @@ def _apply_query_inferred_defaults(plan: ProductQueryPlan, query: str) -> None:
     inferred_sort = _sort_from_query(query)
     if inferred_sort is not None:
         plan.sort = inferred_sort
+    if _is_supported_sales_rank_query(query):
+        plan.supported = True
+        plan.unsupported_reason = None
+
+
+def _is_supported_sales_rank_query(query: str) -> bool:
+    compact = re.sub(r"\s+", "", query.casefold())
+    rank_markers = (
+        "销量第",
+        "销量排名",
+        "销量排行",
+        "salesrank",
+        "salesranking",
+    )
+    return _unsupported_reason(query) is None and any(
+        marker in compact for marker in rank_markers
+    )
+
+
+def _is_spu_sales_rank_query(query: str) -> bool:
+    if not _is_supported_sales_rank_query(query):
+        return False
+    compact = re.sub(r"\s+", "", query.casefold())
+    explicit_sku_scope = ("sku", "版本", "颜色")
+    return not any(marker in compact for marker in explicit_sku_scope)
 
 
 def _apply_explicit_overrides(plan: ProductQueryPlan, overrides: dict) -> None:

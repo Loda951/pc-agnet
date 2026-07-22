@@ -15,7 +15,9 @@ def apply_tool_output(
     execution: ToolExecutionResult,
 ) -> None:
     if call.name in {"catalog_search", "catalog_compare"}:
-        state["catalog_tool_succeeded"] = execution.ok
+        state["catalog_tool_succeeded"] = _catalog_execution_completed(
+            execution.model_dump(mode="python")
+        )
     if not execution.ok or not execution.output:
         return
     output = execution.output
@@ -75,7 +77,9 @@ def rebuild_tool_projections(state: AgentState) -> None:
         output = execution.get("output")
         if name in {"catalog_search", "catalog_compare"}:
             saw_catalog_result = True
-            catalog_completed = catalog_completed or bool(execution.get("ok"))
+            catalog_completed = catalog_completed or _catalog_execution_completed(
+                execution
+            )
         if not execution.get("ok") or not isinstance(output, dict):
             continue
 
@@ -112,6 +116,21 @@ def rebuild_tool_projections(state: AgentState) -> None:
     parsed["order_candidates"] = order_candidates
     if saw_catalog_result:
         state["catalog_tool_succeeded"] = catalog_completed
+
+
+def _catalog_execution_completed(execution: dict[str, Any]) -> bool:
+    if not execution.get("ok"):
+        return False
+    output = execution.get("output")
+    if not isinstance(output, dict):
+        return False
+    diagnostics = output.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return True
+    return not any(
+        isinstance(item, dict) and item.get("severity") == "error"
+        for item in diagnostics
+    )
 
 
 def tool_call_arguments(state: AgentState, call_id: str) -> dict[str, Any]:

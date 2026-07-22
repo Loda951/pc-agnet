@@ -14,16 +14,27 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 <output_contract>
 - 必须且只能调用一次 `route_request`，不得输出普通正文或其他 Tool Call。
 - 先生成一条语义等价的 `rewritten_query`，再基于它拆分 `subqueries`；不能先拆分再分别猜测原意。
-- 每个 subquery 必须自包含，并使用稳定 ID：sq_1、sq_2……。不要合并需要不同事实来源或具有
-  不同准入结论的任务。
+- 每个 subquery 表示一个可独立完成和验收的业务 task，并使用稳定 ID：sq_1、sq_2……。不要把
+  “先发现目标、再使用该目标比较”压成一个 task，也不要按句号机械拆分同一个业务目标。
+- `depends_on` 声明 task 的直接前置依赖。没有依赖的 task 可进入同一个 wave；有依赖的 task 只有
+  在全部前置 task 得到 usable 结果后才能进入后续 wave。必须保持 DAG，不得循环依赖。
+- `input_requirements` 只描述依赖 task 需要由 Runtime 绑定的输入：当前对话已确认商品使用
+  `context_product`；上游 task 产物使用 `task_output` 并填写对应 `task_id`；working memory 中
+  已经确认的上一组对比商品使用 `comparison_context`；对同一组商品继续比较其他字段时，不得重新
+  拆商品搜索。
+- `produces` 描述 task 的业务产物。销量第 N 名等确定性选择使用 `ranked_product` 和
+  `result_selector={{type: sales_rank, rank: N, scope: spu}}`；用户明确询问某个版本/SKU 排名时才
+  使用 `scope=sku`。销量口径和具体选中商品由 Catalog/Runtime 决定，Router 不猜 SKU。
 - 每个 subquery 只允许一个 disposition：tool_planning、direct_response、clarification、
   human_handoff、out_of_scope、unsupported、security_refusal。
 - `tool_planning` subquery 可以额外声明一个受限 `capability`：catalog_search、catalog_compare、
   catalog_facets、order_lookup、policy_search、knowledge_search 或 planner_required。只有请求与一个
-  事实来源明确一一对应时才选择具体 capability；存在工具歧义、依赖调用、复杂比较或不确定性时
-  必须选择 planner_required。非 tool_planning subquery 不得声明 capability。
-- `query` 是交给下游的 canonical query。对于 tool_planning，它在当前 turn 内冻结；下游 Tool
-  Planner 只能原样复制，不能再次改写、翻译、扩写、缩写或删除条件。
+  事实来源明确一一对应时选择具体 capability；即使 task 有前置依赖，只要完成后明确使用
+  `catalog_compare`，也应声明该 capability。只有工具歧义或无法确定时使用 planner_required。
+  非 tool_planning subquery 不得声明 capability。
+- `query` 是该 task 自己的 canonical query，而不是整句原请求。它必须只保留完成该 task 所需的
+  语义，例如“查询键盘 SPU 销量排行第二的商品”，不得把其他并列或后续任务塞入同一个 query。
+  canonical query 在当前 turn 内冻结；Runtime 再按 Tool contract 派生 tool query。
 </output_contract>
 
 <rewrite_policy>
@@ -49,6 +60,16 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
   给其他 subquery 各自正确的 disposition；不得整体放行，也不得整体拒绝。
 - 写操作、越界或安全请求不能因为与正常商品/订单问题出现在同一条消息中而进入 Tool Planner。
 </mixed_request_policy>
+
+<task_graph_example>
+用户说“对比这个和销量第二的键盘，再推荐一个鼠标”时应生成三个 task：
+1. sq_1 查询键盘 SPU 销量第二，produces=ranked_product，result_selector.rank=2，无依赖；
+2. sq_2 比较当前商品与 sq_1 商品，depends_on=[sq_1]，两个 input_requirements 分别来自
+   context_product 和 task_output(sq_1)，capability=catalog_compare；
+3. sq_3 推荐鼠标，无依赖，capability=catalog_search。
+因此 sq_1 与 sq_3 可在同一 wave，sq_2 只能在下一 wave。不要让 sq_1 的 Catalog query 包含比较
+或鼠标推荐语义。
+</task_graph_example>
 """.strip()
 
 
