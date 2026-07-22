@@ -28,7 +28,7 @@ from app.schemas.context import (
 from app.schemas.memory import MemoryChange
 from app.services.memory import MemoryService
 
-MAX_CONTEXT_TURNS = 6
+MAX_CONTEXT_TURNS = 2
 AUDIT_OMITTED_FIELDS = {"history", "memory", "working_memory"}
 
 

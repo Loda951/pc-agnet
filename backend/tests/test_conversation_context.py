@@ -24,7 +24,7 @@ def test_context_service_exposes_async_turn_boundary() -> None:
     assert inspect.iscoroutinefunction(service_type.complete_turn)
 
 
-def test_history_selection_keeps_at_most_six_complete_recent_turns() -> None:
+def test_history_selection_keeps_at_most_two_complete_recent_turns() -> None:
     context = _context_module()
     messages = [
         item
@@ -40,11 +40,11 @@ def test_history_selection_keeps_at_most_six_complete_recent_turns() -> None:
 
     assert [(item.role, item.content) for item in selection.messages] == [
         (role, f"{role}-{turn}")
-        for turn in range(1, 7)
+        for turn in range(5, 7)
         for role in ("user", "assistant")
     ]
-    assert selection.retained_turns == 6
-    assert selection.dropped_turns == 1
+    assert selection.retained_turns == 2
+    assert selection.dropped_turns == 5
     assert all(item.content != "failed-unmatched-user-message" for item in selection.messages)
 
 
@@ -507,8 +507,8 @@ async def test_prepare_turn_audits_complete_turns_dropped_beyond_recent_64_messa
 
     prepared = await service.prepare_turn(1, None, "new turn")
 
-    assert prepared.retained_turns == 6
-    assert prepared.dropped_turns == 64
+    assert prepared.retained_turns == 2
+    assert prepared.dropped_turns == 68
 
 
 class FakeContextRepository:
