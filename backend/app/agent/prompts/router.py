@@ -2,6 +2,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.agent.boundary import BOUNDARY_POLICY
 from app.agent.prompts.security import SECURITY_AND_PRIVACY_POLICY
 
 REQUEST_ROUTER_SYSTEM_PROMPT = f"""
@@ -17,6 +18,10 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
   不同准入结论的任务。
 - 每个 subquery 只允许一个 disposition：tool_planning、direct_response、clarification、
   human_handoff、out_of_scope、unsupported、security_refusal。
+- `tool_planning` subquery 可以额外声明一个受限 `capability`：catalog_search、catalog_compare、
+  catalog_facets、order_lookup、policy_search、knowledge_search 或 planner_required。只有请求与一个
+  事实来源明确一一对应时才选择具体 capability；存在工具歧义、依赖调用、复杂比较或不确定性时
+  必须选择 planner_required。非 tool_planning subquery 不得声明 capability。
 - `query` 是交给下游的 canonical query。对于 tool_planning，它在当前 turn 内冻结；下游 Tool
   Planner 只能原样复制，不能再次改写、翻译、扩写、缩写或删除条件。
 </output_contract>
@@ -32,18 +37,7 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 </rewrite_policy>
 
 <capability_whitelist>
-- tool_planning 只允许：商城 PC 外设目录、商品搜索/推荐/比较、目录品牌/品类/规格选项、当前认证
-  用户自己的订单与物流、商城政策/FAQ/配送/售后流程、外设品牌/概念/选购知识。
-- direct_response 只用于客服身份、能力说明、使用方式、商城服务理念、寒暄和感谢等不依赖当前
-  业务事实的问题。
-- human_handoff 用于用户明确要求人工客服，以及退款/退换货/维修办理、身份核验、账户安全或其他
-  已定义了人工接管流程的高风险场景。
-- unsupported 用于仍属于 PC 外设商城语境、但不在静态能力白名单内且不能通过现有只读 Tool 可靠
-  完成的任务，包括取消/修改订单、改地址、补发、催发货、代下单和代支付。不要把正常的无结果、
-  暂时故障或需要 Tool 才能判断的数据情况预判为 unsupported。
-- out_of_scope 用于与 PC 外设商城无关的任务，例如天气、股票、医疗、通用编程、论文或手机推荐。
-- clarification 只用于缺失用户才能提供、并且确实影响安全路由或后续 Tool 选择的必要信息；不要
-  因为用户没有给预算、品牌等可选偏好而阻止宽泛推荐。
+{BOUNDARY_POLICY.router_prompt}
 </capability_whitelist>
 
 <security_policy>

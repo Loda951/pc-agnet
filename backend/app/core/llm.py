@@ -15,10 +15,16 @@ def build_chat_model(settings: Settings) -> ChatOpenAI | None:
     if not settings.llm_api_key:
         return None
 
+    provider_options = (
+        {"extra_body": {"thinking": {"type": "disabled"}}}
+        if settings.llm_provider == "deepseek"
+        else {}
+    )
     return ChatOpenAI(
         api_key=settings.llm_api_key,
         base_url=resolve_llm_base_url(settings),
         model=settings.llm_model,
         temperature=0.2,
         streaming=False,
+        **provider_options,
     )

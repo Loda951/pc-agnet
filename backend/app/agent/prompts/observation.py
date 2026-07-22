@@ -17,9 +17,6 @@ TOOL_RESULT_INTERPRETATION_POLICY = """
   `specs` 证明命中时，才能说该商品拥有对应规格；不得把 preferred 写成所有候选都满足的要求。
 - `usage_mapping.source=deterministic_spec_mapping` 表示依据当前商品规格规则推断，不是数据库正式
   用途标签、厂商认证或适用性保证。具体规则和值以当前 Tool Result 为准，不在此 Prompt 中复制。
-- Tool 正常完成后，无论结果是否 usable，都不得在当前 turn 内自动放宽条件、改写 query、切换
-  Tool 或再次搜索同一需求。后续 Tool wave 只用于协议允许的同 Tool 错误恢复，或原始请求已经
-  要求且明确依赖上一结果的白名单后续步骤。
 """.strip()
 
 __all__ = ["TOOL_RESULT_INTERPRETATION_POLICY"]

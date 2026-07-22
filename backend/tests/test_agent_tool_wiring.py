@@ -135,6 +135,31 @@ def test_catalog_tool_call_preserves_query_only_public_input() -> None:
     }
 
 
+@pytest.mark.parametrize("tool_name", ["policy_search", "knowledge_search"])
+def test_document_search_runtime_supplies_default_top_k(tool_name: str) -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    state = cast(
+        AgentState,
+        {
+            "message": "我想了解一下退货",
+            "working_memory": WorkingMemoryV2().model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+    call = PlannedToolCall(
+        id="document-call",
+        name=tool_name,
+        arguments={"limit": 1},
+    )
+
+    prepared_call, _ = runtime._prepare_tool_call(state, call)
+
+    assert prepared_call.arguments == {
+        "query": "我想了解一下退货",
+        "limit": 3,
+    }
+
+
 def test_catalog_tool_call_rejects_internal_planner_fields() -> None:
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
     state = cast(
@@ -846,17 +871,17 @@ def test_bare_v2_brand_exclusion_routes_back_to_query_first_catalog_search() -> 
         }
     )
 
-    decision = runtime._fallback_orchestrator_decision(
-        cast(
-            AgentState,
-            {
-                "message": "不要 Razer",
-                "working_memory": working_memory.model_dump(mode="json"),
-                "memory": [],
-                "tool_results": [],
-            },
-        )
+    state = cast(
+        AgentState,
+        {
+            "message": "不要 Razer",
+            "working_memory": working_memory.model_dump(mode="json"),
+            "memory": [],
+            "tool_results": [],
+        },
     )
+    state["route_plan"] = runtime._fallback_route_plan(state).model_dump(mode="json")
+    decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name == "catalog_search"

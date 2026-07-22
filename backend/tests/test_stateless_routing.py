@@ -7,20 +7,33 @@ from app.agent.state import AgentState
 from app.core.config import Settings
 
 
+def _tool_route_plan(query: str) -> dict:
+    return {
+        "rewritten_query": query,
+        "subqueries": [
+            {
+                "id": "sq_1",
+                "query": query,
+                "disposition": "tool_planning",
+                "reason_code": "test_tool_planning",
+            }
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_product_route_only_uses_current_message() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
 
     state = cast(
         AgentState,
-        {"message": "推荐 500 元以内的无线鼠标", "tool_results": []},
+        {
+            "message": "推荐 500 元以内的无线鼠标",
+            "route_plan": _tool_route_plan("推荐 500 元以内的无线鼠标"),
+            "tool_results": [],
+        },
     )
-    decision = runtime._fallback_orchestrator_decision(
-        cast(
-            AgentState,
-            state,
-        )
-    )
+    decision = runtime._fallback_planner_decision(state)
 
     tool_input = decision.tool_calls[0].arguments
     assert decision.type == "tool_calls"
@@ -37,35 +50,32 @@ async def test_order_route_only_uses_explicit_order_id() -> None:
 
     state = cast(
         AgentState,
-        {"message": "查询订单 202607020001 的物流", "tool_results": []},
+        {
+            "message": "查询订单 202607020001 的物流",
+            "route_plan": _tool_route_plan("查询订单 202607020001 的物流"),
+            "tool_results": [],
+        },
     )
-    decision = runtime._fallback_orchestrator_decision(
-        cast(
-            AgentState,
-            state,
-        )
-    )
+    decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name == "order_lookup"
     assert decision.tool_calls[0].arguments["order_id"] == 202607020001
 
 
-def test_identity_question_uses_direct_response_without_tool_call() -> None:
+def test_identity_question_is_resolved_by_router_without_tool_call() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
     state = cast(
         AgentState,
         {
             "message": "你是谁，你能做什么？",
-            "tool_results": [],
+            "working_memory": {},
         },
     )
 
-    decision = runtime._fallback_orchestrator_decision(state)
+    plan = runtime._fallback_route_plan(state)
 
-    assert decision.type == "direct_response"
-    assert decision.tool_calls == []
-    assert "PC 外设商城客服" in decision.response
+    assert plan.subqueries[0].disposition == "direct_response"
 
 
 def test_handoff_uses_order_id_from_current_message() -> None:

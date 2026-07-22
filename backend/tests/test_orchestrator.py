@@ -34,7 +34,6 @@ from app.agent.prompts import (
 )
 from app.agent.state import AgentState
 from app.core.config import Settings
-from app.schemas.chat import ChatRequest
 from app.tools.contracts import (
     LLM_SAFE_TOOL_NAMES,
     BoundTool,
@@ -51,7 +50,7 @@ class FakeChatModel:
         self.call_count = 0
         self.bound_tool_sets: list[set[str]] = []
 
-    def bind_tools(self, tools: list[dict]):
+    def bind_tools(self, tools: list[dict], **_: object):
         tools_by_name = {tool["function"]["name"]: tool for tool in tools}
         self.bound_tool_sets.append(set(tools_by_name))
         for name in set(LLM_SAFE_TOOL_NAMES) & set(tools_by_name):
@@ -70,17 +69,23 @@ class FakeChatModel:
 
 
 class RecordingBoundModel:
-    def __init__(self, tool_names: set[str]):
+    def __init__(self, tool_names: set[str], tool_choice: str | None):
         self.tool_names = tool_names
+        self.tool_choice = tool_choice
 
 
 class RecordingBindableModel:
     def __init__(self):
         self.bindings: list[RecordingBoundModel] = []
 
-    def bind_tools(self, tools: list[dict]) -> RecordingBoundModel:
+    def bind_tools(
+        self,
+        tools: list[dict],
+        **kwargs: object,
+    ) -> RecordingBoundModel:
         binding = RecordingBoundModel(
-            {tool["function"]["name"] for tool in tools}
+            {tool["function"]["name"] for tool in tools},
+            str(kwargs["tool_choice"]) if kwargs.get("tool_choice") else None,
         )
         self.bindings.append(binding)
         return binding
@@ -98,6 +103,20 @@ def _control_message(name: str, **arguments) -> AIMessage:
             }
         ],
     )
+
+
+def _tool_route_plan(query: str) -> dict:
+    return {
+        "rewritten_query": query,
+        "subqueries": [
+            {
+                "id": "sq_1",
+                "query": query,
+                "disposition": "tool_planning",
+                "reason_code": "test_tool_planning",
+            }
+        ],
+    }
 
 
 def test_orchestrator_prompt_separates_fact_sources_without_repeating_schemas() -> None:
@@ -171,21 +190,104 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
         "ask_clarification",
     }
     assert runtime._orchestrator_model_for_state(initial).tool_names == business_names
-    assert runtime._orchestrator_model_for_state(observed).tool_names == answer_names
+    observed_model = runtime._orchestrator_model_for_state(observed)
+    assert observed_model.tool_names == {"finish_answer"}
+    assert observed_model.tool_choice == "required"
+    assert runtime.answer_synthesizer.tool_names == answer_names
+    assert runtime.answer_synthesizer.tool_choice == "required"
     assert runtime._orchestrator_model_for_state(failed).tool_names == (
         business_names | answer_names
     )
-    assert runtime._orchestrator_model_for_state(
-        cast(AgentState, {"tool_waves": []})
-    ).tool_names == business_names | {
-        "reject_out_of_scope",
-        "ask_clarification",
-        "finish_direct",
-        "finish_answer",
-        "finish_partial",
-        "finish_unavailable",
-        "request_handoff",
+
+
+@pytest.mark.asyncio
+async def test_answer_synthesizer_retries_business_call_then_finishes() -> None:
+    model = FakeChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "invalid-repeat",
+                        "name": "policy_search",
+                        "args": {"query": "退货政策", "subquery": "sq_1"},
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            _control_message(
+                "finish_answer",
+                response="退货政策以知识库说明为准。",
+                used_tool_call_ids=["policy-1"],
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        cast(object, None),
+        Settings(llm_api_key=""),
+        chat_model=model,
+    )
+    execution = {
+        "tool_name": "policy_search",
+        "ok": True,
+        "output": {
+            "result_type": "documents",
+            "documents": [{"title": "退货政策", "snippet": "以页面说明为准。"}],
+        },
+        "error": None,
     }
+    state = cast(
+        AgentState,
+        {
+            "message": "退货政策是什么",
+            "route_plan": _tool_route_plan("退货政策是什么"),
+            "tool_wave_count": 1,
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "policy-1",
+                            "name": "policy_search",
+                            "arguments": {"query": "退货政策是什么", "limit": 3},
+                            "subquery": "sq_1",
+                        }
+                    ],
+                    "results": [
+                        {
+                            "tool_call_id": "policy-1",
+                            "name": "policy_search",
+                            "execution": execution,
+                        }
+                    ],
+                }
+            ],
+            "tool_results": [
+                {
+                    "tool_call_id": "policy-1",
+                    "name": "policy_search",
+                    "execution": execution,
+                }
+            ],
+            "subquery_ledger": [
+                {
+                    "wave": 1,
+                    "tool_call_id": "policy-1",
+                    "tool_name": "policy_search",
+                    "subquery": "sq_1",
+                    "outcome": "usable",
+                    "status": "ready_to_answer",
+                    "has_usable_information": True,
+                }
+            ],
+        },
+    )
+
+    decision = await runtime._invoke_orchestrator_decision(state, 1)
+
+    assert decision.type == "grounded_response"
+    assert decision.control_action == "finish_answer"
+    assert model.call_count == 2
 
 
 def test_orchestrator_prompt_covers_high_confusion_tool_boundaries() -> None:
@@ -282,8 +384,8 @@ def test_customer_response_prompt_hides_internal_terms_and_translates_sales_scop
 
 
 def test_prompt_forbids_successful_business_observation_requery() -> None:
-    assert "Tool 正常完成后，无论结果是否 usable" in TOOL_RESULT_INTERPRETATION_POLICY
     assert "empty、not_found、unsupported 和 insufficient" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert "不得自动换 Tool、放宽条件" in ORCHESTRATOR_OBSERVATION_PROMPT
     assert "原请求明确要求的依赖步骤" in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
@@ -521,7 +623,7 @@ def test_native_tool_calls_are_normalized_as_one_wave() -> None:
         ],
     )
 
-    decision = decision_from_ai_message(message, has_successful_tool_results=False)
+    decision = decision_from_ai_message(message)
 
     assert decision.type == "tool_calls"
     assert [call.name for call in decision.tool_calls] == [
@@ -543,8 +645,7 @@ def test_catalog_facets_tag_is_preserved_across_tool_waves() -> None:
                     "type": "tool_call",
                 }
             ],
-        ),
-        has_successful_tool_results=False,
+        )
     )
     search = decision_from_ai_message(
         AIMessage(
@@ -557,8 +658,7 @@ def test_catalog_facets_tag_is_preserved_across_tool_waves() -> None:
                     "type": "tool_call",
                 }
             ],
-        ),
-        has_successful_tool_results=True,
+        )
     )
 
     tag = _tag_from_decision(facets, None)
@@ -566,12 +666,17 @@ def test_catalog_facets_tag_is_preserved_across_tool_waves() -> None:
     assert _tag_from_decision(search, tag) == "catalog_facets + catalog_search"
 
 
-def test_fallback_orchestrator_routes_catalog_facets_questions() -> None:
+def test_fallback_planner_routes_catalog_facets_questions() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
-
-    decision = runtime._fallback_orchestrator_decision(
-        cast(AgentState, {"message": "你们有哪些鼠标品牌？", "tool_results": []})
+    state = cast(
+        AgentState,
+        {
+            "message": "你们有哪些鼠标品牌？",
+            "route_plan": _tool_route_plan("你们有哪些鼠标品牌？"),
+            "tool_results": [],
+        },
     )
+    decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name == "catalog_facets"
@@ -611,14 +716,6 @@ def test_fallback_answer_renders_catalog_facets_result() -> None:
     assert "Razer（8 条 SKU 记录）" in answer
 
 
-def test_finish_direct_control_action_is_parsed() -> None:
-    decision = decision_from_ai_message(_control_message("finish_direct", response="你好。"))
-
-    assert decision.type == "direct_response"
-    assert decision.control_action == "finish_direct"
-    assert decision.response == "你好。"
-
-
 def test_finish_answer_control_action_declares_evidence_ids() -> None:
     decision = decision_from_ai_message(
         _control_message(
@@ -633,82 +730,11 @@ def test_finish_answer_control_action_declares_evidence_ids() -> None:
     assert decision.response == "目前目录中有以下鼠标。"
 
 
-def test_request_handoff_control_action_is_parsed() -> None:
-    decision = decision_from_ai_message(
-        _control_message(
-            "request_handoff",
-            response="这个操作需要人工客服处理。",
-            reason="需要修改订单状态",
-            requested_action="取消最近订单",
-        )
-    )
-
-    assert decision.type == "handoff"
-    assert decision.control_action == "request_handoff"
-    assert decision.reason == "需要修改订单状态"
-    assert decision.requested_action == "取消最近订单"
-
-
 def test_empty_terminal_response_is_rejected() -> None:
     with pytest.raises(ValueError, match="neither tool calls nor a control action"):
         decision_from_ai_message(
             AIMessage(content=""),
         )
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_accepts_complete_terminal_response() -> None:
-    runtime = AgentRuntime(
-        cast(object, None),
-        Settings(llm_api_key=""),
-        chat_model=FakeChatModel(
-            [_control_message("finish_direct", response="你好，我是商城客服。")]
-        ),
-    )
-    workflow = StateGraph(AgentState)
-    workflow.add_node("orchestrate", runtime._orchestrate)
-    workflow.set_entry_point("orchestrate")
-    workflow.add_edge("orchestrate", END)
-
-    result = await workflow.compile().ainvoke(
-        {
-            "message": "你是谁？",
-            "history": [],
-            "tool_results": [],
-            "tool_waves": [],
-            "tool_wave_count": 0,
-            "orchestrator_call_count": 0,
-        }
-    )
-
-    assert result["decision"]["type"] == "direct_response"
-    assert result["decision"]["response"] == "你好，我是商城客服。"
-
-
-@pytest.mark.asyncio
-async def test_deterministic_boundary_skips_llm_for_handoff() -> None:
-    model = FakeChatModel([AIMessage(content="不应该调用模型")])
-    runtime = AgentRuntime(
-        cast(object, None),
-        Settings(llm_api_key=""),
-        chat_model=model,
-    )
-
-    result = await runtime._orchestrate(
-        cast(
-            AgentState,
-            {
-                "message": "帮我取消订单",
-                "tool_results": [],
-                "tool_wave_count": 0,
-                "orchestrator_call_count": 0,
-            },
-        )
-    )
-
-    assert result["decision"]["type"] == "handoff"
-    assert result["boundary"]["classification"] == "human_handoff_required"
-    assert model.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -743,6 +769,7 @@ async def test_native_tool_call_is_parsed_from_complete_message() -> None:
     result = await workflow.compile().ainvoke(
         {
             "message": "推荐无线鼠标",
+            "route_plan": _tool_route_plan("推荐无线鼠标"),
             "history": [],
             "tool_results": [],
             "tool_waves": [],
@@ -754,7 +781,7 @@ async def test_native_tool_call_is_parsed_from_complete_message() -> None:
     decision = result["decision"]
     assert decision["type"] == "tool_calls"
     assert decision["tool_calls"][0]["name"] == "catalog_search"
-    assert decision["tool_calls"][0]["subquery"] == "推荐无线鼠标"
+    assert decision["tool_calls"][0]["subquery"] == "sq_1"
     assert "subquery" not in decision["tool_calls"][0]["arguments"]
 
 
@@ -788,6 +815,7 @@ async def test_tool_loop_accepts_finish_answer_control_on_second_call() -> None:
         AgentState,
         {
             "message": "推荐无线鼠标",
+            "route_plan": _tool_route_plan("推荐无线鼠标"),
             "history": [],
             "tool_results": [],
             "tool_waves": [],
@@ -832,6 +860,7 @@ async def test_invalid_terminal_after_usable_tool_uses_immediate_grounded_fallba
         AgentState,
         {
             "message": "你们有什么牌子的鼠标",
+            "route_plan": _tool_route_plan("你们有什么牌子的鼠标"),
             "history": [],
             "tool_waves": [],
             "tool_wave_count": 1,
@@ -854,6 +883,16 @@ async def test_invalid_terminal_after_usable_tool_uses_immediate_grounded_fallba
                     },
                 }
             ],
+            "subquery_ledger": [
+                {
+                    "tool_call_id": "call-facets-terminal",
+                    "tool_name": "catalog_facets",
+                    "subquery": "sq_1",
+                    "outcome": "usable",
+                    "status": "ready_to_answer",
+                    "has_usable_information": True,
+                }
+            ],
         },
     )
 
@@ -865,57 +904,8 @@ async def test_invalid_terminal_after_usable_tool_uses_immediate_grounded_fallba
 
     assert guarded["terminal_guard_status"] == "fallback"
     assert guarded["decision"]["type"] == "grounded_response"
-    assert runtime.orchestrator.call_count == 1
+    assert runtime.answer_synthesizer.call_count == 1
     assert "Logitech（12 条 SKU 记录）" in guarded["decision"]["response"]
-
-
-@pytest.mark.asyncio
-async def test_run_stream_sends_one_validated_answer_delta_before_done() -> None:
-    class ProgressRuntime(AgentRuntime):
-        async def _test_load_context(self, state: AgentState) -> AgentState:
-            state["conversation_id"] = 10
-            state["run_id"] = 20
-            state["history"] = []
-            return state
-
-        async def _test_persist(self, state: AgentState) -> AgentState:
-            return state
-
-        def _build_graph(self):
-            workflow = StateGraph(AgentState)
-            workflow.add_node("load_context", self._test_load_context)
-            workflow.add_node("orchestrate", self._orchestrate)
-            workflow.add_node("finalize_response", self._finalize_response)
-            workflow.add_node("persist_turn", self._test_persist)
-            workflow.set_entry_point("load_context")
-            workflow.add_edge("load_context", "orchestrate")
-            workflow.add_edge("orchestrate", "finalize_response")
-            workflow.add_edge("finalize_response", "persist_turn")
-            workflow.add_edge("persist_turn", END)
-            return workflow.compile()
-
-    runtime = ProgressRuntime(
-        cast(object, None),
-        Settings(llm_api_key=""),
-        chat_model=FakeChatModel(
-            [_control_message("finish_direct", response="完整校验后的回答")]
-        ),
-    )
-
-    events = [
-        event
-        async for event in runtime.run_stream(
-            ChatRequest(message="你是谁？"),
-            user_id=1,
-        )
-    ]
-
-    event_types = [event["type"] for event in events]
-    deltas = [event["delta"] for event in events if event["type"] == "delta"]
-    assert event_types[0] == "run_started"
-    assert event_types.index("delta") < event_types.index("done")
-    assert deltas == ["完整校验后的回答"]
-    assert events[-1]["response"]["answer"] == "完整校验后的回答"
 
 
 def test_tool_results_are_reconstructed_as_tool_messages() -> None:
@@ -923,6 +913,7 @@ def test_tool_results_are_reconstructed_as_tool_messages() -> None:
         AgentState,
         {
             "message": "推荐无线鼠标",
+            "route_plan": _tool_route_plan("推荐无线鼠标"),
             "history": [],
             "tool_wave_count": 1,
             "tool_waves": [
@@ -968,6 +959,7 @@ def test_orchestrator_messages_load_failure_recovery_into_first_system_message()
         AgentState,
         {
             "message": "推荐无线鼠标",
+            "route_plan": _tool_route_plan("推荐无线鼠标"),
             "history": [],
             "tool_wave_count": 1,
             "tool_waves": [
@@ -1025,8 +1017,7 @@ def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
                     "type": "tool_call",
                 }
             ],
-        ),
-        has_successful_tool_results=True,
+        )
     )
 
     guarded = runtime._validate_decision_budget(

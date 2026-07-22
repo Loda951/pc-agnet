@@ -3,13 +3,13 @@ from typing import cast
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.graph import AgentRuntime, _orchestrator_messages
+from app.agent.graph import AgentRuntime, _request_router_messages
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.repositories.conversations import ConversationRepository
 
 
-def test_orchestrator_messages_include_session_history_before_current_request() -> None:
+def test_request_router_messages_include_session_history_before_current_request() -> None:
     state = cast(
         AgentState,
         {
@@ -21,6 +21,7 @@ def test_orchestrator_messages_include_session_history_before_current_request() 
                 "display_message": "可自动回答",
             },
             "memory": [],
+            "working_memory": {},
             "history": [
                 {
                     "role": "user",
@@ -40,7 +41,7 @@ def test_orchestrator_messages_include_session_history_before_current_request() 
         },
     )
 
-    messages = _orchestrator_messages(state, call_count=1)
+    messages = _request_router_messages(state)
 
     assert isinstance(messages[1], HumanMessage)
     assert messages[1].content == state["history"][0]["content"]
@@ -48,7 +49,7 @@ def test_orchestrator_messages_include_session_history_before_current_request() 
     assert messages[2].content == state["history"][1]["content"]
     assert isinstance(messages[3], HumanMessage)
     assert "给我下这个一来一回标准的 json 格式" in messages[3].content
-    assert '"current_orchestrator_call": 1' in messages[3].content
+    assert "<original_request>" in messages[3].content
 
 
 @pytest.mark.asyncio

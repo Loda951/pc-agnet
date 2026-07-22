@@ -57,6 +57,14 @@ class OrderLookupPublicInput(BaseModel):
     limit: int = Field(default=5, ge=1, le=20)
 
 
+class DocumentSearchPublicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    document_type: str | None = None
+    limit: int = Field(default=3, ge=1, le=10)
+
+
 class ToolContract(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -400,7 +408,7 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
                 "shipping, price protection, and after-sales procedures. Return policy "
                 "evidence only; do not approve refunds or perform after-sales actions."
             ),
-            public_input_model=DocumentSearchInput,
+            public_input_model=DocumentSearchPublicInput,
             internal_input_model=DocumentSearchInput,
             output_model=DocumentSearchOutput,
             timeout_seconds=8.0,
@@ -412,7 +420,7 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
                 "Search read-only PC peripheral, brand, merchant, purchasing, and FAQ "
                 "knowledge. Do not use it for current product price, stock, or order facts."
             ),
-            public_input_model=DocumentSearchInput,
+            public_input_model=DocumentSearchPublicInput,
             internal_input_model=DocumentSearchInput,
             output_model=DocumentSearchOutput,
             timeout_seconds=8.0,

@@ -47,8 +47,6 @@ OBSERVATION_SUBQUERY_PROTOCOL = """
 - `ready_to_answer` 可用于回答；`unavailable` 应说明无匹配、未找到或能力不支持；
   `needs_replan` 不允许改写 query 重查；`failed` 仅按按需注入的 failure recovery 处理。
 - `superseded` 不再作为证据；`reused_from_tool_call_id` 不代表获得了新事实。
-- 全部解决用 `finish_answer`；部分工具子任务解决用 `finish_partial`；没有 usable 信息用
-  `finish_unavailable`；只有结构化错误确实需要用户信息时才用 `ask_clarification`。
 """.strip()
 
 SUBQUERY_PROTOCOL = (

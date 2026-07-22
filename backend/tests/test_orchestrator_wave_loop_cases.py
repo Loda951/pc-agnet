@@ -6,10 +6,10 @@ from app.agent.decisions import OrchestratorDecision, PlannedToolCall
 from app.agent.graph import (
     AgentRuntime,
     _followup_tool_call_allowed,
-    _rebuild_tool_projections,
     _state_terminal_decision,
 )
 from app.agent.outcomes import build_subquery_ledger, normalize_tool_result
+from app.agent.projections import rebuild_tool_projections
 from app.agent.state import AgentState
 from app.core.config import Settings
 
@@ -94,7 +94,7 @@ def _state_from_waves(waves: list[dict[str, Any]]) -> AgentState:
             "order": None,
         },
     )
-    _rebuild_tool_projections(state)
+    rebuild_tool_projections(state)
     return state
 
 
@@ -857,7 +857,9 @@ def test_wave_loop_terminal_cases(
 
 
 class _FailingChatModel:
-    def bind_tools(self, tools: list[dict[str, Any]]) -> "_FailingChatModel":
+    def bind_tools(
+        self, tools: list[dict[str, Any]], **_: Any
+    ) -> "_FailingChatModel":
         return self
 
     async def ainvoke(self, messages: list[Any]) -> None:
@@ -872,10 +874,21 @@ async def test_20_orchestrator_failure_after_tool_success_uses_grounded_fallback
         output={"result_type": "products", "products": [_product()]},
     )
     state = _state_from_waves(
-        [_wave(1, "usable", "catalog_search", "办公键盘", "推荐办公键盘", result)]
+        [_wave(1, "usable", "catalog_search", "办公键盘", "sq_1", result)]
     )
     state.update(
         {
+            "route_plan": {
+                "rewritten_query": "推荐办公键盘",
+                "subqueries": [
+                    {
+                        "id": "sq_1",
+                        "query": "推荐办公键盘",
+                        "disposition": "tool_planning",
+                        "reason_code": "catalog_read",
+                    }
+                ],
+            },
             "history": [],
             "orchestrator_call_count": 1,
             "terminal_guard_replan_count": 0,

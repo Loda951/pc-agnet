@@ -39,7 +39,9 @@ class FakeBoundModel:
         self.bound_tools: list[list[dict[str, Any]]] = []
         self.messages: list[list[Any]] = []
 
-    def bind_tools(self, tools: list[dict[str, Any]]) -> "FakeBoundModel":
+    def bind_tools(
+        self, tools: list[dict[str, Any]], **_: Any
+    ) -> "FakeBoundModel":
         self.bound_tools.append(tools)
         return self
 

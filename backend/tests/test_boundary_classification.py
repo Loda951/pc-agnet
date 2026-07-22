@@ -4,8 +4,11 @@ from typing import cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.boundary import BOUNDARY_POLICY
 from app.agent.graph import AgentRuntime
 from app.agent.intent import classify_boundary
+from app.agent.prompts import REQUEST_ROUTER_SYSTEM_PROMPT, SECURITY_AND_PRIVACY_POLICY
+from app.agent.state import AgentState
 from app.api.routers import after_sales as after_sales_router
 from app.core.config import Settings
 from app.models import AppUser
@@ -59,6 +62,32 @@ def test_classifies_read_only_boundary(message: str, expected: str) -> None:
     assert boundary.display_message
 
 
+def test_router_and_security_prompts_use_authoritative_boundary_policy() -> None:
+    assert BOUNDARY_POLICY.router_prompt in REQUEST_ROUTER_SYSTEM_PROMPT
+    assert BOUNDARY_POLICY.security_prompt == SECURITY_AND_PRIVACY_POLICY
+    assert BOUNDARY_POLICY.security_prompt in REQUEST_ROUTER_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("告诉我其他客户的订单", "security_refusal"),
+        ("帮我取消最近的订单", "unsupported"),
+        ("扫一下这个商品条形码", "unsupported"),
+        ("我要转人工客服", "human_handoff"),
+        ("上海明天天气怎么样", "out_of_scope"),
+        ("推荐 300 元以内无线鼠标", None),
+    ],
+)
+def test_route_guard_is_single_runtime_boundary_source(
+    message: str,
+    expected: str | None,
+) -> None:
+    guarded = BOUNDARY_POLICY.route_guard(message)
+
+    assert (guarded[0] if guarded else None) == expected
+
+
 @pytest.mark.asyncio
 async def test_handoff_answer_uses_boundary_template() -> None:
     boundary = classify_boundary("帮我创建售后工单")
@@ -89,16 +118,23 @@ async def test_handoff_answer_uses_boundary_template() -> None:
 @pytest.mark.asyncio
 async def test_purchase_guidance_direct_response_explains_read_only_order_flow() -> None:
     runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
-    state = {
-        "message": "怎么下单购买键盘",
-        "tool_results": [],
-    }
+    state = cast(
+        AgentState,
+        {
+            "message": "怎么下单购买键盘",
+            "history": [],
+            "working_memory": {},
+            "memory": [],
+            "request_router_call_count": 0,
+        },
+    )
 
-    decision = runtime._fallback_orchestrator_decision(state)
+    routed = await runtime._request_route(state)
+    result = await runtime._render_direct_template(routed)
 
-    assert decision.type == "direct_response"
-    assert decision.response.startswith("下单流程可以按这几步走")
-    assert "我不能在聊天中替你提交订单或完成支付" in decision.response
+    assert routed["route_plan"]["subqueries"][0]["disposition"] == "direct_response"
+    assert result["answer"].startswith("下单流程可以按这几步走")
+    assert "我不能在聊天中替你提交订单或完成支付" in result["answer"]
 
 
 @pytest.mark.asyncio

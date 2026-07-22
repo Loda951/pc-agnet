@@ -56,6 +56,20 @@ def _control_message(name: str, **arguments: Any) -> AIMessage:
     )
 
 
+def _tool_route_plan(query: str = "查询业务信息") -> dict[str, Any]:
+    return {
+        "rewritten_query": query,
+        "subqueries": [
+            {
+                "id": "sq_1",
+                "query": query,
+                "disposition": "tool_planning",
+                "reason_code": "test_tool_planning",
+            }
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("result", "expected_outcome", "usable"),
     [
@@ -494,14 +508,41 @@ def test_duplicate_tool_call_ids_are_normalized_before_ledger_execution() -> Non
     decision = OrchestratorDecision(
         type="tool_calls",
         tool_calls=[
-            PlannedToolCall(id="reused", name="catalog_search", arguments={"query": "鼠标"}),
-            PlannedToolCall(id="reused", name="policy_search", arguments={"query": "退货"}),
+            PlannedToolCall(
+                id="reused",
+                name="catalog_search",
+                arguments={"query": "鼠标"},
+                subquery="sq_1",
+            ),
+            PlannedToolCall(
+                id="reused",
+                name="policy_search",
+                arguments={"query": "退货"},
+                subquery="sq_2",
+            ),
         ],
     )
     state = cast(
         AgentState,
-        {
-            "tool_waves": [
+            {
+                "route_plan": {
+                    "rewritten_query": "查询鼠标并说明退货政策",
+                    "subqueries": [
+                        {
+                            "id": "sq_1",
+                            "query": "查询鼠标",
+                            "disposition": "tool_planning",
+                            "reason_code": "catalog_read",
+                        },
+                        {
+                            "id": "sq_2",
+                            "query": "说明退货政策",
+                            "disposition": "tool_planning",
+                            "reason_code": "policy_read",
+                        },
+                    ],
+                },
+                "tool_waves": [
                 {
                     "wave": 1,
                     "calls": [{"id": "reused", "name": "knowledge_search"}],
@@ -560,37 +601,6 @@ def test_finish_partial_requires_usable_part_and_explicit_unavailable_part() -> 
     )
 
 
-def test_out_of_scope_and_direct_actions_cannot_follow_business_calls() -> None:
-    ledger = [{"tool_call_id": "call-1", "has_usable_information": False}]
-    out_of_scope = OrchestratorDecision(
-        type="out_of_scope",
-        response="不支持",
-        reason="not_pc_store",
-        control_action="reject_out_of_scope",
-    )
-    direct = OrchestratorDecision(
-        type="direct_response",
-        response="直接回答",
-        control_action="finish_direct",
-    )
-
-    assert validate_terminal_decision(out_of_scope, ledger).valid is False
-    assert validate_terminal_decision(direct, ledger).valid is False
-
-
-def test_finish_direct_requires_runtime_allowlist_even_without_tool_calls() -> None:
-    direct = OrchestratorDecision(
-        type="direct_response",
-        response="明天会下雨。",
-        control_action="finish_direct",
-    )
-
-    validation = validate_terminal_decision(direct, [], allow_direct=False)
-
-    assert validation.valid is False
-    assert validation.reason == "direct_answer_not_allowed_for_this_request"
-
-
 def test_finish_unavailable_requires_tool_results_and_zero_usable_information() -> None:
     decision = OrchestratorDecision(
         type="unavailable_response",
@@ -607,7 +617,9 @@ def test_finish_unavailable_requires_tool_results_and_zero_usable_information() 
 
 
 def test_control_action_cannot_be_mixed_with_business_tool_call() -> None:
-    message = _control_message("finish_direct", response="你好")
+    message = _control_message(
+        "finish_answer", response="你好", used_tool_call_ids=["catalog-1"]
+    )
     message.tool_calls.append(
         {
             "id": "catalog-1",
@@ -632,7 +644,7 @@ class _FakeChatModel:
         self.call_count = 0
         self.bound_tool_sets: list[set[str]] = []
 
-    def bind_tools(self, tools: list[dict[str, Any]]):
+    def bind_tools(self, tools: list[dict[str, Any]], **_: Any):
         self.bound_tool_sets.append({tool["function"]["name"] for tool in tools})
         return self
 
@@ -640,86 +652,6 @@ class _FakeChatModel:
         response = self.responses[self.call_count]
         self.call_count += 1
         return response
-
-
-@pytest.mark.asyncio
-async def test_semantic_out_of_scope_control_is_structurally_routed() -> None:
-    model = _FakeChatModel(
-        [
-            _control_message(
-                "reject_out_of_scope",
-                response="我不能回答天气。",
-                reason="与 PC 外设商城无关",
-            )
-        ]
-    )
-    runtime = AgentRuntime(
-        cast(Any, None),
-        Settings(llm_api_key=""),
-        chat_model=model,
-    )
-    state = cast(
-        AgentState,
-        {
-            "message": "你知道明天会不会下雨吗？",
-            "history": [],
-            "tool_results": [],
-            "tool_waves": [],
-            "subquery_ledger": [],
-            "tool_wave_count": 0,
-            "orchestrator_call_count": 0,
-        },
-    )
-
-    result = await runtime._orchestrate(state)
-    guarded = await runtime._terminal_guard(result)
-
-    assert model.call_count == 1
-    assert guarded["decision"]["type"] == "out_of_scope"
-    assert guarded["boundary"]["classification"] == "out_of_scope"
-    assert guarded["terminal_guard_status"] == "accepted"
-
-
-@pytest.mark.asyncio
-async def test_out_of_scope_request_cannot_be_smuggled_through_finish_direct() -> None:
-    model = _FakeChatModel(
-        [
-            _control_message("finish_direct", response="明天会下雨。"),
-            _control_message(
-                "reject_out_of_scope",
-                response="我不能回答天气。",
-                reason="与 PC 外设商城无关",
-            ),
-        ]
-    )
-    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
-    state = cast(
-        AgentState,
-        {
-            "message": "你知道明天会不会下雨吗？",
-            "history": [],
-            "tool_results": [],
-            "tool_waves": [],
-            "subquery_ledger": [],
-            "tool_wave_count": 0,
-            "orchestrator_call_count": 0,
-            "terminal_guard_replan_count": 0,
-        },
-    )
-
-    first = await runtime._orchestrate(state)
-    first_guard = await runtime._terminal_guard(first)
-    assert first_guard["terminal_guard_status"] == "replan"
-    assert first_guard["terminal_guard_feedback"] == (
-        "direct_answer_not_allowed_for_this_request"
-    )
-
-    second = await runtime._orchestrate(first_guard)
-    second_guard = await runtime._terminal_guard(second)
-
-    assert model.call_count == 2
-    assert second_guard["terminal_guard_status"] == "accepted"
-    assert second_guard["boundary"]["classification"] == "out_of_scope"
 
 
 @pytest.mark.asyncio
@@ -757,6 +689,7 @@ async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() ->
         AgentState,
         {
             "message": "分析一下鼠标最近三个月的销量趋势",
+            "route_plan": _tool_route_plan("分析一下鼠标最近三个月的销量趋势"),
             "history": [],
             "tool_results": [unsupported],
             "tool_waves": [
@@ -776,6 +709,7 @@ async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() ->
                 {
                     "tool_call_id": "catalog-1",
                     "tool_name": "catalog_search",
+                    "subquery": "sq_1",
                     "outcome": "unsupported",
                     "has_usable_information": False,
                     "reason": "query_not_supported_by_tool",
@@ -793,7 +727,7 @@ async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() ->
     first_guard = await runtime._terminal_guard(first)
     assert first_guard["terminal_guard_status"] == "replan"
     assert first_guard["terminal_guard_feedback"] == (
-        "finish_answer_requires_only_active_usable_tool_call_ids"
+        "finish_answer_requires_all_initial_subqueries_resolved"
     )
 
     second = await runtime._orchestrate(first_guard)
@@ -822,6 +756,7 @@ async def test_usable_catalog_result_accepts_grounded_answer_without_replan() ->
         AgentState,
         {
             "message": "推荐 300 元以内的无线鼠标",
+            "route_plan": _tool_route_plan("推荐 300 元以内的无线鼠标"),
             "history": [],
             "tool_results": [],
             "tool_waves": [],
@@ -829,6 +764,7 @@ async def test_usable_catalog_result_accepts_grounded_answer_without_replan() ->
                 {
                     "tool_call_id": "catalog-usable",
                     "tool_name": "catalog_search",
+                    "subquery": "sq_1",
                     "outcome": "usable",
                     "has_usable_information": True,
                 }
@@ -865,6 +801,7 @@ async def test_mixed_request_accepts_partial_answer_with_explicit_unhandled_part
         AgentState,
         {
             "message": "推荐无线鼠标，顺便说明天天气",
+            "route_plan": _tool_route_plan("推荐无线鼠标"),
             "history": [],
             "tool_results": [],
             "tool_waves": [],
@@ -872,6 +809,7 @@ async def test_mixed_request_accepts_partial_answer_with_explicit_unhandled_part
                 {
                     "tool_call_id": "catalog-usable",
                     "tool_name": "catalog_search",
+                    "subquery": "sq_1",
                     "outcome": "usable",
                     "has_usable_information": True,
                 }
@@ -897,6 +835,7 @@ async def test_memory_without_current_tool_result_cannot_authorize_grounded_answ
         AgentState,
         {
             "message": "之前那款鼠标现在多少钱？",
+            "route_plan": _tool_route_plan("查询之前那款鼠标的当前价格"),
             "decision": OrchestratorDecision(
                 type="grounded_response",
                 response="记忆里的价格还是 299 元。",

@@ -321,7 +321,7 @@ def validate_terminal_decision(
     decision: OrchestratorDecision,
     ledger: Sequence[Mapping[str, Any]],
     *,
-    allow_direct: bool = True,
+    planned_subquery_ids: Sequence[str] = (),
 ) -> TerminalValidation:
     action = decision.control_action
     if decision.type == "invalid" or action is None:
@@ -330,10 +330,13 @@ def validate_terminal_decision(
     active_entries = [entry for entry in ledger if is_active_ledger_entry(entry)]
     usable_ids = set(active_usable_tool_call_ids(ledger))
     active_ids = {str(entry.get("tool_call_id")) for entry in active_entries}
-    observed_ids = {str(entry.get("tool_call_id")) for entry in ledger}
     used_ids = set(decision.used_tool_call_ids)
 
     initial_subqueries = {
+        str(subquery).strip().casefold()
+        for subquery in planned_subquery_ids
+        if str(subquery).strip()
+    } or {
         str(entry.get("subquery") or "").strip().casefold()
         for entry in ledger
         if entry.get("wave") == 1 and str(entry.get("subquery") or "").strip()
@@ -346,18 +349,6 @@ def validate_terminal_decision(
     }
     all_initial_subqueries_resolved = initial_subqueries <= resolved_subqueries
 
-    if action == "request_handoff":
-        return _terminal_validation(decision.type == "handoff", "invalid_handoff")
-    if action == "reject_out_of_scope":
-        return _terminal_validation(
-            decision.type == "out_of_scope" and not observed_ids,
-            "out_of_scope_cannot_follow_business_tool_calls",
-        )
-    if action == "finish_direct":
-        return _terminal_validation(
-            decision.type == "direct_response" and not observed_ids and allow_direct,
-            "direct_answer_not_allowed_for_this_request",
-        )
     if action == "ask_clarification":
         if usable_ids:
             return TerminalValidation(

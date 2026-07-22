@@ -2,10 +2,23 @@ from typing import cast
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.decisions import OrchestratorDecision
 from app.agent.graph import AgentRuntime, _orchestrator_messages
 from app.agent.state import AgentState
 from app.core.config import Settings
+
+
+def _tool_route_plan(query: str) -> dict:
+    return {
+        "rewritten_query": query,
+        "subqueries": [
+            {
+                "id": "sq_1",
+                "query": query,
+                "disposition": "tool_planning",
+                "reason_code": "test_tool_planning",
+            }
+        ],
+    }
 
 
 def test_orchestrator_messages_include_current_request_context() -> None:
@@ -13,6 +26,7 @@ def test_orchestrator_messages_include_current_request_context() -> None:
         AgentState,
         {
             "message": "Recommend a wireless mouse",
+            "route_plan": _tool_route_plan("Recommend a wireless mouse"),
             "history": [],
             "tool_wave_count": 1,
             "tool_waves": [],
@@ -32,6 +46,7 @@ def test_orchestrator_messages_reconstruct_tool_observations() -> None:
         AgentState,
         {
             "message": "Recommend a wireless mouse",
+            "route_plan": _tool_route_plan("Recommend a wireless mouse"),
             "history": [],
             "tool_wave_count": 1,
             "tool_waves": [
@@ -67,32 +82,39 @@ def test_orchestrator_messages_reconstruct_tool_observations() -> None:
     assert any('"result_type": "empty"' in str(message.content) for message in messages)
 
 
-def test_fallback_orchestrator_routes_order_lookup_without_old_route_intent() -> None:
+def test_fallback_planner_routes_order_lookup_from_route_plan() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
-    state = cast(AgentState, {"message": "Where is order 202607020001?"})
+    query = "Where is order 202607020001?"
+    state = cast(
+        AgentState,
+        {"message": query, "route_plan": _tool_route_plan(query), "tool_results": []},
+    )
 
-    decision = runtime._fallback_orchestrator_decision(state)
+    decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name == "order_lookup"
     assert decision.tool_calls[0].arguments["order_id"] == 202607020001
 
 
-def test_fallback_orchestrator_routes_policy_search_without_old_route_intent() -> None:
+def test_fallback_planner_routes_policy_search_from_route_plan() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
-    state = cast(AgentState, {"message": "return policy"})
+    query = "return policy"
+    state = cast(
+        AgentState,
+        {"message": query, "route_plan": _tool_route_plan(query), "tool_results": []},
+    )
 
-    decision = runtime._fallback_orchestrator_decision(state)
+    decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
     assert decision.tool_calls[0].name in {"policy_search", "knowledge_search"}
 
 
-def test_fallback_orchestrator_direct_identity_response() -> None:
+def test_fallback_router_handles_identity_without_planner() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
-    state = cast(AgentState, {"message": "what can you do?"})
+    state = cast(AgentState, {"message": "你能做什么？", "working_memory": {}})
 
-    decision = runtime._fallback_orchestrator_decision(state)
+    plan = runtime._fallback_route_plan(state)
 
-    assert isinstance(decision, OrchestratorDecision)
-    assert decision.type in {"direct_response", "tool_calls"}
+    assert plan.subqueries[0].disposition == "direct_response"

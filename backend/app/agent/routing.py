@@ -13,6 +13,15 @@ RouteDisposition = Literal[
     "unsupported",
     "security_refusal",
 ]
+RouteCapability = Literal[
+    "catalog_search",
+    "catalog_compare",
+    "catalog_facets",
+    "order_lookup",
+    "policy_search",
+    "knowledge_search",
+    "planner_required",
+]
 
 
 class RoutedSubquery(BaseModel):
@@ -24,11 +33,14 @@ class RoutedSubquery(BaseModel):
     reason_code: str = Field(min_length=1, max_length=100)
     missing_information: list[str] = Field(default_factory=list, max_length=5)
     clarification_question: str = Field(default="", max_length=500)
+    capability: RouteCapability | None = None
 
     @model_validator(mode="after")
     def validate_clarification(self) -> "RoutedSubquery":
         if self.disposition == "clarification" and not self.clarification_question.strip():
             raise ValueError("clarification subquery requires clarification_question")
+        if self.disposition != "tool_planning" and self.capability is not None:
+            raise ValueError("only tool_planning subqueries may declare a capability")
         return self
 
 
@@ -100,6 +112,7 @@ def blocked_subqueries(
 
 __all__ = [
     "RequestRoutePlan",
+    "RouteCapability",
     "RouteDisposition",
     "RoutedSubquery",
     "blocked_subqueries",
