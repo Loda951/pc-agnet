@@ -5,7 +5,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
@@ -366,6 +366,25 @@ def test_catalog_public_schemas_are_query_first() -> None:
     assert search_fields == {"query", "limit"}
     assert facet_fields == {"query", "limit"}
     assert search.internal_input_model is CatalogSearchInput
+
+
+def test_document_search_public_schema_fixes_hybrid_retrieval() -> None:
+    provider = DefaultToolContractProvider()
+
+    for name in ("policy_search", "knowledge_search"):
+        contract = provider.get_contract(name)
+        assert contract is not None
+        fields = set(contract.public_input_model.model_json_schema()["properties"])
+        assert fields == {"query", "document_type", "limit"}
+        with pytest.raises(ValidationError):
+            contract.public_input_model.model_validate(
+                {"query": "退货政策", "retrieval_mode": "bm25"}
+            )
+        public_input = contract.public_input_model.model_validate({"query": "退货政策"})
+        internal_input = contract.internal_input_model.model_validate(
+            public_input.model_dump(mode="json", exclude_none=True)
+        )
+        assert internal_input.retrieval_mode == "hybrid"
 
 
 def test_tool_catalog_rejects_duplicate_names_and_missing_handler() -> None:
@@ -1617,6 +1636,59 @@ async def test_policy_and_knowledge_search_support_hybrid_retrieval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_document_search_limit_is_chunk_top_k_with_minimum_two() -> None:
+    documents = [
+        knowledge_tools.LocalKnowledgeDocument(
+            id=1,
+            title="退货政策一",
+            document_type="policy",
+            content="退货政策支持七天无理由退货。",
+        ),
+        knowledge_tools.LocalKnowledgeDocument(
+            id=2,
+            title="退货政策二",
+            document_type="faq",
+            content="退货申请需要提供订单号。",
+        ),
+    ]
+    service = KnowledgeRetrievalToolService(documents=documents)
+
+    result = await service.search_policy(
+        DocumentSearchInput(query="退货政策", retrieval_mode="bm25", limit=1)
+    )
+
+    assert len(result.documents) == 2
+    assert {
+        item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents
+    } == {"1:0", "2:0"}
+
+
+@pytest.mark.asyncio
+async def test_document_search_returns_complete_top_chunks_without_overlap_only_tail() -> None:
+    first_section = "退货条件：签收七天内、包装完整且不影响二次销售。" * 10
+    second_section = "退款时效：退货入库验收通过后按原支付路径退回。" * 10
+    document = knowledge_tools.LocalKnowledgeDocument(
+        id=1,
+        title="PC 外设退货政策",
+        document_type="policy",
+        content=first_section + second_section,
+    )
+    service = KnowledgeRetrievalToolService(documents=[document])
+
+    result = await service.search_policy(
+        DocumentSearchInput(query="退货条件和退款时效", retrieval_mode="bm25", limit=3)
+    )
+
+    chunk_ids = [
+        item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents
+    ]
+    assert len(result.documents) == 2
+    assert set(chunk_ids) == {"1:0", "1:1"}
+    assert max(len(item.snippet) for item in result.documents) == 420
+    assert all(not item.snippet.endswith("...") for item in result.documents)
+
+
+@pytest.mark.asyncio
 async def test_policy_search_finds_customer_privacy_boundary() -> None:
     service = _knowledge_service()
 
@@ -1630,7 +1702,10 @@ async def test_policy_search_finds_customer_privacy_boundary() -> None:
 
     assert result.result_type == "documents"
     assert result.documents[0].title == "用户隐私与数据访问规则"
-    assert "不得查询、披露、汇总或推断其他用户" in result.documents[0].snippet
+    assert any(
+        "不得查询、披露、汇总或推断其他用户" in item.snippet
+        for item in result.documents
+    )
 
 
 @pytest.mark.asyncio

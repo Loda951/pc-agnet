@@ -27,6 +27,7 @@ VECTOR_INDEX_VERSION = 1
 RRF_K = 10
 CHUNK_SIZE = 420
 CHUNK_OVERLAP = 80
+MIN_CHUNK_TOP_K = 2
 
 
 class EmbeddingProvider(Protocol):
@@ -70,14 +71,15 @@ class KnowledgeVectorIndex(BaseModel):
 
 
 @dataclass(frozen=True)
-class RankedDocument:
+class RankedChunk:
     document: LocalKnowledgeDocument
+    chunk_id: str
+    text: str
     score: float
     bm25_score: float = 0.0
     vector_score: float = 0.0
     bm25_rank: int | None = None
     vector_rank: int | None = None
-    vector_chunk_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,13 +169,14 @@ class KnowledgeRetrievalToolService:
             self.vector_index_path,
             self.document_path,
         )
-        hits = _rank_documents(
+        effective_limit = max(MIN_CHUNK_TOP_K, request.limit)
+        hits = _rank_chunks(
             request.query,
             candidates,
             request.retrieval_mode,
             self.embedding_provider,
             vector_index,
-        )[: request.limit]
+        )[:effective_limit]
         return DocumentSearchOutput(
             result_type="documents" if hits else "empty",
             documents=hits,
@@ -181,7 +184,7 @@ class KnowledgeRetrievalToolService:
         )
 
 
-def _rank_documents(
+def _rank_chunks(
     query: str,
     documents: list[LocalKnowledgeDocument],
     retrieval_mode: str,
@@ -195,8 +198,9 @@ def _rank_documents(
     if not query_tokens:
         return []
 
+    chunks = [chunk for document in documents for chunk in _document_chunks(document)]
     bm25_ranked = (
-        _rank_by_bm25(query_tokens, documents)
+        _rank_by_bm25(query_tokens, chunks)
         if retrieval_mode in {"bm25", "hybrid"}
         else []
     )
@@ -217,7 +221,7 @@ def _rank_documents(
             source_id=item.document.id,
             title=item.document.title,
             document_type=item.document.document_type,
-            snippet=_ranked_snippet(item, vector_index),
+            snippet=_chunk_body(item.text),
             score=item.score,
             metadata=_hit_metadata(item),
         )
@@ -227,26 +231,32 @@ def _rank_documents(
 
 def _rank_by_bm25(
     query_tokens: list[str],
-    documents: list[LocalKnowledgeDocument],
-) -> list[RankedDocument]:
-    tokenized_docs = [_tokenize(_document_text(document)) for document in documents]
-    doc_freq = Counter(token for tokens in tokenized_docs for token in set(tokens))
-    avg_doc_len = sum(len(tokens) for tokens in tokenized_docs) / max(len(tokenized_docs), 1)
-    ranked: list[RankedDocument] = []
-    for document, tokens in zip(documents, tokenized_docs, strict=True):
-        score = _bm25_score(query_tokens, tokens, doc_freq, len(documents), avg_doc_len)
+    chunks: list[LocalKnowledgeChunk],
+) -> list[RankedChunk]:
+    tokenized_chunks = [_tokenize(chunk.text) for chunk in chunks]
+    doc_freq = Counter(token for tokens in tokenized_chunks for token in set(tokens))
+    avg_doc_len = sum(len(tokens) for tokens in tokenized_chunks) / max(
+        len(tokenized_chunks), 1
+    )
+    ranked: list[RankedChunk] = []
+    for chunk, tokens in zip(chunks, tokenized_chunks, strict=True):
+        score = _bm25_score(query_tokens, tokens, doc_freq, len(chunks), avg_doc_len)
         if score > 0:
             ranked.append(
-                RankedDocument(
-                    document=document,
+                RankedChunk(
+                    document=chunk.document,
+                    chunk_id=chunk.chunk_id,
+                    text=chunk.text,
                     score=round(score, 4),
                     bm25_score=round(score, 4),
                 )
             )
-    ranked.sort(key=lambda item: (-item.score, item.document.id))
+    ranked.sort(key=lambda item: (-item.score, item.document.id, item.chunk_id))
     return [
-        RankedDocument(
+        RankedChunk(
             document=item.document,
+            chunk_id=item.chunk_id,
+            text=item.text,
             score=item.score,
             bm25_score=item.bm25_score,
             bm25_rank=rank,
@@ -260,7 +270,7 @@ def _rank_by_vector(
     documents: list[LocalKnowledgeDocument],
     embedding_provider: EmbeddingProvider,
     vector_index: KnowledgeVectorIndex | None,
-) -> list[RankedDocument]:
+) -> list[RankedChunk]:
     if vector_index is None:
         return []
     if vector_index.embedding_model != embedding_provider.model_name:
@@ -268,82 +278,81 @@ def _rank_by_vector(
 
     query_embedding = embedding_provider.embed_query(query)
     allowed_document_ids = {document.id for document in documents}
-
-    best_by_document_id: dict[int, tuple[float, str]] = {}
-    for chunk in vector_index.chunks:
+    documents_by_id = {document.id: document for document in documents}
+    ranked: list[RankedChunk] = []
+    for chunk in _non_redundant_vector_chunks(vector_index.chunks):
         if chunk.document_id not in allowed_document_ids:
             continue
         score = _cosine_similarity(query_embedding, chunk.embedding)
         if score <= 0:
             continue
-        current = best_by_document_id.get(chunk.document_id)
-        if current is None or score > current[0]:
-            best_by_document_id[chunk.document_id] = (score, chunk.chunk_id)
-
-    documents_by_id = {document.id: document for document in documents}
-    ranked = [
-        RankedDocument(
-            document=documents_by_id[document_id],
-            score=round(score, 4),
-            vector_score=round(score, 4),
-            vector_chunk_id=chunk_id,
+        ranked.append(
+            RankedChunk(
+                document=documents_by_id[chunk.document_id],
+                chunk_id=chunk.chunk_id,
+                text=chunk.text,
+                score=round(score, 4),
+                vector_score=round(score, 4),
+            )
         )
-        for document_id, (score, chunk_id) in best_by_document_id.items()
-    ]
-    ranked.sort(key=lambda item: (-item.score, item.document.id))
+    ranked.sort(key=lambda item: (-item.score, item.document.id, item.chunk_id))
     return [
-        RankedDocument(
+        RankedChunk(
             document=item.document,
+            chunk_id=item.chunk_id,
+            text=item.text,
             score=item.score,
             vector_score=item.vector_score,
             vector_rank=rank,
-            vector_chunk_id=item.vector_chunk_id,
         )
         for rank, item in enumerate(ranked, start=1)
     ]
 
 
 def _rank_by_rrf(
-    bm25_ranked: list[RankedDocument],
-    vector_ranked: list[RankedDocument],
-) -> list[RankedDocument]:
-    by_document_id: dict[int, RankedDocument] = {}
+    bm25_ranked: list[RankedChunk],
+    vector_ranked: list[RankedChunk],
+) -> list[RankedChunk]:
+    by_chunk_id: dict[tuple[int, str], RankedChunk] = {}
     for item in bm25_ranked:
-        by_document_id[item.document.id] = item
+        by_chunk_id[(item.document.id, item.chunk_id)] = item
     for item in vector_ranked:
-        existing = by_document_id.get(item.document.id)
+        key = (item.document.id, item.chunk_id)
+        existing = by_chunk_id.get(key)
         if existing is None:
-            by_document_id[item.document.id] = item
+            by_chunk_id[key] = item
             continue
-        by_document_id[item.document.id] = RankedDocument(
+        by_chunk_id[key] = RankedChunk(
             document=existing.document,
+            chunk_id=existing.chunk_id,
+            text=existing.text,
             score=existing.score,
             bm25_score=existing.bm25_score,
             vector_score=item.vector_score,
             bm25_rank=existing.bm25_rank,
             vector_rank=item.vector_rank,
-            vector_chunk_id=item.vector_chunk_id,
         )
 
-    fused: list[RankedDocument] = []
-    for item in by_document_id.values():
+    fused: list[RankedChunk] = []
+    for item in by_chunk_id.values():
         score = 0.0
         if item.bm25_rank is not None:
             score += 1 / (RRF_K + item.bm25_rank)
         if item.vector_rank is not None:
             score += 1 / (RRF_K + item.vector_rank)
         fused.append(
-            RankedDocument(
+            RankedChunk(
                 document=item.document,
+                chunk_id=item.chunk_id,
+                text=item.text,
                 score=round(score, 6),
                 bm25_score=item.bm25_score,
                 vector_score=item.vector_score,
                 bm25_rank=item.bm25_rank,
                 vector_rank=item.vector_rank,
-                vector_chunk_id=item.vector_chunk_id,
             )
         )
-    fused.sort(key=lambda item: (-item.score, item.document.id))
+    fused.sort(key=lambda item: (-item.score, item.document.id, item.chunk_id))
     return fused
 
 
@@ -369,7 +378,7 @@ def _bm25_score(
     return score
 
 
-def _hit_metadata(item: RankedDocument) -> dict:
+def _hit_metadata(item: RankedChunk) -> dict:
     metadata = dict(item.document.metadata_json or {})
     metadata["retrieval_debug"] = {
         "bm25_score": item.bm25_score,
@@ -377,25 +386,34 @@ def _hit_metadata(item: RankedDocument) -> dict:
         "rrf_score": item.score,
         "bm25_rank": item.bm25_rank,
         "vector_rank": item.vector_rank,
-        "vector_chunk_id": item.vector_chunk_id,
+        "chunk_id": item.chunk_id,
+        "vector_chunk_id": item.chunk_id if item.vector_rank is not None else None,
     }
     return metadata
 
 
-def _ranked_snippet(
-    item: RankedDocument,
-    vector_index: KnowledgeVectorIndex | None,
-) -> str:
-    if item.vector_chunk_id and vector_index is not None:
-        for chunk in vector_index.chunks:
-            if chunk.chunk_id != item.vector_chunk_id:
-                continue
-            # Generated chunks contain title/type/metadata on the first three lines. Those
-            # fields are already returned separately and should not crowd out the matched text.
-            matched_text = chunk.text.split("\n", 3)[-1].lstrip(" ，。、；;:：")
-            if matched_text:
-                return _snippet(matched_text)
-    return _snippet(item.document.content)
+def _chunk_body(text: str) -> str:
+    # Generated chunks contain title/type/metadata on the first three lines. Those fields are
+    # already returned separately and should not crowd out the matched text. Do not apply the
+    # old 180-character snippet cap: request.limit now bounds the number of complete chunks.
+    body = text.split("\n", 3)[-1].lstrip(" ，。、；;:：")
+    return re.sub(r"\s+", " ", body).strip()
+
+
+def _non_redundant_vector_chunks(
+    chunks: list[KnowledgeVectorIndexChunk],
+) -> list[KnowledgeVectorIndexChunk]:
+    """Drop a trailing overlap-only fragment already contained in the previous chunk."""
+    retained: list[KnowledgeVectorIndexChunk] = []
+    previous_by_document: dict[int, str] = {}
+    for chunk in chunks:
+        body = _chunk_body(chunk.text)
+        previous = previous_by_document.get(chunk.document_id)
+        if previous is not None and len(body) <= CHUNK_OVERLAP and previous.endswith(body):
+            continue
+        retained.append(chunk)
+        previous_by_document[chunk.document_id] = body
+    return retained
 
 
 @lru_cache(maxsize=8)
@@ -457,12 +475,6 @@ def build_knowledge_vector_index(
     return index
 
 
-def _document_text(document: LocalKnowledgeDocument) -> str:
-    metadata = document.metadata_json or {}
-    metadata_text = " ".join(str(value) for value in metadata.values())
-    return " ".join([document.title, document.document_type, metadata_text, document.content])
-
-
 def _documents_hash(document_path: Path) -> str:
     return sha256(document_path.read_bytes()).hexdigest()
 
@@ -486,6 +498,11 @@ def _document_chunks(document: LocalKnowledgeDocument) -> list[LocalKnowledgeChu
     index = 0
     step = max(CHUNK_SIZE - CHUNK_OVERLAP, 1)
     while start < len(content):
+        # Do not create an overlap-only tail. For example, a 738-character document with
+        # 420/80 chunking is fully covered by chunks starting at 0 and 340; a third chunk at
+        # 680 would only duplicate the final 58 characters and could begin mid-sentence.
+        if chunks and len(content) - start <= CHUNK_OVERLAP:
+            break
         chunk_text = content[start : start + CHUNK_SIZE]
         chunks.append(
             LocalKnowledgeChunk(
@@ -534,10 +551,3 @@ def _cjk_ngrams(chars: list[str], widths: Iterable[int]) -> list[str]:
             for index in range(max(len(chars) - width + 1, 0))
         )
     return ngrams
-
-
-def _snippet(content: str, max_length: int = 180) -> str:
-    compact = re.sub(r"\s+", " ", content).strip()
-    if len(compact) <= max_length:
-        return compact
-    return f"{compact[: max_length - 1]}..."
