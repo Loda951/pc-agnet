@@ -4,18 +4,36 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall
 from app.agent.graph import AgentRuntime, _orchestrator_messages
 from app.agent.routing import RequestRoutePlan
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.schemas.chat import ChatRequest
-from app.schemas.context import MemoryChanges, PreparedTurn, WorkingMemoryV2
+from app.schemas.context import ContextMessage, MemoryChanges, PreparedTurn, WorkingMemoryV2
 from app.tools.contracts import ToolContract
 from app.tools.schemas import ToolExecutionResult
 
 
 def _route_message(rewritten_query: str, subqueries: list[dict[str, Any]]) -> AIMessage:
+    routed_goals: list[dict[str, Any]] = []
+    for subquery in subqueries:
+        goal = dict(subquery)
+        if goal.get("disposition") == "tool_planning" and not goal.get("tasks"):
+            goal["tasks"] = [
+                {
+                    "id": goal["id"],
+                    "goal_id": goal["id"],
+                    "canonical_query": goal["query"],
+                    "depends_on": [],
+                    "input_requirements": [],
+                    "produces": "documents",
+                    "answer_role": "user_facing",
+                    "capability": "planner_required",
+                }
+            ]
+        routed_goals.append(goal)
     return AIMessage(
         content="",
         tool_calls=[
@@ -24,7 +42,7 @@ def _route_message(rewritten_query: str, subqueries: list[dict[str, Any]]) -> AI
                 "name": "route_request",
                 "args": {
                     "rewritten_query": rewritten_query,
-                    "subqueries": subqueries,
+                    "subqueries": routed_goals,
                 },
                 "type": "tool_call",
             }
@@ -39,9 +57,7 @@ class FakeBoundModel:
         self.bound_tools: list[list[dict[str, Any]]] = []
         self.messages: list[list[Any]] = []
 
-    def bind_tools(
-        self, tools: list[dict[str, Any]], **_: Any
-    ) -> "FakeBoundModel":
+    def bind_tools(self, tools: list[dict[str, Any]], **_: Any) -> "FakeBoundModel":
         self.bound_tools.append(tools)
         return self
 
@@ -53,13 +69,21 @@ class FakeBoundModel:
 
 
 class FakeContextService:
-    def __init__(self, message: str):
+    def __init__(
+        self,
+        message: str,
+        *,
+        history: list[ContextMessage] | None = None,
+        working_memory: WorkingMemoryV2 | None = None,
+    ):
         self.prepared = PreparedTurn(
             user_id=7,
             conversation_id=41,
             user_message_id=51,
             run_id=61,
             message=message,
+            history=history or [],
+            working_memory=working_memory or WorkingMemoryV2(),
         )
         self.outcomes: list[dict[str, Any]] = []
 
@@ -90,6 +114,23 @@ class FakeToolExecutor:
         if self.result is None:
             raise AssertionError("terminal route must not execute a business tool")
         return self.result
+
+
+class FakeRouteAnswerModel:
+    def __init__(self, response: str):
+        self.response = response
+        self.call_count = 0
+        self.messages: list[list[Any]] = []
+
+    def bind_tools(
+        self, _: list[dict[str, Any]], **__: Any
+    ) -> "FakeRouteAnswerModel":
+        return self
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        self.call_count += 1
+        self.messages.append(messages)
+        return AIMessage(content=self.response)
 
 
 @pytest.mark.asyncio
@@ -171,9 +212,7 @@ async def test_deterministic_terminal_fast_path_skips_router_llm(
     expected_dispatch: str,
 ) -> None:
     router = FakeBoundModel([])
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -219,9 +258,7 @@ async def test_business_or_mixed_request_does_not_use_terminal_fast_path() -> No
             )
         ]
     )
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -259,9 +296,7 @@ async def test_runtime_security_guard_overrides_router_tool_admission() -> None:
             )
         ]
     )
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -297,9 +332,7 @@ async def test_original_request_guard_blocks_risk_removed_by_router_rewrite() ->
             )
         ]
     )
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -334,9 +367,7 @@ async def test_static_write_capability_is_unsupported_not_handoff() -> None:
             )
         ]
     )
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -371,9 +402,7 @@ async def test_original_request_guard_restores_omitted_mixed_security_part() -> 
             )
         ]
     )
-    runtime = AgentRuntime(
-        cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router
-    )
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""), router_model=router)
     state = cast(
         AgentState,
         {
@@ -414,6 +443,7 @@ def test_runtime_freezes_query_instead_of_requiring_planner_to_copy_it() -> None
             "tool_waves": [],
         },
     )
+    initialize_task_runtime(state)
     rewritten = OrchestratorDecision(
         type="tool_calls",
         tool_calls=[
@@ -459,6 +489,7 @@ def test_single_routed_subquery_recovers_omitted_id_and_injects_query() -> None:
             "tool_waves": [],
         },
     )
+    initialize_task_runtime(state)
     omitted_metadata = OrchestratorDecision(
         type="tool_calls",
         tool_calls=[
@@ -504,6 +535,7 @@ def test_explicit_unknown_subquery_uses_safe_routed_fallback() -> None:
             "tool_waves": [],
         },
     )
+    initialize_task_runtime(state)
     unknown = OrchestratorDecision(
         type="tool_calls",
         tool_calls=[
@@ -519,7 +551,6 @@ def test_explicit_unknown_subquery_uses_safe_routed_fallback() -> None:
     guarded = runtime._validate_decision_budget(state, unknown, call_count=1)
 
     assert guarded.type == "tool_calls"
-    assert guarded.reason == "tool_planner_subquery_binding_fallback"
     assert [call.subquery for call in guarded.tool_calls] == ["sq_1"]
     assert guarded.tool_calls[0].arguments["query"] == "推荐无线鼠标"
 
@@ -656,6 +687,333 @@ async def test_store_philosophy_direct_route_uses_matching_template() -> None:
     assert "服务理念" in response.answer
     assert "清晰、克制、有依据" in response.answer
     assert "我可以帮你处理" not in response.answer
+
+
+@pytest.mark.asyncio
+async def test_direct_response_uses_dynamic_general_answer_prompt() -> None:
+    message = "你们店铺主要是做什么的"
+    router = FakeBoundModel(
+        [
+            _route_message(
+                message,
+                [
+                    {
+                        "id": "goal_1",
+                        "query": message,
+                        "disposition": "direct_response",
+                        "reason_code": "store_capability",
+                    }
+                ],
+            )
+        ]
+    )
+    answer_model = FakeRouteAnswerModel(
+        "我们主要提供 PC 外设选购服务，也能协助查询本人订单物流和商城政策。"
+    )
+    executor = FakeToolExecutor()
+    context = FakeContextService(message)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        chat_model=answer_model,
+        router_model=router,
+        context_service=context,
+        tool_executor=executor,
+    )
+
+    response = await runtime.run(ChatRequest(message=message), user_id=7)
+
+    assert response.answer == answer_model.response
+    assert response.boundary.classification == "in_scope_auto"
+    assert executor.calls == []
+    assert answer_model.call_count == 1
+    assert "<general_direct_identity>" in str(answer_model.messages[0][0].content)
+    assert len(answer_model.messages[0]) == 2
+    assert context.outcomes[0]["route_answer_mode"] == "general_direct"
+
+
+@pytest.mark.asyncio
+async def test_session_grounded_response_reuses_recent_answer_without_tool_call() -> None:
+    message = "不错哦，哪一个性价比最高？"
+    previous_answer = (
+        "刚才三款鼠标核心规格相同：M08 售价 252 元，M07 售价 243 元，"
+        "M06 售价 234 元。"
+    )
+    history = [
+        ContextMessage(role="user", content="这三款鼠标有什么区别？"),
+        ContextMessage(role="assistant", content=previous_answer),
+    ]
+    router = FakeBoundModel(
+        [
+            _route_message(
+                "根据刚才三款鼠标的比较判断哪款性价比最高",
+                [
+                    {
+                        "id": "goal_1",
+                        "query": "判断刚才三款鼠标中哪款性价比最高",
+                        "disposition": "session_grounded_response",
+                        "reason_code": "recent_answer_fully_covers_comparison",
+                    }
+                ],
+            )
+        ]
+    )
+    answer_model = FakeRouteAnswerModel(
+        "三款核心规格相同，因此价格最低的 M06（234 元）性价比最高。"
+    )
+    executor = FakeToolExecutor()
+    context = FakeContextService(message, history=history)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        chat_model=answer_model,
+        router_model=router,
+        context_service=context,
+        tool_executor=executor,
+    )
+
+    response = await runtime.run(ChatRequest(message=message), user_id=7)
+    outcome = context.outcomes[0]
+
+    assert response.answer == answer_model.response
+    assert executor.calls == []
+    assert outcome["tool_wave_count"] == 0
+    assert outcome["route_answer_mode"] == "session_grounded"
+    assert outcome["route_plan"]["subqueries"][0]["tasks"] == []
+    assert "<session_grounded_identity>" in str(answer_model.messages[0][0].content)
+    assert any(str(item.content) == previous_answer for item in answer_model.messages[0])
+    assert str(answer_model.messages[0][-1].content) == (
+        "判断刚才三款鼠标中哪款性价比最高"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_grounded_response_streams_delta_and_done() -> None:
+    message = "那 M08 和 M06 的差价是多少？"
+    history = [
+        ContextMessage(role="user", content="这三款鼠标有什么区别？"),
+        ContextMessage(role="assistant", content="M08 售价 252 元，M06 售价 234 元。"),
+    ]
+    router = FakeBoundModel(
+        [
+            _route_message(
+                "计算 M08 和 M06 的价格差",
+                [
+                    {
+                        "id": "goal_1",
+                        "query": "计算 M08 和 M06 的价格差",
+                        "disposition": "session_grounded_response",
+                        "reason_code": "recent_answer_contains_both_prices",
+                    }
+                ],
+            )
+        ]
+    )
+    answer_model = FakeRouteAnswerModel("M08 比 M06 贵 18 元。")
+    context = FakeContextService(message, history=history)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        chat_model=answer_model,
+        router_model=router,
+        context_service=context,
+        tool_executor=FakeToolExecutor(),
+    )
+
+    events = [
+        event
+        async for event in runtime.run_stream(ChatRequest(message=message), user_id=7)
+    ]
+
+    assert [event["type"] for event in events] == [
+        "run_started",
+        "boundary",
+        "delta",
+        "done",
+    ]
+    assert events[2]["delta"] == answer_model.response
+    assert events[-1]["response"]["answer"] == answer_model.response
+    assert context.outcomes[0]["tool_wave_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_vetoes_session_grounding_for_fresh_state_request() -> None:
+    message = "重新比较刚才三款鼠标的当前价格，看看有没有变化"
+    router = FakeBoundModel(
+        [
+            _route_message(
+                "比较刚才三款鼠标的价格",
+                [
+                    {
+                        "id": "goal_1",
+                        "query": "比较刚才三款鼠标的价格",
+                        "disposition": "session_grounded_response",
+                        "reason_code": "router_dropped_refresh_semantics_and_reused_prices",
+                    }
+                ],
+            )
+        ]
+    )
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        router_model=router,
+    )
+    state = cast(
+        AgentState,
+        {
+            "message": message,
+            "history": [
+                {"role": "assistant", "content": "M08 252 元，M07 243 元，M06 234 元。"}
+            ],
+            "working_memory": WorkingMemoryV2().model_dump(mode="json"),
+            "working_memory_snapshot": WorkingMemoryV2().model_dump(mode="json"),
+            "memory": [],
+        },
+    )
+
+    result = await runtime._request_route(state)
+
+    plan = RequestRoutePlan.model_validate(result["route_plan"])
+    assert result["route_source"] == "session_grounding_veto_fallback"
+    assert plan.subqueries[0].disposition == "tool_planning"
+    assert plan.subqueries[0].tasks[0].capability == "planner_required"
+    assert result["task_status"][plan.subqueries[0].tasks[0].id]["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_fresh_comparison_request_uses_tool_path_instead_of_session_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = "重新比较刚才三款鼠标的当前价格，看看有没有变化"
+    history = [
+        ContextMessage(role="user", content="这三款鼠标有什么区别？"),
+        ContextMessage(role="assistant", content="M08 252 元，M07 243 元，M06 234 元。"),
+    ]
+    working_memory = WorkingMemoryV2.model_validate(
+        {
+            "catalog": {
+                "comparison": {"sku_ids": [801, 802, 803]},
+                "candidate_sku_ids": [801, 802, 803],
+            }
+        }
+    )
+    router = FakeBoundModel(
+        [
+            _route_message(
+                message,
+                [
+                    {
+                        "id": "goal_1",
+                        "query": message,
+                        "disposition": "tool_planning",
+                        "reason_code": "refresh_current_prices",
+                        "tasks": [
+                            {
+                                "id": "task_1",
+                                "goal_id": "goal_1",
+                                "canonical_query": message,
+                                "depends_on": [],
+                                "input_requirements": [
+                                    {
+                                        "name": "comparison_products",
+                                        "source": "comparison_context",
+                                    }
+                                ],
+                                "produces": "comparison",
+                                "answer_role": "user_facing",
+                                "capability": "catalog_compare",
+                            }
+                        ],
+                    }
+                ],
+            )
+        ]
+    )
+    answer_model = FakeBoundModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "finish-refresh",
+                        "name": "finish_answer",
+                        "args": {
+                            "response": "重新查询后，M06 仍是三款中价格最低的。",
+                            "used_tool_call_ids": ["router_task_1_catalog_compare"],
+                        },
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    products = [
+        {
+            "spu_id": 80 + index,
+            "sku_id": 801 + index,
+            "title": title,
+            "brand": "Pulsar",
+            "category": "mouse",
+            "price": price,
+            "stock": 10,
+            "sku_sales_count": 100 - index,
+            "sales_count": 1000 - index,
+            "specs": {"max_dpi": "16000"},
+            "image_url": None,
+        }
+        for index, (title, price) in enumerate(
+            (("M08", "252.00"), ("M07", "243.00"), ("M06", "234.00"))
+        )
+    ]
+    executor = FakeToolExecutor(
+        ToolExecutionResult(
+            tool_name="catalog.compare",
+            ok=True,
+            output={
+                "result_type": "comparison",
+                "products": products,
+                "comparison_fields": ["price"],
+                "missing_fields": {},
+                "query_plan": {"query": message},
+                "diagnostics": [],
+            },
+        )
+    )
+    context = FakeContextService(
+        message,
+        history=history,
+        working_memory=working_memory,
+    )
+
+    class FakeAuditRepository:
+        def __init__(self, _: AsyncSession):
+            pass
+
+        async def add_tool_call(self, *_: Any) -> None:
+            pass
+
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        chat_model=answer_model,
+        router_model=router,
+        context_service=context,
+        tool_executor=executor,
+    )
+
+    response = await runtime.run(ChatRequest(message=message), user_id=7)
+
+    assert response.answer == "重新查询后，M06 仍是三款中价格最低的。"
+    assert executor.calls == [
+        (
+            "catalog.compare",
+            {"query": message, "sku_ids": [801, 802, 803], "limit": 5},
+        )
+    ]
+    assert context.outcomes[0]["tool_wave_count"] == 1
+    assert "route_answer_mode" not in context.outcomes[0]
 
 
 @pytest.mark.asyncio

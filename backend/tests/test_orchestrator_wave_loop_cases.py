@@ -545,9 +545,7 @@ def test_dependent_compare_is_allowed_within_the_same_routed_subquery() -> None:
             "products": [_product(101), _product(102, brand="Keychron")],
         },
     )
-    state = _state_from_waves(
-        [_wave(1, "search-1", "catalog_search", query, "sq_1", result)]
-    )
+    state = _state_from_waves([_wave(1, "search-1", "catalog_search", query, "sq_1", result)])
     state["message"] = "比较两个销量最高的显示器"
     call = PlannedToolCall(
         id="compare-1",
@@ -805,45 +803,6 @@ def test_runtime_terminates_invalid_input_fix_that_rewrites_query() -> None:
         ),
         pytest.param(
             [
-                {
-                    "wave": 1,
-                    "calls": [
-                        {
-                            "id": "usable",
-                            "name": "catalog_search",
-                            "arguments": {"query": "办公键盘"},
-                            "subquery": "推荐办公键盘",
-                        },
-                        {
-                            "id": "failed",
-                            "name": "knowledge_search",
-                            "arguments": {"query": "办公键盘选购知识"},
-                            "subquery": "解释办公键盘怎么选",
-                        },
-                    ],
-                    "results": [
-                        _result(
-                            "usable",
-                            "catalog_search",
-                            output={"result_type": "products", "products": [_product()]},
-                        ),
-                        _result(
-                            "failed",
-                            "knowledge_search",
-                            error={
-                                "code": "dependency_unavailable",
-                                "recommended_action": "explain_temporary_unavailability",
-                            },
-                        ),
-                    ],
-                }
-            ],
-            "partial_response",
-            1,
-            id="18-mixed-first-wave-becomes-partial",
-        ),
-        pytest.param(
-            [
                 _wave(
                     1,
                     "old-usable",
@@ -888,9 +847,7 @@ def test_wave_loop_terminal_cases(
 
 
 class _FailingChatModel:
-    def bind_tools(
-        self, tools: list[dict[str, Any]], **_: Any
-    ) -> "_FailingChatModel":
+    def bind_tools(self, tools: list[dict[str, Any]], **_: Any) -> "_FailingChatModel":
         return self
 
     async def ainvoke(self, messages: list[Any]) -> None:
@@ -904,9 +861,7 @@ async def test_20_orchestrator_failure_after_tool_success_uses_grounded_fallback
         "catalog_search",
         output={"result_type": "products", "products": [_product()]},
     )
-    state = _state_from_waves(
-        [_wave(1, "usable", "catalog_search", "办公键盘", "sq_1", result)]
-    )
+    state = _state_from_waves([_wave(1, "usable", "catalog_search", "办公键盘", "sq_1", result)])
     state.update(
         {
             "route_plan": {

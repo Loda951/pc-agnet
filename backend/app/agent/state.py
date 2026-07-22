@@ -18,6 +18,8 @@ class AgentState(TypedDict, total=False):
     rewritten_query: str
     planned_subqueries: list[dict[str, Any]]
     blocked_subqueries: list[dict[str, Any]]
+    task_status: dict[str, dict[str, Any]]
+    task_artifacts: dict[str, dict[str, Any]]
     intent: str
     decision: dict[str, Any]
     orchestrator_call_count: int
@@ -34,11 +36,13 @@ class AgentState(TypedDict, total=False):
     history: list[dict[str, str]]
     memory: list[dict[str, Any]]
     working_memory: dict[str, Any]
+    working_memory_snapshot: dict[str, Any]
     evidence: list[EvidenceItem]
     products: list[ProductCard]
     catalog_tool_succeeded: bool
     order: OrderCard | None
     answer: str
+    route_answer_mode: str
     suggested_actions: list[dict[str, Any]]
     prepared_turn: PreparedTurn
     applied_memory_ids: list[int]

@@ -1,12 +1,12 @@
 """Tool planning, wave validation, and terminal decision helpers."""
 
 import copy
-import json
 import re
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from app.agent.artifacts import ready_tasks, user_clarifiable_blockers
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall, infer_tool_subquery
 from app.agent.limits import MAX_TOOL_WAVES
 from app.agent.outcomes import (
@@ -27,7 +27,11 @@ from app.agent.responses import (
     _latest_successful_tool_output,
     _usable_tool_call_ids,
 )
-from app.agent.routing import RoutedSubquery, ready_tool_subqueries, tool_planning_subqueries
+from app.agent.routing import (
+    RoutedTask,
+    tool_planning_subqueries,
+    user_facing_tasks,
+)
 from app.agent.state import AgentState
 from app.tools.contracts import LLM_SAFE_TOOL_NAMES, ToolContract
 
@@ -35,25 +39,29 @@ from app.tools.contracts import LLM_SAFE_TOOL_NAMES, ToolContract
 def _orchestrator_messages(
     state: AgentState,
     call_count: int,
-) -> list[SystemMessage | HumanMessage | AIMessage | ToolMessage]:
-    messages: list[SystemMessage | HumanMessage | AIMessage | ToolMessage] = [
+) -> list[SystemMessage | HumanMessage | AIMessage]:
+    messages: list[SystemMessage | HumanMessage | AIMessage] = [
         SystemMessage(
             content=build_orchestrator_system_prompt(
                 tool_waves=state.get("tool_waves", []),
                 tool_results=state.get("tool_results", []),
+                answer_phase=not _planner_requires_business_tools(state),
             )
         )
     ]
+    planning_phase = _planner_requires_business_tools(state)
     routed_subqueries = [
         {
             "id": item.id,
-            "canonical_query": item.query,
+            "goal_id": item.goal_id,
+            "canonical_query": item.canonical_query,
             "depends_on": item.depends_on,
             "input_requirements": [
-                requirement.model_dump(mode="json")
-                for requirement in item.input_requirements
+                requirement.model_dump(mode="json") for requirement in item.input_requirements
             ],
             "produces": item.produces,
+            "answer_role": item.answer_role,
+            "capability": item.capability,
             "result_selector": (
                 item.result_selector.model_dump(mode="json")
                 if item.result_selector is not None
@@ -70,40 +78,13 @@ def _orchestrator_messages(
                 orchestrator_call_count=call_count,
                 memory_context=None,
                 routed_subqueries=routed_subqueries,
-                subquery_ledger=state.get("subquery_ledger", []),
+                subquery_ledger=None if planning_phase else state.get("subquery_ledger", []),
+                task_status=None if planning_phase else state.get("task_status", {}),
+                task_artifacts=None if planning_phase else state.get("task_artifacts", {}),
                 terminal_guard_feedback=state.get("terminal_guard_feedback"),
             )
         )
     )
-    for wave in state.get("tool_waves", []):
-        messages.append(
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": call["id"],
-                        "name": call["name"],
-                        "args": {
-                            **call["arguments"],
-                            "subquery": (
-                                str(call.get("subquery") or "").strip()
-                                or infer_tool_subquery(call["name"], call["arguments"])
-                            ),
-                        },
-                        "type": "tool_call",
-                    }
-                    for call in wave.get("calls", [])
-                ],
-            )
-        )
-        for result in wave.get("results", []):
-            messages.append(
-                ToolMessage(
-                    content=json.dumps(result["execution"], ensure_ascii=False),
-                    tool_call_id=result["tool_call_id"],
-                    name=result["name"],
-                )
-            )
     return messages
 
 
@@ -136,8 +117,8 @@ def _orchestrator_business_tool_definition(contract: ToolContract) -> dict[str, 
         "minLength": 1,
         "maxLength": 300,
         "description": (
-            "Copy the sq_n ID of exactly one routed subquery. Do not invent, rewrite, merge, "
-            "or split routed subqueries. Keep the same ID across dependent or recovery waves."
+            "Copy the task_n ID of exactly one ready Task (legacy sq_n is accepted). Do not "
+            "invent, rewrite, merge, or split routed Tasks."
         ),
     }
     required = parameters.setdefault("required", [])
@@ -161,13 +142,15 @@ def _constrain_calls_to_route_plan(
         if (
             subquery is None
             and only_routed is not None
-            and not re.fullmatch(r"sq_\d+", raw_subquery, flags=re.IGNORECASE)
+            and not re.fullmatch(r"(?:sq|task)_\d+", raw_subquery, flags=re.IGNORECASE)
         ):
             # When only one admitted task exists, a missing subquery ID is unambiguous. Older
             # model responses may contain an inferred natural-language label here instead of
-            # the sq_n metadata. Explicit unknown sq_n IDs remain rejected.
+            # the Task metadata. Explicit unknown Task IDs remain rejected.
             subquery = only_routed
         if subquery is None:
+            continue
+        if subquery.capability not in {"planner_required", call.name}:
             continue
         arguments = dict(call.arguments)
         # The Router owns query rewrite. Never ask the model to reproduce trusted canonical
@@ -255,52 +238,67 @@ def _planner_requires_business_tools(state: AgentState) -> bool:
     if _ready_unattempted_tool_subqueries(state):
         return True
 
-    active_ledger = [
+    return False
+
+
+def _deterministic_recovery_decision(state: AgentState) -> OrchestratorDecision | None:
+    """Compile the only automatic recovery: one byte-equivalent retry when allowed."""
+    if state.get("tool_wave_count", 0) >= MAX_TOOL_WAVES:
+        return None
+    ledger = [
         entry
         for entry in state.get("subquery_ledger", [])
-        if is_active_ledger_entry(entry)
+        if isinstance(entry, dict)
+        and is_active_ledger_entry(entry)
+        and entry.get("outcome") == "error"
     ]
-    if any(entry.get("status") == "failed" for entry in active_ledger):
-        return True
-
-    return any(
-        entry.get("tool_name") == "order_lookup"
-        and entry.get("result_type") == "order_candidates"
-        for entry in active_ledger
-    )
-
-
-def _task_execution_sets(state: AgentState) -> tuple[set[str], set[str]]:
-    usable: set[str] = set()
-    attempted: set[str] = set()
-    for entry in state.get("subquery_ledger", []):
-        if not isinstance(entry, dict) or not is_active_ledger_entry(entry):
+    for entry in reversed(ledger):
+        call_id = str(entry.get("tool_call_id") or "")
+        result = _tool_result_by_call_id(state, call_id)
+        error = result.get("execution", {}).get("error", {}) if result else {}
+        if not isinstance(error, dict):
             continue
-        task_id = str(entry.get("subquery") or "").strip()
-        if not task_id:
+        code = str(error.get("code") or "execution_error")
+        action = str(error.get("recommended_action") or "")
+        if not action:
+            action = "retry_once" if code == "timeout" else "stop"
+        if action != "retry_once":
             continue
-        attempted.add(task_id)
-        if entry.get("outcome") == "usable" and entry.get("has_usable_information"):
-            usable.add(task_id)
-    return usable, attempted
+        fingerprint = str(entry.get("fingerprint") or "")
+        failures = sum(
+            item.get("outcome") == "error" and str(item.get("fingerprint") or "") == fingerprint
+            for item in state.get("subquery_ledger", [])
+            if isinstance(item, dict)
+        )
+        if failures >= 2:
+            continue
+        return OrchestratorDecision(
+            type="tool_calls",
+            reason="deterministic_retry_once",
+            tool_calls=[
+                PlannedToolCall(
+                    id=f"retry_{call_id}",
+                    name=str(entry.get("tool_name") or ""),
+                    arguments=dict(entry.get("arguments") or {}),
+                    subquery=str(entry.get("subquery") or ""),
+                    canonical_query=str(entry.get("canonical_query") or ""),
+                    tool_query=str((entry.get("arguments") or {}).get("query") or ""),
+                )
+            ],
+        )
+    return None
 
 
-def _ready_unattempted_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
-    usable, attempted = _task_execution_sets(state)
-    return ready_tool_subqueries(
-        state.get("route_plan"),
-        usable_task_ids=usable,
-        attempted_task_ids=attempted,
-    )
+def _ready_unattempted_tool_subqueries(state: AgentState) -> list[RoutedTask]:
+    return ready_tasks(state)
 
 
-def _admissible_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
+def _admissible_tool_subqueries(state: AgentState) -> list[RoutedTask]:
     ready = _ready_unattempted_tool_subqueries(state)
     recoverable_ids = {
         str(entry.get("subquery") or "").strip()
         for entry in state.get("subquery_ledger", [])
-        if is_active_ledger_entry(entry)
-        and entry.get("status") in {"failed", "needs_replan"}
+        if is_active_ledger_entry(entry) and entry.get("status") in {"failed", "needs_replan"}
     }
     recoverable_ids.update(
         str(entry.get("subquery") or "").strip()
@@ -309,31 +307,25 @@ def _admissible_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
         and entry.get("tool_name") == "order_lookup"
         and entry.get("result_type") == "order_candidates"
     )
-    by_id = {
-        item.id: item for item in tool_planning_subqueries(state.get("route_plan"))
-    }
+    by_id = {item.id: item for item in tool_planning_subqueries(state.get("route_plan"))}
     return [*ready, *(by_id[item_id] for item_id in recoverable_ids if item_id in by_id)]
 
 
-def _prompt_tool_subqueries(state: AgentState) -> list[RoutedSubquery]:
-    if not state.get("tool_waves") or _planner_requires_business_tools(state):
-        return _admissible_tool_subqueries(state)
+def _prompt_tool_subqueries(state: AgentState) -> list[RoutedTask]:
+    if _planner_requires_business_tools(state):
+        return _ready_unattempted_tool_subqueries(state)
     return tool_planning_subqueries(state.get("route_plan"))
 
 
 def _all_planned_subqueries_usable(state: AgentState) -> bool:
-    """Return whether every routed Tool task has active usable evidence."""
-    routed_ids = {
-        item.id for item in tool_planning_subqueries(state.get("route_plan"))
-    }
+    """Return whether every user-facing Task has a usable extracted artifact."""
+    routed_ids = {item.id for item in user_facing_tasks(state.get("route_plan"))}
     if not routed_ids:
         return False
     usable_ids = {
-        str(entry.get("subquery") or "").strip()
-        for entry in state.get("subquery_ledger", [])
-        if is_active_ledger_entry(entry)
-        and entry.get("outcome") == "usable"
-        and entry.get("has_usable_information")
+        task_id
+        for task_id, item in state.get("task_status", {}).items()
+        if isinstance(item, dict) and item.get("status") == "succeeded"
     }
     return routed_ids <= usable_ids
 
@@ -362,9 +354,9 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
 
     latest = matching[-1]
     if query_fingerprint(call.arguments.get("query")) != str(
-        latest.get("query_fingerprint") or query_fingerprint(
-            latest.get("canonical_query")
-            or latest.get("arguments", {}).get("query")
+        latest.get("query_fingerprint")
+        or query_fingerprint(
+            latest.get("canonical_query") or latest.get("arguments", {}).get("query")
         )
     ):
         return False
@@ -436,9 +428,7 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         }
         if len(normalized_sku_ids) < 2:
             return False
-        trusted_sku_ids = _active_catalog_search_sku_ids(state) | _context_catalog_sku_ids(
-            state
-        )
+        trusted_sku_ids = _active_catalog_search_sku_ids(state) | _context_catalog_sku_ids(state)
         return normalized_sku_ids <= trusted_sku_ids
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
@@ -514,7 +504,8 @@ def _active_catalog_search_sku_ids(state: AgentState) -> set[int]:
 
 
 def _context_catalog_sku_ids(state: AgentState) -> set[int]:
-    catalog = state.get("working_memory", {}).get("catalog")
+    snapshot = state.get("working_memory_snapshot") or state.get("working_memory", {})
+    catalog = snapshot.get("catalog")
     if not isinstance(catalog, dict):
         return set()
     values = catalog.get("candidate_sku_ids")
@@ -522,11 +513,7 @@ def _context_catalog_sku_ids(state: AgentState) -> set[int]:
     referenced = catalog.get("referenced_sku_id")
     if referenced is not None:
         candidates = [referenced, *candidates]
-    return {
-        value
-        for value in candidates
-        if isinstance(value, int) and not isinstance(value, bool)
-    }
+    return {value for value in candidates if isinstance(value, int) and not isinstance(value, bool)}
 
 
 def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] | None:
@@ -537,25 +524,12 @@ def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] |
 
 
 def _unresolved_initial_subqueries(state: AgentState) -> list[str]:
-    ledger = state.get("subquery_ledger", [])
-    initial = {
-        item.id.casefold(): item.query
-        for item in tool_planning_subqueries(state.get("route_plan"))
-    } or {
-        str(entry.get("subquery") or "").strip().casefold(): str(
-            entry.get("subquery") or ""
-        ).strip()
-        for entry in ledger
-        if entry.get("wave") == 1 and str(entry.get("subquery") or "").strip()
-    }
-    resolved = {
-        str(entry.get("subquery") or "").strip().casefold()
-        for entry in ledger
-        if is_active_ledger_entry(entry)
-        and entry.get("has_usable_information")
-        and str(entry.get("subquery") or "").strip()
-    }
-    return [label for key, label in initial.items() if key not in resolved]
+    statuses = state.get("task_status", {})
+    return [
+        item.canonical_query
+        for item in user_facing_tasks(state.get("route_plan"))
+        if statuses.get(item.id, {}).get("status") != "succeeded"
+    ]
 
 
 def _clarification_decision(response: str, reason: str) -> OrchestratorDecision:
@@ -622,7 +596,8 @@ def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDeci
         if unresolved:
             response = (
                 f"{response}\n\n"
-                f"暂时未能完成：{'、'.join(unresolved)}。你可以稍后重试或补充更具体的信息。"
+                f"暂时未能完成：{'、'.join(unresolved)}。"
+                "你可以稍后重试或补充更具体的信息。"
             )
             return OrchestratorDecision(
                 type="partial_response",
@@ -645,12 +620,21 @@ def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDeci
             response=_fallback_unavailable_answer(state),
             reason=reason,
             control_action="finish_unavailable",
-            unavailable_parts=_unresolved_initial_subqueries(state)
-            or ["请求所需的业务信息"],
+            unavailable_parts=_unresolved_initial_subqueries(state) or ["请求所需的业务信息"],
         )
-    return _clarification_decision(
-        "我还不能准确判断你的需求。请补充具体商品、订单或想咨询的问题。",
-        reason,
+    blockers = user_clarifiable_blockers(state)
+    if blockers:
+        missing = blockers[0].get("missing_information") or ["具体商品或订单信息"]
+        return _clarification_decision(
+            f"请补充{str(missing[0])}，我再继续查询。",
+            reason,
+        )
+    return OrchestratorDecision(
+        type="unavailable_response",
+        response="当前无法可靠完成这项查询，请稍后重试。",
+        reason=reason,
+        control_action="finish_unavailable",
+        unavailable_parts=_unresolved_initial_subqueries(state) or ["请求所需的业务信息"],
     )
 
 
@@ -673,9 +657,8 @@ def _tag_from_decision(
     if tool_names:
         previous_tool_names = (
             current_tag.split(" + ")
-            if current_tag and all(
-                self_name in LLM_SAFE_TOOL_NAMES for self_name in current_tag.split(" + ")
-            )
+            if current_tag
+            and all(self_name in LLM_SAFE_TOOL_NAMES for self_name in current_tag.split(" + "))
             else []
         )
         return " + ".join(dict.fromkeys([*previous_tool_names, *tool_names]))

@@ -324,13 +324,24 @@ def validate_terminal_decision(
     ledger: Sequence[Mapping[str, Any]],
     *,
     planned_subquery_ids: Sequence[str] = (),
+    clarification_allowed: bool = False,
+    resolved_task_ids: Sequence[str] | None = None,
+    usable_artifact_tool_call_ids: Sequence[str] | None = None,
 ) -> TerminalValidation:
     action = decision.control_action
     if decision.type == "invalid" or action is None:
         return TerminalValidation(valid=False, reason="missing_or_invalid_control_action")
 
     active_entries = [entry for entry in ledger if is_active_ledger_entry(entry)]
-    usable_ids = set(active_usable_tool_call_ids(ledger))
+    usable_ids = (
+        {
+            str(call_id)
+            for call_id in usable_artifact_tool_call_ids
+            if str(call_id)
+        }
+        if usable_artifact_tool_call_ids is not None
+        else set(active_usable_tool_call_ids(ledger))
+    )
     active_ids = {str(entry.get("tool_call_id")) for entry in active_entries}
     used_ids = set(decision.used_tool_call_ids)
 
@@ -343,12 +354,20 @@ def validate_terminal_decision(
         for entry in ledger
         if entry.get("wave") == 1 and str(entry.get("subquery") or "").strip()
     }
-    resolved_subqueries = {
-        str(entry.get("subquery") or "").strip().casefold()
-        for entry in active_entries
-        if entry.get("has_usable_information")
-        and str(entry.get("subquery") or "").strip()
-    }
+    resolved_subqueries = (
+        {
+            str(task_id).strip().casefold()
+            for task_id in resolved_task_ids
+            if str(task_id).strip()
+        }
+        if resolved_task_ids is not None
+        else {
+            str(entry.get("subquery") or "").strip().casefold()
+            for entry in active_entries
+            if entry.get("has_usable_information")
+            and str(entry.get("subquery") or "").strip()
+        }
+    )
     all_initial_subqueries_resolved = initial_subqueries <= resolved_subqueries
 
     if action == "ask_clarification":
@@ -358,8 +377,8 @@ def validate_terminal_decision(
                 reason="clarification_cannot_discard_usable_tool_results",
             )
         return _terminal_validation(
-            decision.type == "clarification",
-            "invalid_clarification_action",
+            decision.type == "clarification" and clarification_allowed,
+            "clarification_requires_user_suppliable_missing_artifact",
         )
     if action == "finish_answer":
         valid = (

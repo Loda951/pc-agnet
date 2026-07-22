@@ -2,6 +2,7 @@ from typing import cast
 
 import pytest
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.graph import AgentRuntime, _suggest_actions
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -33,6 +34,7 @@ async def test_product_route_only_uses_current_message() -> None:
             "tool_results": [],
         },
     )
+    initialize_task_runtime(state)
     decision = runtime._fallback_planner_decision(state)
 
     tool_input = decision.tool_calls[0].arguments
@@ -56,6 +58,7 @@ async def test_order_route_only_uses_explicit_order_id() -> None:
             "tool_results": [],
         },
     )
+    initialize_task_runtime(state)
     decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"

@@ -26,6 +26,16 @@ async def execute_tool_wave(
     writer = stream_writer_factory()
     calls: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
+    next_wave = state.get("tool_wave_count", 0) + 1
+
+    for planned_call in decision.tool_calls:
+        task_state = state.setdefault("task_status", {}).get(planned_call.subquery)
+        if isinstance(task_state, dict):
+            task_state.update(
+                status="running",
+                reason="tool_call_dispatched",
+                wave=next_wave,
+            )
 
     for planned_call in decision.tool_calls:
         call = planned_call
@@ -129,7 +139,7 @@ async def execute_tool_wave(
         apply_tool_output(state, call, execution)
 
     wave = {
-        "wave": state.get("tool_wave_count", 0) + 1,
+        "wave": next_wave,
         "calls": calls,
         "results": results,
     }

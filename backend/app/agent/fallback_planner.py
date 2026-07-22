@@ -2,23 +2,21 @@
 
 from typing import Any
 
+from app.agent.artifacts import user_clarifiable_blockers
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall
 from app.agent.intent import classify_intent, extract_order_id
-from app.agent.limits import MAX_TOOL_WAVES
 from app.agent.responses import (
     _fallback_answer,
     _fallback_catalog_facets_arguments,
     _fallback_unavailable_answer,
-    _latest_successful_tool_output,
     _usable_tool_call_ids,
 )
 from app.agent.route_runtime import _resolve_compare_sku_ids, _resolve_order_id
-from app.agent.routing import RoutedSubquery, tool_planning_subqueries
+from app.agent.routing import RoutedTask
 from app.agent.state import AgentState
 from app.agent.tool_loop import (
     _clarification_decision,
     _ready_unattempted_tool_subqueries,
-    _tool_decision,
 )
 
 
@@ -28,24 +26,6 @@ def fallback_planner_decision(runtime: Any, state: AgentState) -> OrchestratorDe
         ready_tasks = _ready_unattempted_tool_subqueries(state)
         if ready_tasks:
             return fallback_routed_tool_decision(runtime, state, ready_tasks)
-        order_output = _latest_successful_tool_output(state, "order_lookup")
-        order_candidates = (
-            order_output.get("candidates")
-            if isinstance(order_output, dict)
-            else None
-        )
-        if (
-            not state.get("order")
-            and state.get("tool_wave_count", 0) < MAX_TOOL_WAVES
-            and isinstance(order_candidates, list)
-            and order_candidates
-            and isinstance(order_candidates[0], dict)
-            and order_candidates[0].get("id") is not None
-        ):
-            return _tool_decision(
-                "order_lookup",
-                {"order_id": order_candidates[0]["id"], "limit": 1},
-            )
         usable_ids = _usable_tool_call_ids(state)
         if usable_ids:
             return OrchestratorDecision(
@@ -63,9 +43,16 @@ def fallback_planner_decision(runtime: Any, state: AgentState) -> OrchestratorDe
             unavailable_parts=["请求所需的业务信息"],
         )
 
-    routed_subqueries = tool_planning_subqueries(state.get("route_plan"))
+    routed_subqueries = _ready_unattempted_tool_subqueries(state)
     if routed_subqueries:
         return fallback_routed_tool_decision(runtime, state, routed_subqueries)
+    blockers = user_clarifiable_blockers(state)
+    if blockers:
+        missing = blockers[0].get("missing_information") or ["具体商品或订单信息"]
+        return _clarification_decision(
+            f"请补充{str(missing[0])}，我再继续查询。",
+            "runtime_missing_user_suppliable_artifact",
+        )
     return _clarification_decision(
         "我还不能准确判断需要查询的业务信息，请补充具体商品、订单或政策问题。",
         "routed_fallback_without_tool_subquery",
@@ -74,7 +61,7 @@ def fallback_planner_decision(runtime: Any, state: AgentState) -> OrchestratorDe
 def fallback_routed_tool_decision(
     runtime: Any,
     state: AgentState,
-    subqueries: list[RoutedSubquery],
+    subqueries: list[RoutedTask],
 ) -> OrchestratorDecision:
     calls: list[PlannedToolCall] = []
     for subquery in subqueries:
@@ -87,7 +74,7 @@ def fallback_routed_tool_decision(
             intent = classify_intent(query)
             if intent == "product_recommendation":
                 compare_sku_ids = _resolve_compare_sku_ids(
-                    state["message"], state.get("working_memory", {})
+                    state["message"], state.get("working_memory_snapshot", {})
                 )
                 if compare_sku_ids:
                     name = "catalog_compare"
@@ -106,7 +93,7 @@ def fallback_routed_tool_decision(
                     "order_id": _resolve_order_id(
                         query,
                         extract_order_id(query),
-                        state.get("working_memory", {}),
+                        state.get("working_memory_snapshot", {}),
                         runtime.memory_service,
                     ),
                     "limit": 1,

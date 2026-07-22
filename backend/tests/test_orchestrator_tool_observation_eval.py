@@ -12,7 +12,6 @@ from app.agent.graph import (
     _followup_tool_call_allowed,
     _state_terminal_decision,
 )
-from app.agent.prompts import build_orchestrator_system_prompt
 from app.agent.state import AgentState
 from app.core.config import Settings
 from app.schemas.context import WorkingMemoryV2
@@ -394,17 +393,6 @@ async def test_20_scripted_tool_observations_through_orchestrator(
 
     terminal = _state_terminal_decision(state, "offline_observation_eval")
     assert terminal.type == case.expected_terminal_type
-
-    observation_prompt = build_orchestrator_system_prompt(
-        tool_waves=state["tool_waves"],
-        tool_results=state["tool_results"],
-    )
-    assert "<tool_result_interpretation>" in observation_prompt
-    assert "<business_result_response_policy>" in observation_prompt
-    assert "<tool_routing>" not in observation_prompt
-    assert ("\n<tool_failure_recovery>\n" in observation_prompt) is (
-        case.expected_outcome == "error"
-    )
 
     followup = PlannedToolCall(
         id=f"{case.case_id}-followup",

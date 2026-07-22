@@ -46,6 +46,9 @@ def apply_tool_output(
 
 def rebuild_tool_projections(state: AgentState) -> None:
     """Rebuild compatibility state from active observations instead of the latest call."""
+    if "task_artifacts" in state:
+        _rebuild_from_task_artifacts(state)
+        return
     active_ids = {
         str(entry.get("tool_call_id"))
         for entry in state.get("subquery_ledger", [])
@@ -116,6 +119,63 @@ def rebuild_tool_projections(state: AgentState) -> None:
     parsed["order_candidates"] = order_candidates
     if saw_catalog_result:
         state["catalog_tool_succeeded"] = catalog_completed
+
+
+def _rebuild_from_task_artifacts(state: AgentState) -> None:
+    """Project only usable run-local artifacts into the legacy API/memory fields."""
+    products: list[ProductCard] = []
+    seen_sku_ids: set[int] = set()
+    evidence: list[EvidenceItem] = []
+    order: OrderCard | None = None
+    order_candidates: list[dict[str, Any]] = []
+    parsed = state.setdefault("parsed", {})
+    parsed.pop("product_search", None)
+    parsed.pop("catalog_comparison", None)
+    parsed.pop("order_candidates", None)
+    saw_catalog = False
+
+    for artifact in state.get("task_artifacts", {}).values():
+        if not isinstance(artifact, dict) or not artifact.get("usable"):
+            continue
+        value = artifact.get("value")
+        if not isinstance(value, dict):
+            continue
+        tool_name = str(artifact.get("source_tool_name") or "")
+        call_id = str(artifact.get("source_tool_call_id") or "")
+        if tool_name in {"catalog_search", "catalog_compare"}:
+            saw_catalog = True
+            for item in value.get("products", []):
+                product = ProductCard.model_validate(item)
+                if product.sku_id in seen_sku_ids:
+                    continue
+                seen_sku_ids.add(product.sku_id)
+                products.append(product)
+            if tool_name == "catalog_search":
+                parsed["product_search"] = value.get("query_plan") or {}
+            else:
+                parsed["catalog_comparison"] = {
+                    "query": tool_call_arguments(state, call_id).get("query"),
+                    "sku_ids": value.get("selected_sku_ids") or [],
+                    "comparison_fields": value.get("comparison_fields") or [],
+                }
+        elif tool_name in {"policy_search", "knowledge_search"}:
+            evidence.extend(
+                EvidenceItem.model_validate(item)
+                for item in value.get("documents", [])
+            )
+        elif tool_name == "order_lookup":
+            if value.get("order"):
+                order = OrderCard.model_validate(value["order"])
+            candidates = value.get("candidates")
+            if isinstance(candidates, list):
+                order_candidates = candidates
+
+    state["products"] = products
+    state["evidence"] = dedupe_evidence(evidence)
+    state["order"] = order
+    parsed["order_candidates"] = order_candidates
+    if saw_catalog:
+        state["catalog_tool_succeeded"] = True
 
 
 def _catalog_execution_completed(execution: dict[str, Any]) -> bool:

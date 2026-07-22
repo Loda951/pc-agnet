@@ -3,7 +3,8 @@
 TOOL_INPUT_PROTOCOL = """
 - 原生 Tool schema 是工具名、字段名、类型、枚举和必填项的唯一依据；不得翻译字段名、创造别名
   或填写 schema 未声明的字段。
-- `subquery` 必须复制当前 ready task 的 `sq_n` ID。canonical query 由 Runtime 根据该 ID 读取，
+- `subquery` 必须复制当前 ready Task 的 `task_n` ID（兼容旧 `sq_n`）。canonical query 由 Runtime
+  根据该 ID 读取，
   并派生 Tool 的 `query`；Planner 不输出 query，也不得重新拆分、合并或补充其他 task 的条件。
 - 只填写公开 schema 要求的必要信息，不要生成或覆盖 Tool 内部查询计划。
 - 每个 Tool Call 只服务一个 ready task；相互独立且必要的 ready task 应放在同一 wave。不得提前

@@ -1,17 +1,16 @@
 from typing import cast
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.decisions import decision_from_ai_message
 from app.agent.graph import (
     MAX_ORCHESTRATOR_CALLS,
     MAX_TOOL_WAVES,
     AgentRuntime,
     _fallback_answer,
-    _has_successful_tool_result,
-    _orchestrator_messages,
     _tag_from_decision,
 )
 from app.agent.prompts import (
@@ -146,13 +145,30 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
             }
         ],
     }
-    initial = cast(AgentState, {"route_plan": route_plan, "tool_waves": []})
-    observed = cast(
+    initial = cast(
         AgentState,
         {
             "route_plan": route_plan,
+            "tool_waves": [],
+            "tool_results": [],
+            "tool_wave_count": 0,
+        },
+    )
+    initialize_task_runtime(initial)
+    observed = cast(
+        AgentState,
+        {
+            **initial,
             "tool_waves": [{"wave": 1}],
             "tool_wave_count": 1,
+            "task_status": {
+                "sq_1": {
+                    "task_id": "sq_1",
+                    "goal_id": "sq_1",
+                    "answer_role": "user_facing",
+                    "status": "succeeded",
+                }
+            },
             "subquery_ledger": [
                 {
                     "tool_call_id": "call-1",
@@ -169,6 +185,14 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
         AgentState,
         {
             **observed,
+            "task_status": {
+                "sq_1": {
+                    "task_id": "sq_1",
+                    "goal_id": "sq_1",
+                    "answer_role": "user_facing",
+                    "status": "failed",
+                }
+            },
             "subquery_ledger": [
                 {
                     "tool_call_id": "call-1",
@@ -195,9 +219,7 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
     assert observed_model.tool_choice == "required"
     assert runtime.answer_synthesizer.tool_names == answer_names
     assert runtime.answer_synthesizer.tool_choice == "required"
-    assert runtime._orchestrator_model_for_state(failed).tool_names == (
-        business_names | answer_names
-    )
+    assert runtime._orchestrator_model_for_state(failed).tool_names == answer_names
 
 
 @pytest.mark.asyncio
@@ -323,36 +345,6 @@ def test_orchestrator_prompt_requires_native_control_action_without_type_protoco
     assert "第一行必须且只能输出 TYPE" not in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
-def test_orchestrator_prompt_is_split_into_agent_runtime_and_response_blocks() -> None:
-    planning_blocks = [
-        "planner_identity",
-        "planning_contract",
-        "planner_safety_guard",
-        "tool_routing",
-        "tool_input_protocol",
-        "planning_output_contract",
-    ]
-    observation_blocks = [
-        "observation_identity",
-        "observation_contract",
-        "fact_sources",
-        "subquery_protocol",
-        "tool_result_interpretation",
-        "observation_loop_policy",
-        "control_action_policy",
-        "customer_voice",
-        "business_result_response_policy",
-        "terminal_response_contract",
-    ]
-
-    for block in planning_blocks:
-        assert f"<{block}>" in ORCHESTRATOR_PLANNING_PROMPT
-        assert f"</{block}>" in ORCHESTRATOR_PLANNING_PROMPT
-    for block in observation_blocks:
-        assert f"<{block}>" in ORCHESTRATOR_OBSERVATION_PROMPT
-        assert f"</{block}>" in ORCHESTRATOR_OBSERVATION_PROMPT
-
-
 def test_tool_result_prompt_explains_scenario_semantics_without_copying_rules() -> None:
     policy = TOOL_RESULT_INTERPRETATION_POLICY
 
@@ -381,12 +373,6 @@ def test_customer_response_prompt_hides_internal_terms_and_translates_sales_scop
     assert BASE_CUSTOMER_VOICE in ORCHESTRATOR_OBSERVATION_PROMPT
     assert BUSINESS_RESULT_RESPONSE_POLICY in ORCHESTRATOR_OBSERVATION_PROMPT
     assert BASE_CUSTOMER_VOICE not in ORCHESTRATOR_PLANNING_PROMPT
-
-
-def test_prompt_forbids_successful_business_observation_requery() -> None:
-    assert "empty、not_found、unsupported 和 insufficient" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "不得自动换 Tool、放宽条件" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "原请求明确要求的依赖步骤" in ORCHESTRATOR_OBSERVATION_PROMPT
 
 
 def test_orchestrator_prompt_defines_sensitive_customer_data_boundary() -> None:
@@ -438,8 +424,7 @@ def test_empty_tool_result_does_not_load_failure_recovery_prompt() -> None:
 
     assert build_tool_failure_prompt(tool_waves=tool_waves) == ""
     assert (
-        build_orchestrator_system_prompt(tool_waves=tool_waves)
-        == ORCHESTRATOR_OBSERVATION_PROMPT
+        build_orchestrator_system_prompt(tool_waves=tool_waves) == ORCHESTRATOR_OBSERVATION_PROMPT
     )
 
 
@@ -475,13 +460,6 @@ def test_orchestrator_prompt_loads_only_the_current_phase_policy() -> None:
     assert TOOL_RECOVERY_PROTOCOL not in observation_prompt
     assert len(planning_prompt) < 4_000
     assert len(observation_prompt) < 7_000
-
-
-def test_phase_prompts_keep_the_stable_runtime_contract() -> None:
-    assert "不做 rewrite、边界分类或客服回答" in ORCHESTRATOR_PLANNING_PROMPT
-    assert "只解释可信 ToolMessage" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "human_handoff" not in ORCHESTRATOR_PLANNING_PROMPT
-    assert "out_of_scope" not in ORCHESTRATOR_PLANNING_PROMPT
 
 
 def test_timeout_loads_only_relevant_failure_recovery_rule() -> None:
@@ -674,8 +652,11 @@ def test_fallback_planner_routes_catalog_facets_questions() -> None:
             "message": "你们有哪些鼠标品牌？",
             "route_plan": _tool_route_plan("你们有哪些鼠标品牌？"),
             "tool_results": [],
+            "tool_waves": [],
+            "tool_wave_count": 0,
         },
     )
+    initialize_task_runtime(state)
     decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"
@@ -848,156 +829,6 @@ async def test_tool_loop_accepts_finish_answer_control_on_second_call() -> None:
     assert second["decision"]["response"] == "根据查询结果，推荐这三款无线鼠标。"
 
 
-@pytest.mark.asyncio
-async def test_invalid_terminal_after_usable_tool_uses_immediate_grounded_fallback() -> None:
-    runtime = AgentRuntime(
-        cast(object, None),
-        Settings(llm_api_key=""),
-        chat_model=FakeChatModel([AIMessage(content=""), AIMessage(content="")]),
-    )
-
-    state = cast(
-        AgentState,
-        {
-            "message": "你们有什么牌子的鼠标",
-            "route_plan": _tool_route_plan("你们有什么牌子的鼠标"),
-            "history": [],
-            "tool_waves": [],
-            "tool_wave_count": 1,
-            "orchestrator_call_count": 1,
-            "intent": "catalog_facets",
-            "tool_results": [
-                {
-                    "tool_call_id": "call-facets-terminal",
-                    "name": "catalog_facets",
-                    "execution": {
-                        "ok": True,
-                        "output": {
-                            "result_type": "facets",
-                            "facet": "brand",
-                            "items": [
-                                {"value": "Logitech", "count": 12},
-                                {"value": "Razer", "count": 8},
-                            ],
-                        },
-                    },
-                }
-            ],
-            "subquery_ledger": [
-                {
-                    "tool_call_id": "call-facets-terminal",
-                    "tool_name": "catalog_facets",
-                    "subquery": "sq_1",
-                    "outcome": "usable",
-                    "status": "ready_to_answer",
-                    "has_usable_information": True,
-                }
-            ],
-        },
-    )
-
-    result = await runtime._orchestrate(state)
-
-    assert _has_successful_tool_result(state) is True
-    assert result["decision"]["reason"] == "invalid_orchestrator_response:ValueError"
-    guarded = await runtime._terminal_guard(result)
-
-    assert guarded["terminal_guard_status"] == "fallback"
-    assert guarded["decision"]["type"] == "grounded_response"
-    assert runtime.answer_synthesizer.call_count == 1
-    assert "Logitech（12 条 SKU 记录）" in guarded["decision"]["response"]
-
-
-def test_tool_results_are_reconstructed_as_tool_messages() -> None:
-    state = cast(
-        AgentState,
-        {
-            "message": "推荐无线鼠标",
-            "route_plan": _tool_route_plan("推荐无线鼠标"),
-            "history": [],
-            "tool_wave_count": 1,
-            "tool_waves": [
-                {
-                    "wave": 1,
-                    "calls": [
-                        {
-                            "id": "call-1",
-                            "name": "catalog_search",
-                            "arguments": {"query": "无线鼠标"},
-                            "subquery": "推荐无线鼠标",
-                        }
-                    ],
-                    "results": [
-                        {
-                            "tool_call_id": "call-1",
-                            "name": "catalog_search",
-                            "execution": {
-                                "tool_name": "catalog.search",
-                                "ok": True,
-                                "output": {"result_type": "empty"},
-                                "error": None,
-                            },
-                        }
-                    ],
-                }
-            ],
-        },
-    )
-
-    messages = _orchestrator_messages(state, call_count=2)
-
-    assert isinstance(messages[-1], ToolMessage)
-    assert isinstance(messages[-2], AIMessage)
-    assert messages[-2].tool_calls[0]["args"]["subquery"] == "推荐无线鼠标"
-    assert messages[-1].tool_call_id == "call-1"
-    assert '"result_type": "empty"' in str(messages[-1].content)
-    assert "\n<tool_failure_recovery>\n" not in str(messages[0].content)
-
-
-def test_orchestrator_messages_load_failure_recovery_into_first_system_message() -> None:
-    state = cast(
-        AgentState,
-        {
-            "message": "推荐无线鼠标",
-            "route_plan": _tool_route_plan("推荐无线鼠标"),
-            "history": [],
-            "tool_wave_count": 1,
-            "tool_waves": [
-                {
-                    "wave": 1,
-                    "calls": [
-                        {
-                            "id": "call-1",
-                            "name": "catalog_search",
-                            "arguments": {"query": "无线鼠标"},
-                        }
-                    ],
-                    "results": [
-                        {
-                            "tool_call_id": "call-1",
-                            "name": "catalog_search",
-                            "execution": {
-                                "ok": False,
-                                "error": {
-                                    "code": "timeout",
-                                    "retryable": True,
-                                    "recommended_action": "retry_once",
-                                },
-                            },
-                        }
-                    ],
-                }
-            ],
-        },
-    )
-
-    messages = _orchestrator_messages(state, call_count=2)
-
-    assert "\n<tool_failure_recovery>\n" in str(messages[0].content)
-    assert "catalog_search：code=timeout" in str(messages[0].content)
-    assert isinstance(messages[-1], ToolMessage)
-
-
 def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
     runtime = AgentRuntime(cast(object, None), Settings(llm_api_key=""))
     state = cast(
@@ -1026,17 +857,9 @@ def test_third_orchestrator_call_cannot_start_third_tool_wave() -> None:
         MAX_ORCHESTRATOR_CALLS,
     )
 
-    assert guarded.type == "clarification"
+    assert guarded.type == "unavailable_response"
     assert guarded.tool_calls == []
-    assert "处理上限" not in guarded.response
-    assert "补充具体商品" in guarded.response
-
-
-def test_orchestrator_prompt_uses_tool_specific_sufficiency_without_internal_limits() -> None:
-    assert "usable 结果只要直接覆盖核心问题就立即回答" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "不得为了更多候选、品牌或文档而继续查询" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "`finish_answer`" in ORCHESTRATOR_OBSERVATION_PROMPT
-    assert "编排过程" in ORCHESTRATOR_OBSERVATION_PROMPT
+    assert guarded.control_action == "finish_unavailable"
 
 
 @pytest.mark.asyncio

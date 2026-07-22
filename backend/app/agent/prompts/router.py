@@ -14,25 +14,39 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 <output_contract>
 - 必须且只能调用一次 `route_request`，不得输出普通正文或其他 Tool Call。
 - 先生成一条语义等价的 `rewritten_query`，再基于它拆分 `subqueries`；不能先拆分再分别猜测原意。
-- 每个 subquery 表示一个可独立完成和验收的业务 task，并使用稳定 ID：sq_1、sq_2……。不要把
-  “先发现目标、再使用该目标比较”压成一个 task，也不要按句号机械拆分同一个业务目标。
-- `depends_on` 声明 task 的直接前置依赖。没有依赖的 task 可进入同一个 wave；有依赖的 task 只有
+- 每个 subquery 是一个用户业务 Goal，使用稳定 ID：goal_1、goal_2……；先逐项决定 disposition。
+  只有 `tool_planning` Goal 才能展开 `tasks`，其他 Goal 的 `tasks` 必须为空。
+- 每个执行 Task 使用稳定 ID：task_1、task_2……，并明确 `goal_id`、冻结的
+  `canonical_query`、`depends_on`、`input_requirements`、`produces` 和 `answer_role`。不要把
+  “先发现目标、再使用该目标比较”压成一个 Task，也不要按句号机械拆分同一个 Goal。
+- `depends_on` 声明 Task 的直接前置依赖。没有依赖的 Task 可进入同一个 wave；有依赖的 Task 只有
   在全部前置 task 得到 usable 结果后才能进入后续 wave。必须保持 DAG，不得循环依赖。
 - `input_requirements` 只描述依赖 task 需要由 Runtime 绑定的输入：当前对话已确认商品使用
   `context_product`；上游 task 产物使用 `task_output` 并填写对应 `task_id`；working memory 中
   已经确认的上一组对比商品使用 `comparison_context`；对同一组商品继续比较其他字段时，不得重新
   拆商品搜索。
-- `produces` 描述 task 的业务产物。销量第 N 名等确定性选择使用 `ranked_product` 和
+- `produces` 描述 Task 的业务产物。销量第 N 名等确定性选择使用 `ranked_product` 和
   `result_selector={{type: sales_rank, rank: N, scope: spu}}`；用户明确询问某个版本/SKU 排名时才
   使用 `scope=sku`。销量口径和具体选中商品由 Catalog/Runtime 决定，Router 不猜 SKU。
-- 每个 subquery 只允许一个 disposition：tool_planning、direct_response、clarification、
-  human_handoff、out_of_scope、unsupported、security_refusal。
-- `tool_planning` subquery 可以额外声明一个受限 `capability`：catalog_search、catalog_compare、
+- 每个 subquery 只允许一个 disposition：tool_planning、direct_response、
+  session_grounded_response、clarification、human_handoff、out_of_scope、unsupported、
+  security_refusal。
+- `direct_response` 用于不依赖业务 Tool、不依赖会话事实的客服身份、商城用途、能力说明、使用方式、
+  下单指引和寒暄。它由专用 General Answer Synthesizer 动态回答，不要为这些问题创建 Task。
+- `session_grounded_response` 只允许用于单 Goal 请求，并且必须高置信度确认最近一条 assistant 回答
+  已经明确包含回答当前问题所需的全部事实。典型情况是对刚才结果做总结、排序、选择、换种表达或
+  只查看已有字段。不得仅因主题相同就使用它，也不得创建 Task。
+- 当前问题包含“现在、当前、最新、实时、有没有变化、变了吗、还有货吗、库存、物流到哪”等刷新
+  或状态核验语义时，禁止 `session_grounded_response`，必须进入 `tool_planning`。无法确认历史已经
+  完整覆盖当前问题时，也必须保守进入 `tool_planning`；多调用一次 Tool 优于复用错误信息。
+- 每个 Task 声明一个受限 `capability`：catalog_search、catalog_compare、
   catalog_facets、order_lookup、policy_search、knowledge_search 或 planner_required。只有请求与一个
   事实来源明确一一对应时选择具体 capability；即使 task 有前置依赖，只要完成后明确使用
   `catalog_compare`，也应声明该 capability。只有工具歧义或无法确定时使用 planner_required。
-  非 tool_planning subquery 不得声明 capability。
-- `query` 是该 task 自己的 canonical query，而不是整句原请求。它必须只保留完成该 task 所需的
+  非 tool_planning Goal 不得包含 Task。
+- `answer_role=internal` 表示 Task 只为其他 Task 提供依赖证据；`answer_role=user_facing` 表示该
+  Task 对应用户明确要求回答的结果。只作为上游发现步骤的 Task 必须是 internal。
+- `canonical_query` 是该 Task 自己的冻结 query，而不是整句原请求。它必须只保留完成该 Task 所需的
   语义，例如“查询键盘 SPU 销量排行第二的商品”，不得把其他并列或后续任务塞入同一个 query。
   canonical query 在当前 turn 内冻结；Runtime 再按 Tool contract 派生 tool query。
 </output_contract>
@@ -62,12 +76,14 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 </mixed_request_policy>
 
 <task_graph_example>
-用户说“对比这个和销量第二的键盘，再推荐一个鼠标”时应生成三个 task：
-1. sq_1 查询键盘 SPU 销量第二，produces=ranked_product，result_selector.rank=2，无依赖；
-2. sq_2 比较当前商品与 sq_1 商品，depends_on=[sq_1]，两个 input_requirements 分别来自
-   context_product 和 task_output(sq_1)，capability=catalog_compare；
-3. sq_3 推荐鼠标，无依赖，capability=catalog_search。
-因此 sq_1 与 sq_3 可在同一 wave，sq_2 只能在下一 wave。不要让 sq_1 的 Catalog query 包含比较
+用户说“对比这个和销量第二的键盘，再推荐一个鼠标”时应先拆成两个 Goal，再展开三个 Task：
+1. task_1 查询键盘 SPU 销量第二，goal_id=goal_1，produces=ranked_product，
+   answer_role=internal，result_selector.rank=2，无依赖；
+2. task_2 比较当前商品与 task_1 商品，goal_id=goal_1，depends_on=[task_1]，两个
+   input_requirements 分别来自 context_product 和 task_output(task_1)，
+   answer_role=user_facing，capability=catalog_compare；
+3. task_3 推荐鼠标，goal_id=goal_2，无依赖，answer_role=user_facing，capability=catalog_search。
+因此 task_1 与 task_3 可在同一 wave，task_2 只能在下一 wave。不要让 task_1 的 Catalog query 包含比较
 或鼠标推荐语义。
 </task_graph_example>
 """.strip()

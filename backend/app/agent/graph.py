@@ -2,11 +2,19 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.config import get_stream_writer
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.artifacts import (
+    bound_task_order_id,
+    bound_task_sku_ids,
+    extract_wave_artifacts,
+    initialize_task_runtime,
+    refresh_task_status,
+    user_clarifiable_blockers,
+)
 from app.agent.boundary import BOUNDARY_POLICY
 from app.agent.capabilities import decision_from_route_capabilities
 from app.agent.decisions import (
@@ -39,6 +47,10 @@ from app.agent.outcomes import (
 from app.agent.projections import (
     rebuild_tool_projections,
 )
+from app.agent.prompts import (
+    GENERAL_DIRECT_RESPONSE_PROMPT,
+    SESSION_GROUNDED_RESPONSE_PROMPT,
+)
 from app.agent.responses import (
     _append_blocked_route_notices,
     _fallback_answer,
@@ -51,7 +63,6 @@ from app.agent.responses import (
     _has_successful_tool_result as _has_successful_tool_result,
 )
 from app.agent.route_runtime import (
-    _bound_compare_sku_ids,
     _boundary_from_route_plan,
     _deterministic_pre_route_plan,
     _enforce_route_boundaries,
@@ -62,6 +73,7 @@ from app.agent.route_runtime import (
     _resolve_order_id,
     _reuse_comparison_context,
     _routed_query_for_call,
+    _session_grounded_route_allowed,
     _split_request_subqueries,
 )
 from app.agent.route_runtime import (
@@ -73,20 +85,23 @@ from app.agent.route_runtime import (
 from app.agent.routing import (
     RequestRoutePlan,
     RoutedSubquery,
+    RoutedTask,
     blocked_subqueries,
     request_route_tool_definition,
     route_plan_from_ai_message,
     tool_planning_subqueries,
+    user_facing_tasks,
 )
 from app.agent.state import AgentState
 from app.agent.tool_loop import (
-    _admissible_tool_subqueries,
     _all_planned_subqueries_usable,
     _clarification_decision,
     _constrain_calls_to_route_plan,
+    _deterministic_recovery_decision,
     _orchestrator_business_tool_definition,
     _plain_text_observation_decision,
     _planner_requires_business_tools,
+    _ready_unattempted_tool_subqueries,
     _terminal_fallback_decision,
     _unique_tool_call_ids,
 )
@@ -150,8 +165,7 @@ class AgentRuntime:
             for contract in self.contract_provider.list_contracts()
         ]
         controls_by_name = {
-            definition["function"]["name"]: definition
-            for definition in control_tool_definitions()
+            definition["function"]["name"]: definition for definition in control_tool_definitions()
         }
         observation_controls = [
             controls_by_name[name]
@@ -172,20 +186,13 @@ class AgentRuntime:
         )
         self.tool_planner = self.llm.bind_tools(business_tools) if self.llm else None
         self.answer_synthesizer = (
-            self.llm.bind_tools(observation_controls, tool_choice="required")
-            if self.llm
-            else None
+            self.llm.bind_tools(observation_controls, tool_choice="required") if self.llm else None
         )
         self.finish_answer_synthesizer = (
             self.llm.bind_tools(
                 [controls_by_name["finish_answer"]],
                 tool_choice="required",
             )
-            if self.llm
-            else None
-        )
-        self.recovery_planner = (
-            self.llm.bind_tools([*business_tools, *observation_controls])
             if self.llm
             else None
         )
@@ -196,9 +203,7 @@ class AgentRuntime:
         )
         return self._response_from_state(result)
 
-    async def run_stream(
-        self, request: ChatRequest, user_id: int
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def run_stream(self, request: ChatRequest, user_id: int) -> AsyncIterator[dict[str, Any]]:
         state = self._initial_state(request, user_id)
         try:
             async for mode, update in self._build_graph().astream(
@@ -234,6 +239,7 @@ class AgentRuntime:
                         "render_security_template",
                         "render_clarification_template",
                         "render_direct_template",
+                        "render_session_grounded_response",
                     }:
                         yield _stream_event("delta", state, delta=state["answer"])
                     elif node_name == "persist_turn":
@@ -284,10 +290,9 @@ class AgentRuntime:
         state["conversation_id"] = prepared.conversation_id
         state["user_message_id"] = prepared.user_message_id
         state["run_id"] = prepared.run_id
-        state["history"] = [
-            item.model_dump(mode="json") for item in prepared.history
-        ]
+        state["history"] = [item.model_dump(mode="json") for item in prepared.history]
         state["working_memory"] = prepared.working_memory.model_dump(mode="json")
+        state["working_memory_snapshot"] = prepared.working_memory.model_dump(mode="json")
         state["memory"] = [item.model_dump(mode="json") for item in prepared.memory]
         return state
 
@@ -318,7 +323,14 @@ class AgentRuntime:
             route_source = "deterministic_fallback"
 
         plan = _enforce_route_boundaries(plan, original_message=state["message"])
-        plan = _reuse_comparison_context(plan, state.get("working_memory", {}))
+        if not _session_grounded_route_allowed(
+            plan,
+            state.get("history", []),
+            original_message=state["message"],
+        ):
+            plan = self._fallback_route_plan(state)
+            route_source = "session_grounding_veto_fallback"
+        plan = _reuse_comparison_context(plan, state.get("working_memory_snapshot", {}))
         state["request_router_call_count"] = call_count
         state["route_source"] = route_source
         state["route_plan"] = plan.model_dump(mode="json")
@@ -331,6 +343,7 @@ class AgentRuntime:
         ]
         state["boundary"] = _boundary_from_route_plan(plan)
         state["intent"] = _intent_from_route_plan(plan)
+        initialize_task_runtime(state)
         return state
 
     def _fallback_route_plan(self, state: AgentState) -> RequestRoutePlan:
@@ -340,7 +353,7 @@ class AgentRuntime:
         for index, query in enumerate(segments, start=1):
             disposition = _fallback_route_disposition(
                 query,
-                state.get("working_memory", {}),
+                state.get("working_memory_snapshot", {}),
             )
             clarification_question = (
                 "你具体想咨询哪款商品、哪笔订单或哪项商城服务？"
@@ -373,6 +386,7 @@ class AgentRuntime:
             "unsupported",
             "out_of_scope",
             "direct_response",
+            "session_grounded_response",
         ):
             if disposition in dispositions:
                 return disposition
@@ -380,9 +394,12 @@ class AgentRuntime:
 
     async def _orchestrate(self, state: AgentState) -> AgentState:
         previous_call_count = state.get("orchestrator_call_count", 0)
+        has_ready_tasks = bool(_ready_unattempted_tool_subqueries(state))
+        recovery_decision = None if has_ready_tasks else _deterministic_recovery_decision(state)
         capability_decision = decision_from_route_capabilities(
             RequestRoutePlan.model_validate(state["route_plan"]), state
         )
+        capability_decision = capability_decision or recovery_decision
 
         if capability_decision is not None:
             call_count = previous_call_count
@@ -401,7 +418,7 @@ class AgentRuntime:
                 reason = f"invalid_orchestrator_response:{type(exc).__name__}"
                 decision = OrchestratorDecision(type="invalid", reason=reason)
             except Exception as exc:
-                if not state.get("tool_results"):
+                if not state.get("tool_results") and _planner_requires_business_tools(state):
                     raise
                 reason = f"orchestrator_unavailable:{type(exc).__name__}"
                 decision = _state_terminal_decision(state, reason)
@@ -423,9 +440,7 @@ class AgentRuntime:
         call_count: int,
     ) -> OrchestratorDecision:
         model = self._orchestrator_model_for_state(state)
-        answer_phase = bool(state.get("tool_waves")) and not _planner_requires_business_tools(
-            state
-        )
+        answer_phase = not _planner_requires_business_tools(state)
         attempts = 2 if answer_phase else 1
         for attempt in range(attempts):
             prompt_state = state
@@ -433,14 +448,12 @@ class AgentRuntime:
                 prompt_state = {
                     **state,
                     "terminal_guard_feedback": (
-                        "Answer Synthesizer 上一输出不合法。已有 Tool Result 时必须调用一个"
+                        "Answer Synthesizer 上一输出不合法。已有 Artifact 时必须调用一个"
                         "已绑定终止控制 Tool；不得再次调用业务 Tool。"
                     ),
                 }
             try:
-                message = await model.ainvoke(
-                    _orchestrator_messages(prompt_state, call_count)
-                )
+                message = await model.ainvoke(_orchestrator_messages(prompt_state, call_count))
                 if not isinstance(message, AIMessage):
                     raise TypeError("orchestrator returned a non-AI message")
                 try:
@@ -451,9 +464,7 @@ class AgentRuntime:
                         return recovered
                     raise
                 if answer_phase and decision.type == "tool_calls":
-                    raise ValueError(
-                        "answer synthesizer returned a business tool call"
-                    )
+                    raise ValueError("answer synthesizer returned a business tool call")
                 return decision
             except (ValidationError, ValueError, TypeError):
                 if attempt + 1 >= attempts:
@@ -461,10 +472,8 @@ class AgentRuntime:
         raise RuntimeError("unreachable observation retry state")
 
     def _orchestrator_model_for_state(self, state: AgentState) -> Any:
-        if not state.get("tool_waves"):
-            return self.tool_planner
         if _planner_requires_business_tools(state):
-            return self.recovery_planner
+            return self.tool_planner
         if _all_planned_subqueries_usable(state):
             return self.finish_answer_synthesizer
         return self.answer_synthesizer
@@ -478,9 +487,7 @@ class AgentRuntime:
         if decision.type != "tool_calls":
             return decision
 
-        known_tools = {
-            contract.name for contract in self.contract_provider.list_contracts()
-        }
+        known_tools = {contract.name for contract in self.contract_provider.list_contracts()}
         if not decision.tool_calls or any(
             call.name not in known_tools for call in decision.tool_calls
         ):
@@ -492,17 +499,20 @@ class AgentRuntime:
             )
         if state.get("route_plan"):
             constrained_calls = _constrain_calls_to_route_plan(state, decision.tool_calls)
+            ready_tasks = _ready_unattempted_tool_subqueries(state)
+            calls_by_task = {call.subquery: call for call in reversed(constrained_calls)}
+            missing_tasks = [task for task in ready_tasks if task.id not in calls_by_task]
+            if missing_tasks:
+                fallback = self._fallback_routed_tool_decision(state, missing_tasks)
+                for call in _constrain_calls_to_route_plan(state, fallback.tool_calls):
+                    calls_by_task.setdefault(call.subquery, call)
+            if ready_tasks:
+                constrained_calls = [
+                    calls_by_task[task.id] for task in ready_tasks if task.id in calls_by_task
+                ]
             if not constrained_calls:
-                routed_subqueries = _admissible_tool_subqueries(state)
-                fallback = self._fallback_routed_tool_decision(
-                    state,
-                    routed_subqueries,
-                )
-                decision = fallback.model_copy(
-                    update={"reason": "tool_planner_subquery_binding_fallback"}
-                )
-            else:
-                decision = decision.model_copy(update={"tool_calls": constrained_calls})
+                return _state_terminal_decision(state, "action_compiler_could_not_map_ready_tasks")
+            decision = decision.model_copy(update={"tool_calls": constrained_calls})
         decision = decision.model_copy(
             update={
                 "tool_calls": _unique_tool_call_ids(
@@ -543,6 +553,7 @@ class AgentRuntime:
             repository_factory=ConversationRepository,
             stream_writer_factory=get_stream_writer,
         )
+
     async def _normalize_tool_results(self, state: AgentState) -> AgentState:
         state["normalized_tool_results"] = [
             normalize_tool_result(result).model_dump(mode="json")
@@ -550,11 +561,16 @@ class AgentRuntime:
         ]
         return state
 
+    async def _extract_task_artifacts(self, state: AgentState) -> AgentState:
+        extract_wave_artifacts(state)
+        return state
+
     async def _update_subquery_ledger(self, state: AgentState) -> AgentState:
         state["subquery_ledger"] = [
             entry.model_dump(mode="json")
             for entry in build_subquery_ledger(state.get("tool_waves", []))
         ]
+        refresh_task_status(state)
         rebuild_tool_projections(state)
         return state
 
@@ -563,8 +579,17 @@ class AgentRuntime:
         validation = validate_terminal_decision(
             decision,
             state.get("subquery_ledger", []),
-            planned_subquery_ids=[
-                item.id for item in tool_planning_subqueries(state["route_plan"])
+            planned_subquery_ids=[item.id for item in user_facing_tasks(state["route_plan"])],
+            clarification_allowed=bool(user_clarifiable_blockers(state)),
+            resolved_task_ids=[
+                task_id
+                for task_id, task_state in state.get("task_status", {}).items()
+                if task_state.get("status") == "succeeded"
+            ],
+            usable_artifact_tool_call_ids=[
+                str(artifact.get("source_tool_call_id"))
+                for artifact in state.get("task_artifacts", {}).values()
+                if artifact.get("usable") and artifact.get("source_tool_call_id")
             ],
         )
         if validation.valid:
@@ -596,9 +621,7 @@ class AgentRuntime:
             and self._orchestrator_model_for_state(state) is not None
         )
         if can_replan:
-            state["terminal_guard_replan_count"] = (
-                state.get("terminal_guard_replan_count", 0) + 1
-            )
+            state["terminal_guard_replan_count"] = state.get("terminal_guard_replan_count", 0) + 1
             state["terminal_guard_feedback"] = validation.reason
             state["terminal_guard_status"] = "replan"
             return state
@@ -624,19 +647,19 @@ class AgentRuntime:
     ) -> tuple[PlannedToolCall, list[int]]:
         arguments = dict(call.arguments)
         routed_query = _routed_query_for_call(state, call)
+        task = next(
+            (
+                item
+                for item in tool_planning_subqueries(state.get("route_plan"))
+                if item.id == call.subquery.strip()
+            ),
+            None,
+        )
         if routed_query is not None:
             arguments["query"] = routed_query
         effective_message = routed_query or state["message"]
 
         if call.name == "catalog_search":
-            task = next(
-                (
-                    item
-                    for item in tool_planning_subqueries(state.get("route_plan"))
-                    if item.id == call.subquery.strip()
-                ),
-                None,
-            )
             if task is not None and task.result_selector is not None:
                 selector = task.result_selector
                 arguments["limit"] = max(
@@ -646,25 +669,25 @@ class AgentRuntime:
 
         elif call.name == "catalog_compare":
             request = CatalogCompareInput.model_validate(arguments)
-            bound_sku_ids = _bound_compare_sku_ids(state, call)
+            bound_sku_ids = bound_task_sku_ids(state, task) if task is not None else []
             resolved_sku_ids = _resolve_compare_sku_ids(
-                state["message"], state.get("working_memory", {})
+                state["message"], state.get("working_memory_snapshot", {})
             )
-            sku_ids = list(
-                dict.fromkeys(
-                    [*bound_sku_ids, *request.sku_ids, *resolved_sku_ids]
-                )
-            )[:10]
+            planned_sku_ids = [] if task and task.input_requirements else request.sku_ids
+            sku_ids = list(dict.fromkeys([*bound_sku_ids, *planned_sku_ids, *resolved_sku_ids]))[
+                :10
+            ]
             if sku_ids:
                 request = request.model_copy(update={"sku_ids": sku_ids})
             arguments = request.model_dump(mode="json", exclude_none=True)
 
         elif call.name == "order_lookup":
             arguments.setdefault("query", effective_message)
-            arguments["order_id"] = _resolve_order_id(
+            bound_order_id = bound_task_order_id(state, task) if task is not None else None
+            arguments["order_id"] = bound_order_id or _resolve_order_id(
                 effective_message,
                 arguments.get("order_id"),
-                state.get("working_memory", {}),
+                state.get("working_memory_snapshot", {}),
                 self.memory_service,
             )
 
@@ -743,9 +766,65 @@ class AgentRuntime:
         state["boundary"] = BOUNDARY_POLICY.for_classification("in_scope_auto").model_dump(
             mode="json"
         )
-        state["answer"] = _route_terminal_answer(state, "direct_response")
+        state["answer"] = await self._generate_routed_answer(
+            state,
+            system_prompt=GENERAL_DIRECT_RESPONSE_PROMPT,
+            disposition="direct_response",
+            include_history=False,
+        )
+        state["route_answer_mode"] = "general_direct"
         state["suggested_actions"] = _suggest_actions(state)
         return state
+
+    async def _render_session_grounded_response(self, state: AgentState) -> AgentState:
+        state["boundary"] = BOUNDARY_POLICY.for_classification("in_scope_auto").model_dump(
+            mode="json"
+        )
+        state["answer"] = await self._generate_routed_answer(
+            state,
+            system_prompt=SESSION_GROUNDED_RESPONSE_PROMPT,
+            disposition="session_grounded_response",
+            include_history=True,
+        )
+        state["route_answer_mode"] = "session_grounded"
+        state["suggested_actions"] = _suggest_actions(state)
+        return state
+
+    async def _generate_routed_answer(
+        self,
+        state: AgentState,
+        *,
+        system_prompt: str,
+        disposition: str,
+        include_history: bool,
+    ) -> str:
+        fallback = _route_terminal_answer(state, disposition)
+        if self.llm is None:
+            return fallback
+
+        messages: list[SystemMessage | HumanMessage | AIMessage] = [
+            SystemMessage(content=system_prompt)
+        ]
+        if include_history:
+            for item in state.get("history", []):
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                if item.get("role") == "user":
+                    messages.append(HumanMessage(content=content))
+                elif item.get("role") == "assistant":
+                    messages.append(AIMessage(content=content))
+        plan = RequestRoutePlan.model_validate(state["route_plan"])
+        routed_queries = [item.query for item in plan.subqueries if item.disposition == disposition]
+        query = "；".join(routed_queries) or plan.rewritten_query
+        messages.append(HumanMessage(content=query))
+        try:
+            response = await self.llm.ainvoke(messages)
+        except Exception:
+            return fallback
+        if not isinstance(response, AIMessage) or response.tool_calls:
+            return fallback
+        return _ai_response_text(response).strip() or fallback
 
     async def _persist_turn(self, state: AgentState) -> AgentState:
         state["assistant_metadata"] = {
@@ -759,17 +838,13 @@ class AgentRuntime:
             "route_plan": state.get("route_plan"),
             "subquery_ledger": state.get("subquery_ledger", []),
             "evidence": _dump_evidence(state.get("evidence", [])),
-            "products": [
-                product.model_dump(mode="json") for product in state.get("products", [])
-            ],
-            "order": (
-                state["order"].model_dump(mode="json") if state.get("order") else None
-            ),
+            "products": [product.model_dump(mode="json") for product in state.get("products", [])],
+            "order": (state["order"].model_dump(mode="json") if state.get("order") else None),
         }
         outcome = {
             key: value
             for key, value in state.items()
-            if key not in {"prepared_turn", "working_memory"}
+            if key not in {"prepared_turn", "working_memory", "working_memory_snapshot"}
         }
         changes = await self.context_service.complete_turn(state["prepared_turn"], outcome)
         state["working_memory"] = changes.working_memory.model_dump(mode="json")
@@ -785,12 +860,11 @@ class AgentRuntime:
     def _fallback_routed_tool_decision(
         self,
         state: AgentState,
-        subqueries: list[RoutedSubquery],
+        subqueries: list[RoutedTask],
     ) -> OrchestratorDecision:
         return fallback_routed_tool_decision(self, state, subqueries)
-    async def _mark_run_failed(
-        self, state: AgentState, error_type: str, message: str
-    ) -> None:
+
+    async def _mark_run_failed(self, state: AgentState, error_type: str, message: str) -> None:
         if not state.get("run_id"):
             return
         prepared = state.get("prepared_turn")
@@ -799,7 +873,7 @@ class AgentRuntime:
                 {
                     key: value
                     for key, value in state.items()
-                    if key not in {"prepared_turn", "working_memory"}
+                    if key not in {"prepared_turn", "working_memory", "working_memory_snapshot"}
                 },
                 estimated_token_count=prepared.estimated_token_count,
                 retained_turns=prepared.retained_turns,
@@ -810,7 +884,14 @@ class AgentRuntime:
             audit = {
                 key: value
                 for key, value in _json_safe_state(state).items()
-                if key not in {"history", "memory", "working_memory", "prepared_turn"}
+                if key
+                not in {
+                    "history",
+                    "memory",
+                    "working_memory",
+                    "working_memory_snapshot",
+                    "prepared_turn",
+                }
             }
         repo = ConversationRepository(self.session)
         await repo.fail_run(
@@ -821,9 +902,7 @@ class AgentRuntime:
         )
         await self.session.commit()
 
-    async def _mark_stream_failed(
-        self, state: AgentState, error_type: str, message: str
-    ) -> None:
+    async def _mark_stream_failed(self, state: AgentState, error_type: str, message: str) -> None:
         """Compatibility entry point for callers that finalize failed SSE runs."""
         await self._mark_run_failed(state, error_type, message)
 
@@ -841,3 +920,17 @@ class AgentRuntime:
             ],
             memory_changes=state.get("memory_changes"),
         )
+
+
+def _ai_response_text(message: AIMessage) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    if not isinstance(message.content, list):
+        return ""
+    parts: list[str] = []
+    for item in message.content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "".join(parts)

@@ -1,8 +1,9 @@
 import re
 
+from app.agent.artifacts import ensure_task_runtime, ready_tasks
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall
 from app.agent.intent import classify_intent
-from app.agent.routing import RequestRoutePlan, RoutedSubquery, ready_tool_subqueries
+from app.agent.routing import RequestRoutePlan, RoutedTask, ready_tool_subqueries
 
 _DIRECT_INTENTS = {
     "catalog_search": "product_recommendation",
@@ -40,12 +41,12 @@ def decision_from_route_capabilities(
     The deterministic checks are deliberately a veto rather than an alternative router: a
     disagreement falls back to the Tool Planner and can only reduce acceleration coverage.
     """
-    usable_ids, attempted_ids = _task_execution_sets(state or {})
-    subqueries = ready_tool_subqueries(
-        plan,
-        usable_task_ids=usable_ids,
-        attempted_task_ids=attempted_ids,
-    )
+    runtime_state = state or {}
+    if state is not None and state.get("route_plan"):
+        ensure_task_runtime(runtime_state)
+        subqueries = ready_tasks(runtime_state)
+    else:
+        subqueries = ready_tool_subqueries(plan)
     if not subqueries or not all(_direct_capability_is_safe(item) for item in subqueries):
         return None
 
@@ -67,7 +68,7 @@ def decision_from_route_capabilities(
     )
 
 
-def _direct_capability_is_safe(subquery: RoutedSubquery) -> bool:
+def _direct_capability_is_safe(subquery: RoutedTask) -> bool:
     capability = subquery.capability
     compact = re.sub(r"\s+", " ", subquery.query.casefold())
     if capability == "catalog_compare":
@@ -96,7 +97,7 @@ def _direct_capability_is_safe(subquery: RoutedSubquery) -> bool:
     return True
 
 
-def _default_arguments(subquery: RoutedSubquery) -> dict[str, int | str]:
+def _default_arguments(subquery: RoutedTask) -> dict[str, int | str]:
     capability = str(subquery.capability)
     if capability == "catalog_search":
         selector = subquery.result_selector
@@ -110,21 +111,6 @@ def _default_arguments(subquery: RoutedSubquery) -> dict[str, int | str]:
     if capability == "policy_search":
         return {"limit": 3}
     return {}
-
-
-def _task_execution_sets(state: dict) -> tuple[set[str], set[str]]:
-    usable: set[str] = set()
-    attempted: set[str] = set()
-    for entry in state.get("subquery_ledger", []):
-        if not isinstance(entry, dict) or entry.get("status") == "superseded":
-            continue
-        task_id = str(entry.get("subquery") or "").strip()
-        if not task_id:
-            continue
-        attempted.add(task_id)
-        if entry.get("outcome") == "usable" and entry.get("has_usable_information"):
-            usable.add(task_id)
-    return usable, attempted
 
 
 __all__ = ["decision_from_route_capabilities"]

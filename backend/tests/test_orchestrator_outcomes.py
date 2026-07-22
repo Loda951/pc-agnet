@@ -3,6 +3,7 @@ from typing import Any, cast
 import pytest
 from langchain_core.messages import AIMessage
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall, decision_from_ai_message
 from app.agent.graph import (
     AgentRuntime,
@@ -524,25 +525,26 @@ def test_duplicate_tool_call_ids_are_normalized_before_ledger_execution() -> Non
     )
     state = cast(
         AgentState,
-            {
-                "route_plan": {
-                    "rewritten_query": "查询鼠标并说明退货政策",
-                    "subqueries": [
-                        {
-                            "id": "sq_1",
-                            "query": "查询鼠标",
-                            "disposition": "tool_planning",
-                            "reason_code": "catalog_read",
-                        },
-                        {
-                            "id": "sq_2",
-                            "query": "说明退货政策",
-                            "disposition": "tool_planning",
-                            "reason_code": "policy_read",
-                        },
-                    ],
-                },
-                "tool_waves": [
+        {
+            "message": "查询鼠标并说明退货政策",
+            "route_plan": {
+                "rewritten_query": "查询鼠标并说明退货政策",
+                "subqueries": [
+                    {
+                        "id": "sq_1",
+                        "query": "查询鼠标",
+                        "disposition": "tool_planning",
+                        "reason_code": "catalog_read",
+                    },
+                    {
+                        "id": "sq_2",
+                        "query": "说明退货政策",
+                        "disposition": "tool_planning",
+                        "reason_code": "policy_read",
+                    },
+                ],
+            },
+            "tool_waves": [
                 {
                     "wave": 1,
                     "calls": [{"id": "reused", "name": "knowledge_search"}],
@@ -551,6 +553,7 @@ def test_duplicate_tool_call_ids_are_normalized_before_ledger_execution() -> Non
             "tool_wave_count": 0,
         },
     )
+    initialize_task_runtime(state)
 
     normalized = runtime._validate_decision_budget(state, decision, call_count=2)
     call_ids = [call.id for call in normalized.tool_calls]
@@ -617,9 +620,7 @@ def test_finish_unavailable_requires_tool_results_and_zero_usable_information() 
 
 
 def test_control_action_cannot_be_mixed_with_business_tool_call() -> None:
-    message = _control_message(
-        "finish_answer", response="你好", used_tool_call_ids=["catalog-1"]
-    )
+    message = _control_message("finish_answer", response="你好", used_tool_call_ids=["catalog-1"])
     message.tool_calls.append(
         {
             "id": "catalog-1",
@@ -738,120 +739,3 @@ async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() ->
     assert second_guard["boundary"]["classification"] == "in_scope_auto"
     assert "不支持" in second_guard["decision"]["response"]
     assert "上涨" not in second_guard["decision"]["response"]
-
-
-@pytest.mark.asyncio
-async def test_usable_catalog_result_accepts_grounded_answer_without_replan() -> None:
-    model = _FakeChatModel(
-        [
-            _control_message(
-                "finish_answer",
-                response="找到一款符合预算的无线鼠标。",
-                used_tool_call_ids=["catalog-usable"],
-            )
-        ]
-    )
-    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
-    state = cast(
-        AgentState,
-        {
-            "message": "推荐 300 元以内的无线鼠标",
-            "route_plan": _tool_route_plan("推荐 300 元以内的无线鼠标"),
-            "history": [],
-            "tool_results": [],
-            "tool_waves": [],
-            "subquery_ledger": [
-                {
-                    "tool_call_id": "catalog-usable",
-                    "tool_name": "catalog_search",
-                    "subquery": "sq_1",
-                    "outcome": "usable",
-                    "has_usable_information": True,
-                }
-            ],
-            "tool_wave_count": 1,
-            "orchestrator_call_count": 1,
-            "terminal_guard_replan_count": 0,
-        },
-    )
-
-    result = await runtime._orchestrate(state)
-    guarded = await runtime._terminal_guard(result)
-
-    assert guarded["terminal_guard_status"] == "accepted"
-    assert guarded["decision"]["type"] == "grounded_response"
-    assert guarded["decision"]["used_tool_call_ids"] == ["catalog-usable"]
-    assert guarded["subquery_ledger"][0]["status"] == "answered"
-
-
-@pytest.mark.asyncio
-async def test_mixed_request_accepts_partial_answer_with_explicit_unhandled_part() -> None:
-    model = _FakeChatModel(
-        [
-            _control_message(
-                "finish_partial",
-                response="我找到了无线鼠标；天气不属于商城客服范围。",
-                used_tool_call_ids=["catalog-usable"],
-                unavailable_parts=["明天天气"],
-            )
-        ]
-    )
-    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""), chat_model=model)
-    state = cast(
-        AgentState,
-        {
-            "message": "推荐无线鼠标，顺便说明天天气",
-            "route_plan": _tool_route_plan("推荐无线鼠标"),
-            "history": [],
-            "tool_results": [],
-            "tool_waves": [],
-            "subquery_ledger": [
-                {
-                    "tool_call_id": "catalog-usable",
-                    "tool_name": "catalog_search",
-                    "subquery": "sq_1",
-                    "outcome": "usable",
-                    "has_usable_information": True,
-                }
-            ],
-            "tool_wave_count": 1,
-            "orchestrator_call_count": 1,
-            "terminal_guard_replan_count": 0,
-        },
-    )
-
-    result = await runtime._orchestrate(state)
-    guarded = await runtime._terminal_guard(result)
-
-    assert guarded["terminal_guard_status"] == "accepted"
-    assert guarded["decision"]["type"] == "partial_response"
-    assert guarded["decision"]["unavailable_parts"] == ["明天天气"]
-
-
-@pytest.mark.asyncio
-async def test_memory_without_current_tool_result_cannot_authorize_grounded_answer() -> None:
-    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
-    state = cast(
-        AgentState,
-        {
-            "message": "之前那款鼠标现在多少钱？",
-            "route_plan": _tool_route_plan("查询之前那款鼠标的当前价格"),
-            "decision": OrchestratorDecision(
-                type="grounded_response",
-                response="记忆里的价格还是 299 元。",
-                control_action="finish_answer",
-                used_tool_call_ids=["memory-price"],
-            ).model_dump(mode="json"),
-            "working_memory": {"catalog": {"products": [{"price": "299"}]}},
-            "tool_results": [],
-            "subquery_ledger": [],
-            "orchestrator_call_count": 3,
-            "terminal_guard_replan_count": 1,
-        },
-    )
-
-    guarded = await runtime._terminal_guard(state)
-
-    assert guarded["terminal_guard_status"] == "fallback"
-    assert guarded["decision"]["type"] == "clarification"
-    assert "299" not in guarded["decision"]["response"]

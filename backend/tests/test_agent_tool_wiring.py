@@ -1,9 +1,11 @@
 from typing import Any, cast
 
 import pytest
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, StateGraph
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.decisions import PlannedToolCall
 from app.agent.graph import AgentRuntime, _fallback_catalog_query
 from app.agent.state import AgentState
@@ -641,9 +643,66 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
             pass
 
     monkeypatch.setattr("app.agent.graph.ConversationRepository", FakeAuditRepository)
+
+    class OrderDagRouter:
+        def bind_tools(self, _: list[dict[str, Any]], **__: Any) -> "OrderDagRouter":
+            return self
+
+        async def ainvoke(self, _: list[Any]) -> AIMessage:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "route-order-dag",
+                        "name": "route_request",
+                        "args": {
+                            "rewritten_query": prepared.message,
+                            "subqueries": [
+                                {
+                                    "id": "goal_1",
+                                    "query": prepared.message,
+                                    "disposition": "tool_planning",
+                                    "reason_code": "latest_order_detail",
+                                    "tasks": [
+                                        {
+                                            "id": "task_1",
+                                            "goal_id": "goal_1",
+                                            "canonical_query": "查询最近订单候选",
+                                            "depends_on": [],
+                                            "input_requirements": [],
+                                            "produces": "order",
+                                            "answer_role": "internal",
+                                            "capability": "order_lookup",
+                                        },
+                                        {
+                                            "id": "task_2",
+                                            "goal_id": "goal_1",
+                                            "canonical_query": "查询选中订单详情",
+                                            "depends_on": ["task_1"],
+                                            "input_requirements": [
+                                                {
+                                                    "name": "order_id",
+                                                    "source": "task_output",
+                                                    "task_id": "task_1",
+                                                }
+                                            ],
+                                            "produces": "order",
+                                            "answer_role": "user_facing",
+                                            "capability": "order_lookup",
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                        "type": "tool_call",
+                    }
+                ],
+            )
+
     runtime = AgentRuntime(
         cast(AsyncSession, None),
         Settings(llm_api_key=""),
+        router_model=OrderDagRouter(),
         context_service=context,
         tool_executor=executor,
     )
@@ -651,12 +710,12 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
     assert executor.calls == [
-        ("order.lookup", {"query": prepared.message, "limit": 1, "user_id": 7}),
+        ("order.lookup", {"query": "查询最近订单候选", "limit": 1, "user_id": 7}),
         (
             "order.lookup",
             {
                 "order_id": ORDER["id"],
-                "query": prepared.message,
+                "query": "查询选中订单详情",
                 "limit": 1,
                 "user_id": 7,
             },
@@ -876,11 +935,13 @@ def test_bare_v2_brand_exclusion_routes_back_to_query_first_catalog_search() -> 
         {
             "message": "不要 Razer",
             "working_memory": working_memory.model_dump(mode="json"),
+            "working_memory_snapshot": working_memory.model_dump(mode="json"),
             "memory": [],
             "tool_results": [],
         },
     )
     state["route_plan"] = runtime._fallback_route_plan(state).model_dump(mode="json")
+    initialize_task_runtime(state)
     decision = runtime._fallback_planner_decision(state)
 
     assert decision.type == "tool_calls"

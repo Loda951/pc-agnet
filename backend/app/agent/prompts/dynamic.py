@@ -12,7 +12,6 @@ from app.agent.prompts.static import (
     ORCHESTRATOR_OBSERVATION_PROMPT,
     ORCHESTRATOR_PLANNING_PROMPT,
 )
-from app.agent.prompts.tool_call import TOOL_RECOVERY_PROTOCOL
 
 FAILURE_ACTION_RULES = {
     "retry_once": (
@@ -26,9 +25,7 @@ FAILURE_ACTION_RULES = {
     "explain_temporary_unavailability": (
         "不要继续调用依赖同一服务的 Tool；保留其他成功结果，并向用户说明对应信息暂时无法查询。"
     ),
-    "request_authentication": (
-        "停止相关查询，请用户恢复登录或认证状态；不得尝试绕过身份校验。"
-    ),
+    "request_authentication": ("停止相关查询，请用户恢复登录或认证状态；不得尝试绕过身份校验。"),
     "stop": "不得重试该调用；基于其他成功结果回答，或安全说明无法完成对应查询。",
 }
 
@@ -47,22 +44,17 @@ def build_orchestrator_system_prompt(
     *,
     tool_waves: Sequence[Mapping[str, Any]] | None = None,
     tool_results: Sequence[Mapping[str, Any]] | None = None,
+    answer_phase: bool | None = None,
 ) -> str:
+    has_observations = _has_tool_observations(tool_waves or (), tool_results or ())
     base_prompt = (
         ORCHESTRATOR_OBSERVATION_PROMPT
-        if _has_tool_observations(tool_waves or (), tool_results or ())
+        if answer_phase is True or (answer_phase is None and has_observations)
         else ORCHESTRATOR_PLANNING_PROMPT
     )
-    failure_prompt = build_tool_failure_prompt(
-        tool_waves=tool_waves,
-        tool_results=tool_results,
-    )
-    if not failure_prompt:
+    if answer_phase is False:
         return base_prompt
-    return (
-        f"{base_prompt}\n\n<tool_recovery_protocol>\n{TOOL_RECOVERY_PROTOCOL}\n"
-        f"</tool_recovery_protocol>\n\n{failure_prompt}"
-    )
+    return base_prompt
 
 
 def _has_tool_observations(
@@ -90,10 +82,7 @@ def build_tool_failure_prompt(
 
     attempt_counts = Counter(item["fingerprint"] for item in failures)
     actions = list(dict.fromkeys(item["action"] for item in failures))
-    action_lines = [
-        f"- `{action}`：{FAILURE_ACTION_RULES[action]}"
-        for action in actions
-    ]
+    action_lines = [f"- `{action}`：{FAILURE_ACTION_RULES[action]}" for action in actions]
     failure_lines: list[str] = []
     unique_failures = {item["fingerprint"]: item for item in failures}
     for fingerprint, item in unique_failures.items():
@@ -134,6 +123,8 @@ def build_orchestrator_user_prompt(
     memory_context: dict[str, Any] | None = None,
     routed_subqueries: Sequence[Mapping[str, Any]] | None = None,
     subquery_ledger: Sequence[Mapping[str, Any]] | None = None,
+    task_status: Mapping[str, Any] | None = None,
+    task_artifacts: Mapping[str, Any] | None = None,
     terminal_guard_feedback: str | None = None,
 ) -> str:
     execution_state = {
@@ -190,13 +181,28 @@ def build_orchestrator_user_prompt(
                 "</subquery_ledger>",
             ]
         )
+    if task_status:
+        parts.extend(
+            [
+                "<task_status>",
+                json.dumps(dict(task_status), ensure_ascii=False, sort_keys=True, default=str),
+                "</task_status>",
+            ]
+        )
+    if task_artifacts:
+        parts.extend(
+            [
+                "<task_artifacts>",
+                json.dumps(dict(task_artifacts), ensure_ascii=False, sort_keys=True, default=str),
+                "</task_artifacts>",
+            ]
+        )
     if terminal_guard_feedback:
         parts.extend(
             [
                 "<terminal_guard_feedback>",
                 json.dumps(terminal_guard_feedback, ensure_ascii=False),
-                "上一终止动作未通过运行时校验。请根据原因改用一个合法控制动作；"
-                "不要重复原输出。",
+                "上一终止动作未通过运行时校验。请根据原因改用一个合法控制动作；不要重复原输出。",
                 "</terminal_guard_feedback>",
             ]
         )
@@ -222,9 +228,7 @@ def _collect_failures(
 
     for wave in tool_waves:
         calls = {
-            str(call.get("id")): call
-            for call in wave.get("calls", [])
-            if isinstance(call, Mapping)
+            str(call.get("id")): call for call in wave.get("calls", []) if isinstance(call, Mapping)
         }
         for result in wave.get("results", []):
             if not isinstance(result, Mapping):

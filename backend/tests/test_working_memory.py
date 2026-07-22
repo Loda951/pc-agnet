@@ -2,6 +2,7 @@ from typing import cast
 
 from langchain_core.messages import HumanMessage
 
+from app.agent.artifacts import initialize_task_runtime
 from app.agent.graph import AgentRuntime, _orchestrator_messages
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -41,7 +42,7 @@ def test_orchestrator_messages_include_current_request_context() -> None:
     assert "current_orchestrator_call" in str(current_message)
 
 
-def test_orchestrator_messages_reconstruct_tool_observations() -> None:
+def test_orchestrator_messages_use_artifacts_without_raw_tool_observations() -> None:
     state = cast(
         AgentState,
         {
@@ -49,6 +50,29 @@ def test_orchestrator_messages_reconstruct_tool_observations() -> None:
             "route_plan": _tool_route_plan("Recommend a wireless mouse"),
             "history": [],
             "tool_wave_count": 1,
+            "task_status": {
+                "sq_1": {
+                    "task_id": "sq_1",
+                    "goal_id": "sq_1",
+                    "answer_role": "user_facing",
+                    "status": "unavailable",
+                    "reason": "tool_outcome:empty",
+                }
+            },
+            "task_artifacts": {
+                "sq_1": {
+                    "task_id": "sq_1",
+                    "goal_id": "sq_1",
+                    "artifact_type": "products",
+                    "usable": False,
+                    "value": {"products": []},
+                    "evidence": [],
+                    "source_tool_call_id": "call-1",
+                    "source_tool_name": "catalog_search",
+                    "extractor": "deterministic",
+                    "reason": "empty",
+                }
+            },
             "tool_waves": [
                 {
                     "wave": 1,
@@ -78,8 +102,10 @@ def test_orchestrator_messages_reconstruct_tool_observations() -> None:
 
     messages = _orchestrator_messages(state, call_count=2)
 
-    assert any(getattr(message, "tool_call_id", None) == "call-1" for message in messages)
-    assert any('"result_type": "empty"' in str(message.content) for message in messages)
+    assert not any(getattr(message, "tool_call_id", None) for message in messages)
+    assert '"source_tool_call_id": "call-1"' in str(messages[-1].content)
+    assert "<task_artifacts>" in str(messages[-1].content)
+    assert '"result_type": "empty"' not in str(messages[-1].content)
 
 
 def test_fallback_planner_routes_order_lookup_from_route_plan() -> None:
@@ -89,6 +115,7 @@ def test_fallback_planner_routes_order_lookup_from_route_plan() -> None:
         AgentState,
         {"message": query, "route_plan": _tool_route_plan(query), "tool_results": []},
     )
+    initialize_task_runtime(state)
 
     decision = runtime._fallback_planner_decision(state)
 
@@ -104,6 +131,7 @@ def test_fallback_planner_routes_policy_search_from_route_plan() -> None:
         AgentState,
         {"message": query, "route_plan": _tool_route_plan(query), "tool_results": []},
     )
+    initialize_task_runtime(state)
 
     decision = runtime._fallback_planner_decision(state)
 
