@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -80,6 +81,78 @@ def test_catalog_exclusions_filter_brand_and_usage_matches() -> None:
     assert [
         item.sku_id for item in catalog_tools._filter_excluded_preferences(products, [], ["gaming"])
     ] == [11]
+
+
+def test_spu_aggregation_preserves_real_variant_combinations() -> None:
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=11,
+            title="Series A Wired Black",
+            brand="Brand A",
+            category="mouse",
+            price="100.00",
+            stock=8,
+            sales_count=500,
+            specs={
+                "connection_type": "Wired",
+                "color": "Black",
+                "max_dpi": "26000",
+            },
+        ),
+        ProductCard(
+            spu_id=1,
+            sku_id=12,
+            title="Series A Bluetooth Blue",
+            brand="Brand A",
+            category="mouse",
+            price="120.00",
+            stock=0,
+            sales_count=500,
+            specs={
+                "connection_type": "Bluetooth",
+                "color": "Blue",
+                "max_dpi": "26000",
+            },
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=21,
+            title="Series B Bluetooth White",
+            brand="Brand B",
+            category="mouse",
+            price="130.00",
+            stock=3,
+            sales_count=400,
+            specs={
+                "connection_type": "Bluetooth",
+                "color": "White",
+                "max_dpi": "35000",
+            },
+        ),
+    ]
+
+    series = catalog_tools._aggregate_product_series(
+        products,
+        [1, 2],
+        {1: "Series A", 2: "Series B"},
+    )
+    fields = catalog_tools._series_comparison_fields(series)
+    differences = catalog_tools._series_pair_differences(series, fields)
+
+    assert series[0].common_specs == {"max_dpi": "26000"}
+    assert [
+        value.value for value in series[0].option_specs["connection_type"].values
+    ] == ["Bluetooth", "Wired"]
+    assert {
+        (variant.specs["connection_type"], variant.specs["color"])
+        for variant in series[0].variants
+    } == {("Wired", "Black"), ("Bluetooth", "Blue")}
+    connection_difference = next(
+        item for item in differences[0].fields if item.field == "connection_type"
+    )
+    assert connection_difference.shared_values == ["Bluetooth"]
+    assert connection_difference.left_only_values == ["Wired"]
 
 
 @pytest.mark.asyncio
@@ -1537,6 +1610,113 @@ async def test_catalog_compare_uses_compare_plan_fields(
     assert {"Logitech", "Razer"} <= brands
     assert sum(1 for product in result.products if product.brand == "Logitech") >= 1
     assert sum(1 for product in result.products if product.brand == "Razer") >= 1
+
+
+@pytest.mark.asyncio
+async def test_spu_compare_aggregates_all_active_skus_without_inventing_variants(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        spus = (
+            await session.execute(
+                select(Spu).where(
+                    Spu.title.in_(
+                        [
+                            "Logitech Codex G502 Hero",
+                            "Razer Codex Viper V3 Pro",
+                        ]
+                    )
+                )
+            )
+        ).scalars().all()
+        by_title = {spu.title: spu for spu in spus}
+        g502 = by_title["Logitech Codex G502 Hero"]
+        viper = by_title["Razer Codex Viper V3 Pro"]
+        g502_base_price = (
+            await session.execute(
+                select(Sku.price)
+                .where(Sku.spu_id == g502.id, Sku.status == 1)
+                .order_by(Sku.id)
+                .limit(1)
+            )
+        ).scalar_one()
+        session.add_all(
+            [
+                Sku(
+                    spu_id=g502.id,
+                    title="Logitech Codex G502 Hero Bluetooth Blue",
+                    price="59.99",
+                    stock=0,
+                    sales_count=123,
+                    specs_json={
+                        "connection_type": "Bluetooth",
+                        "max_dpi": "25600",
+                        "color": "Blue",
+                    },
+                    status=1,
+                ),
+                Sku(
+                    spu_id=viper.id,
+                    title="Razer Codex Viper V3 Pro Bluetooth Black",
+                    price="149.99",
+                    stock=7,
+                    sales_count=321,
+                    specs_json={
+                        "connection_type": "Bluetooth",
+                        "max_dpi": "35000",
+                        "color": "Black",
+                    },
+                    status=1,
+                ),
+            ]
+        )
+        await session.flush()
+
+        result = await CatalogToolService(session).compare(
+            CatalogCompareInput(
+                query="compare these two product series",
+                comparison_level="spu",
+                spu_ids=[g502.id, viper.id],
+                limit=5,
+            )
+        )
+
+    assert result.result_type == "comparison"
+    assert result.comparison_level == "spu"
+    assert result.products == []
+    assert [item.spu_id for item in result.series] == [g502.id, viper.id]
+
+    g502_series = result.series[0]
+    assert g502_series.title == "Logitech Codex G502 Hero"
+    assert g502_series.sku_count == 2
+    assert g502_series.in_stock_sku_count == 1
+    assert g502_series.min_price == min(g502_base_price, Decimal("59.99"))
+    assert g502_series.max_price == max(g502_base_price, Decimal("59.99"))
+    assert g502_series.common_specs["max_dpi"] == "25600"
+    connection = g502_series.option_specs["connection_type"]
+    assert [item.value for item in connection.values] == ["Bluetooth", "Wired"]
+    assert [item.in_stock_sku_count for item in connection.values] == [0, 1]
+    assert {
+        (variant.specs["connection_type"], variant.specs["color"])
+        for variant in g502_series.variants
+    } == {("Wired", "Black"), ("Bluetooth", "Blue")}
+
+    difference = result.series_differences[0]
+    connection_difference = next(
+        item for item in difference.fields if item.field == "connection_type"
+    )
+    assert connection_difference.shared_values == ["Bluetooth"]
+    assert connection_difference.left_only_values == ["Wired"]
+    assert connection_difference.right_only_values == ["Wired, Wireless"]
+
+
+def test_catalog_compare_rejects_ids_from_the_other_comparison_level() -> None:
+    with pytest.raises(ValidationError):
+        CatalogCompareInput(
+            query="compare series",
+            comparison_level="spu",
+            sku_ids=[11, 22],
+        )
 
 
 @pytest.mark.asyncio

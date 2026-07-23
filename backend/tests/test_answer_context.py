@@ -139,6 +139,45 @@ def test_facets_answer_context_requires_brand_values_not_count_sum() -> None:
     assert "只汇总 count 而省略 value" in answer_task["response_contract"]["forbidden"]
 
 
+def test_spu_comparison_answer_contract_uses_series_as_primary_evidence() -> None:
+    task = _task(
+        "task_1",
+        "对比两个鼠标系列",
+        produces="comparison",
+        capability="catalog_compare",
+    )
+    state = {
+        "route_plan": _goal(task),
+        "task_status": {"task_1": {"status": "succeeded"}},
+        "task_artifacts": {
+            "task_1": _artifact(
+                "task_1",
+                "compare-1",
+                "catalog_compare",
+                "comparison",
+                usable=True,
+                value={
+                    "comparison_level": "spu",
+                    "products": [],
+                    "series": [{"spu_id": 1}, {"spu_id": 2}],
+                    "series_differences": [],
+                },
+                reason="comparison_has_two_or_more_series",
+            )
+        },
+        "subquery_ledger": [
+            _ledger("task_1", "compare-1", "catalog_compare", "usable", usable=True)
+        ],
+    }
+
+    context = build_answer_context(state)
+    contract = context["tasks"][0]["response_contract"]
+
+    assert "区分全系列共同规格与仅部分 SKU 提供的可选规格" in contract["required"]
+    assert "用单个代表 SKU 的规格概括整个系列" in contract["forbidden"]
+    assert "把不同可选规格自由组合成不存在的 SKU" in contract["forbidden"]
+
+
 def test_no_match_is_a_fully_answered_negative_result() -> None:
     task = _task(
         "task_1",

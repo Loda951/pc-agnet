@@ -473,6 +473,33 @@ def test_compare_metadata_does_not_overwrite_stable_catalog_search_plan() -> Non
     assert after_compare.catalog.comparison.comparison_fields == ["price", "max_dpi"]
 
 
+def test_series_compare_metadata_persists_spu_ids_and_level() -> None:
+    context = _context_module()
+    schemas = _context_schema_module()
+    previous = schemas.WorkingMemoryV2()
+
+    after_compare = context._next_working_memory(
+        previous,
+        {
+            "parsed": {
+                "catalog_comparison": {
+                    "query": "继续比较这两个系列",
+                    "comparison_level": "spu",
+                    "sku_ids": [],
+                    "spu_ids": [64, 63],
+                    "comparison_fields": ["price_range", "connection_type"],
+                }
+            },
+            "products": [],
+            "catalog_tool_succeeded": True,
+        },
+    )
+
+    assert after_compare.catalog.comparison.comparison_level == "spu"
+    assert after_compare.catalog.comparison.spu_ids == [64, 63]
+    assert after_compare.catalog.comparison.sku_ids == []
+
+
 @pytest.mark.asyncio
 async def test_prepare_turn_audits_complete_turns_dropped_beyond_recent_64_messages() -> None:
     context = _context_module()

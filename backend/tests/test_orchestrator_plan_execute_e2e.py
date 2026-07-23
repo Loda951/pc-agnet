@@ -4,13 +4,15 @@ from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.graph import AgentRuntime
 from app.core.config import Settings
+from app.models import Category, Sku, Spu
 from app.schemas.chat import ChatRequest
 from app.schemas.context import MemoryChanges, PreparedTurn, WorkingMemoryV2
-from app.tools.contracts import ToolContract
+from app.tools.contracts import RegistryToolExecutor, ToolContract
 from app.tools.schemas import ToolExecutionResult
 
 
@@ -88,11 +90,17 @@ class _ArtifactAnswerModel:
             value = artifact["facts"]
             tool_name = artifact["source_tool_name"]
             if tool_name == "catalog_compare":
-                products = value["products"]
-                rendered = "；".join(
-                    f"{item['title']}（SKU {item['sku_id']}，¥{item['price']}）"
-                    for item in products
-                )
+                if value.get("comparison_level") == "spu":
+                    rendered = "；".join(
+                        f"{item['title']}（{item['sku_count']} 个版本，"
+                        f"¥{item['min_price']}–¥{item['max_price']}）"
+                        for item in value["series"]
+                    )
+                else:
+                    rendered = "；".join(
+                        f"{item['title']}（SKU {item['sku_id']}，¥{item['price']}）"
+                        for item in value["products"]
+                    )
                 parts.append(f"对比结果：{rendered}")
             elif tool_name == "catalog_search":
                 product = value["products"][0]
@@ -160,17 +168,29 @@ class _BoundArtifactAnswerModel:
 
 
 class _ContextService:
-    def __init__(self, message: str, referenced_sku_id: int | None = None):
-        working_memory = WorkingMemoryV2.model_validate(
-            {
-                "catalog": {
-                    "referenced_sku_id": referenced_sku_id,
-                    "candidate_sku_ids": (
-                        [referenced_sku_id] if referenced_sku_id is not None else []
-                    ),
+    def __init__(
+        self,
+        message: str,
+        referenced_sku_id: int | None = None,
+        *,
+        referenced_spu_id: int | None = None,
+        working_memory: WorkingMemoryV2 | None = None,
+    ):
+        if working_memory is None:
+            working_memory = WorkingMemoryV2.model_validate(
+                {
+                    "catalog": {
+                        "referenced_spu_id": referenced_spu_id,
+                        "referenced_sku_id": referenced_sku_id,
+                        "candidate_spu_ids": (
+                            [referenced_spu_id] if referenced_spu_id is not None else []
+                        ),
+                        "candidate_sku_ids": (
+                            [referenced_sku_id] if referenced_sku_id is not None else []
+                        ),
+                    }
                 }
-            }
-        )
+            )
         self.prepared = PreparedTurn(
             user_id=7,
             conversation_id=41,
@@ -1523,4 +1543,375 @@ async def test_e2e_single_goal_expands_to_multiple_tasks(
         context,
         expected_planner_calls=expected_planner_calls,
         expected_tool_waves=len(expected_waves),
+    )
+
+
+class _RecordingRegistryExecutor:
+    def __init__(self, session: AsyncSession, settings: Settings):
+        self.delegate = RegistryToolExecutor(session, settings)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def execute(
+        self,
+        contract: ToolContract,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> ToolExecutionResult:
+        self.calls.append((contract.registry_name, dict(arguments)))
+        return await self.delegate.execute(contract, arguments, runtime_context)
+
+
+async def _top_two_mouse_spus(session: AsyncSession) -> tuple[Spu, Spu]:
+    spus = (
+        await session.execute(
+            select(Spu)
+            .join(Category, Spu.category_id == Category.id)
+            .where(
+                Category.name.in_(["mouse", "鼠标"]),
+                Spu.status == 1,
+            )
+            .order_by(Spu.sales_count.desc(), Spu.id)
+            .limit(2)
+        )
+    ).scalars().all()
+    assert len(spus) == 2
+    return spus[0], spus[1]
+
+
+async def _first_active_sku(session: AsyncSession, spu_id: int) -> Sku:
+    sku = (
+        await session.execute(
+            select(Sku)
+            .where(Sku.spu_id == spu_id, Sku.status == 1)
+            .order_by(Sku.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    assert sku is not None
+    return sku
+
+
+def _ranked_spu_compare_goal() -> dict[str, Any]:
+    return {
+        "id": "goal_201",
+        "query": "对比当前鼠标系列和销量第二的鼠标系列",
+        "disposition": "tool_planning",
+        "reason_code": "compare_current_with_second_series",
+        "tasks": [
+            {
+                "id": "task_201",
+                "goal_id": "goal_201",
+                "canonical_query": "查询鼠标 SPU 销量排行第二的商品",
+                "depends_on": [],
+                "input_requirements": [],
+                "produces": "ranked_product",
+                "answer_role": "internal",
+                "capability": "catalog_search",
+                "result_selector": {"type": "sales_rank", "rank": 2, "scope": "spu"},
+            },
+            {
+                "id": "task_202",
+                "goal_id": "goal_201",
+                "canonical_query": "比较当前鼠标系列与销量第二的鼠标系列",
+                "depends_on": ["task_201"],
+                "input_requirements": [
+                    {"name": "current_series", "source": "context_product"},
+                    {
+                        "name": "ranked_series",
+                        "source": "task_output",
+                        "task_id": "task_201",
+                    },
+                ],
+                "produces": "comparison",
+                "answer_role": "user_facing",
+                "capability": "catalog_compare",
+                "comparison_level": "spu",
+            },
+        ],
+    }
+
+
+def _comparison_context_goal(*, level: str) -> dict[str, Any]:
+    return {
+        "id": "goal_203",
+        "query": "继续比较刚才两个商品",
+        "disposition": "tool_planning",
+        "reason_code": "refresh_previous_comparison",
+        "tasks": [
+            {
+                "id": "task_203",
+                "goal_id": "goal_203",
+                "canonical_query": "重新比较刚才两个商品的当前目录事实",
+                "depends_on": [],
+                "input_requirements": [
+                    {
+                        "name": "comparison_products",
+                        "source": "comparison_context",
+                    }
+                ],
+                "produces": "comparison",
+                "answer_role": "user_facing",
+                "capability": "catalog_compare",
+                "comparison_level": level,
+            }
+        ],
+    }
+
+
+def _real_catalog_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    session: AsyncSession,
+    *,
+    message: str,
+    goal: dict[str, Any],
+    working_memory: WorkingMemoryV2,
+) -> tuple[
+    AgentRuntime,
+    _RouterModel,
+    _ArtifactAnswerModel,
+    _RecordingRegistryExecutor,
+    _ContextService,
+]:
+    monkeypatch.setattr("app.agent.graph.ConversationRepository", _AuditRepository)
+    settings = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
+    router = _RouterModel(_route_message(message, [goal]))
+    answer = _ArtifactAnswerModel()
+    executor = _RecordingRegistryExecutor(session, settings)
+    context = _ContextService(message, working_memory=working_memory)
+    runtime = AgentRuntime(
+        session,
+        settings,
+        chat_model=answer,
+        router_model=router,
+        context_service=context,
+        tool_executor=executor,
+    )
+    return runtime, router, answer, executor, context
+
+
+@pytest.mark.asyncio
+async def test_e2e_ranked_spu_compare_aggregates_active_variants_with_real_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory,
+) -> None:
+    message = "这个鼠标系列和销量第二的鼠标系列有什么区别"
+    async with db_session_factory() as session:
+        current_spu, ranked_spu = await _top_two_mouse_spus(session)
+        current_sku = await _first_active_sku(session, current_spu.id)
+        ranked_sku = await _first_active_sku(session, ranked_spu.id)
+        active_marker = "E2E active Bluetooth variant"
+        inactive_marker = "E2E inactive variant"
+        session.add_all(
+            [
+                Sku(
+                    spu_id=current_spu.id,
+                    title=active_marker,
+                    price=current_sku.price,
+                    stock=4,
+                    sales_count=0,
+                    specs_json={"connection_type": "Bluetooth", "e2e_marker": "active"},
+                    status=1,
+                ),
+                Sku(
+                    spu_id=current_spu.id,
+                    title=inactive_marker,
+                    price=current_sku.price,
+                    stock=99,
+                    sales_count=0,
+                    specs_json={"connection_type": "Inactive-only"},
+                    status=0,
+                ),
+                Sku(
+                    spu_id=ranked_spu.id,
+                    title="E2E ranked wired variant",
+                    price=ranked_sku.price,
+                    stock=2,
+                    sales_count=0,
+                    specs_json={"connection_type": "Wired", "e2e_marker": "ranked"},
+                    status=1,
+                ),
+            ]
+        )
+        await session.flush()
+        expected_active_counts = dict(
+            (
+                await session.execute(
+                    select(Sku.spu_id, func.count(Sku.id))
+                    .where(
+                        Sku.spu_id.in_([current_spu.id, ranked_spu.id]),
+                        Sku.status == 1,
+                    )
+                    .group_by(Sku.spu_id)
+                )
+            ).all()
+        )
+        working_memory = WorkingMemoryV2.model_validate(
+            {
+                "catalog": {
+                    "referenced_spu_id": current_spu.id,
+                    "referenced_sku_id": current_sku.id,
+                    "candidate_spu_ids": [current_spu.id],
+                    "candidate_sku_ids": [current_sku.id],
+                }
+            }
+        )
+        runtime, router, answer, executor, context = _real_catalog_runtime(
+            monkeypatch,
+            session,
+            message=message,
+            goal=_ranked_spu_compare_goal(),
+            working_memory=working_memory,
+        )
+
+        response = await runtime.run(ChatRequest(message=message), user_id=7)
+
+    state = context.outcomes[0]
+    assert [
+        [(call["subquery"], call["name"]) for call in wave["calls"]]
+        for wave in state["tool_waves"]
+    ] == [
+        [("task_201", "catalog_search")],
+        [("task_202", "catalog_compare")],
+    ]
+    assert executor.calls[-1] == (
+        "catalog.compare",
+        {
+            "query": "比较当前鼠标系列与销量第二的鼠标系列",
+            "comparison_level": "spu",
+            "spu_ids": [current_spu.id, ranked_spu.id],
+            "limit": 5,
+        },
+    )
+    comparison_output = state["tool_results"][-1]["execution"]["output"]
+    assert comparison_output["comparison_level"] == "spu"
+    assert comparison_output["products"] == []
+    assert [item["spu_id"] for item in comparison_output["series"]] == [
+        current_spu.id,
+        ranked_spu.id,
+    ]
+    assert {
+        item["spu_id"]: item["sku_count"] for item in comparison_output["series"]
+    } == expected_active_counts
+    current_series = comparison_output["series"][0]
+    variant_titles = {item["title"] for item in current_series["variants"]}
+    assert active_marker in variant_titles
+    assert inactive_marker not in variant_titles
+    assert current_spu.title in response.answer
+    assert ranked_spu.title in response.answer
+    _assert_successful_e2e(state, router, answer, context)
+
+
+@pytest.mark.asyncio
+async def test_e2e_spu_comparison_context_refresh_uses_one_real_tool_wave(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory,
+) -> None:
+    message = "继续比较刚才两个系列的连接方式"
+    async with db_session_factory() as session:
+        left, right = await _top_two_mouse_spus(session)
+        working_memory = WorkingMemoryV2.model_validate(
+            {
+                "catalog": {
+                    "comparison": {
+                        "query": "上一轮系列比较",
+                        "comparison_level": "spu",
+                        "spu_ids": [left.id, right.id],
+                    }
+                }
+            }
+        )
+        runtime, router, answer, executor, context = _real_catalog_runtime(
+            monkeypatch,
+            session,
+            message=message,
+            goal=_comparison_context_goal(level="spu"),
+            working_memory=working_memory,
+        )
+
+        response = await runtime.run(ChatRequest(message=message), user_id=7)
+
+    state = context.outcomes[0]
+    assert len(state["tool_waves"]) == 1
+    assert executor.calls == [
+        (
+            "catalog.compare",
+            {
+                "query": "重新比较刚才两个商品的当前目录事实",
+                "comparison_level": "spu",
+                "spu_ids": [left.id, right.id],
+                "limit": 5,
+            },
+        )
+    ]
+    comparison = state["task_artifacts"]["task_203"]["value"]
+    assert comparison["comparison_level"] == "spu"
+    assert comparison["selected_spu_ids"] == [left.id, right.id]
+    assert left.title in response.answer
+    assert right.title in response.answer
+    _assert_successful_e2e(
+        state,
+        router,
+        answer,
+        context,
+        expected_tool_waves=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_explicit_sku_comparison_keeps_legacy_contract_with_real_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory,
+) -> None:
+    message = "重新比较刚才两个具体版本"
+    async with db_session_factory() as session:
+        left_spu, right_spu = await _top_two_mouse_spus(session)
+        left_sku = await _first_active_sku(session, left_spu.id)
+        right_sku = await _first_active_sku(session, right_spu.id)
+        working_memory = WorkingMemoryV2.model_validate(
+            {
+                "catalog": {
+                    "comparison": {
+                        "query": "上一轮 SKU 比较",
+                        "comparison_level": "sku",
+                        "sku_ids": [left_sku.id, right_sku.id],
+                    }
+                }
+            }
+        )
+        runtime, router, answer, executor, context = _real_catalog_runtime(
+            monkeypatch,
+            session,
+            message=message,
+            goal=_comparison_context_goal(level="sku"),
+            working_memory=working_memory,
+        )
+
+        response = await runtime.run(ChatRequest(message=message), user_id=7)
+
+    state = context.outcomes[0]
+    assert executor.calls == [
+        (
+            "catalog.compare",
+            {
+                "query": "重新比较刚才两个商品的当前目录事实",
+                "sku_ids": [left_sku.id, right_sku.id],
+                "limit": 5,
+            },
+        )
+    ]
+    comparison_output = state["tool_results"][0]["execution"]["output"]
+    assert comparison_output["comparison_level"] == "sku"
+    assert comparison_output["series"] == []
+    assert [item["sku_id"] for item in comparison_output["products"]] == [
+        left_sku.id,
+        right_sku.id,
+    ]
+    assert left_sku.title in response.answer
+    assert right_sku.title in response.answer
+    _assert_successful_e2e(
+        state,
+        router,
+        answer,
+        context,
+        expected_tool_waves=1,
     )

@@ -102,8 +102,9 @@ def normalize_tool_result(result: Mapping[str, Any]) -> ToolOutcome:
             expected_result_type="products",
         )
     if name == "catalog_compare":
-        products = output.get("products")
-        count = len(products) if isinstance(products, list) else 0
+        comparison_level = output.get("comparison_level") or "sku"
+        compared = output.get("series") if comparison_level == "spu" else output.get("products")
+        count = len(compared) if isinstance(compared, list) else 0
         if _has_diagnostic(output, "invalid_catalog_plan") and not count:
             return ToolOutcome(
                 tool_call_id=call_id,
@@ -113,13 +114,18 @@ def normalize_tool_result(result: Mapping[str, Any]) -> ToolOutcome:
                 reason="catalog_planner_failed_without_comparison",
             )
         if result_type == "comparison" and count >= 2:
-            return _usable(call_id, name, result_type, "comparison_has_two_or_more_products")
+            reason = (
+                "comparison_has_two_or_more_series"
+                if comparison_level == "spu"
+                else "comparison_has_two_or_more_products"
+            )
+            return _usable(call_id, name, result_type, reason)
         return ToolOutcome(
             tool_call_id=call_id,
             tool_name=name,
             outcome="insufficient" if count else "empty",
             result_type=result_type,
-            reason=("comparison_requires_two_products" if count else "no_matching_products"),
+            reason=("comparison_requires_two_targets" if count else "no_matching_products"),
         )
     if name == "catalog_facets":
         return _collection_outcome(

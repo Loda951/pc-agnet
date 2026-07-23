@@ -49,10 +49,6 @@ def _reuse_comparison_context(
     working_memory: dict[str, Any],
 ) -> RequestRoutePlan:
     """Collapse redundant discovery tasks when Router targets an existing comparison pair."""
-    sku_ids = _context_comparison_sku_ids(working_memory)
-    if len(sku_ids) < 2:
-        return plan
-
     tasks = {item.id: item for item in tool_planning_subqueries(plan)}
     if len(tasks) == 1:
         only_task = next(iter(tasks.values()))
@@ -62,6 +58,10 @@ def _reuse_comparison_context(
 
     for comparison_task in tasks.values():
         if comparison_task.capability != "catalog_compare" or not comparison_task.depends_on:
+            continue
+        comparison_level = comparison_task.comparison_level or "sku"
+        comparison_ids = _context_comparison_ids(working_memory, comparison_level)
+        if len(comparison_ids) < 2:
             continue
         dependency_ids = set(comparison_task.depends_on)
         if set(tasks) != dependency_ids | {comparison_task.id}:
@@ -73,12 +73,12 @@ def _reuse_comparison_context(
         ):
             continue
         matched_ids = {
-            sku_id
+            comparison_id
             for item in dependencies
-            for sku_id in sku_ids
-            if re.search(rf"(?<!\d){sku_id}(?!\d)", item.query)
+            for comparison_id in comparison_ids
+            if re.search(rf"(?<!\d){comparison_id}(?!\d)", item.query)
         }
-        if matched_ids != set(sku_ids):
+        if matched_ids != set(comparison_ids):
             continue
         collapsed = RoutedTask.model_validate(
             {
@@ -623,11 +623,19 @@ def _routed_query_for_call(state: AgentState, call: PlannedToolCall) -> str | No
 
 
 def _context_comparison_sku_ids(working_memory: dict[str, Any]) -> list[int]:
+    return _context_comparison_ids(working_memory, "sku")
+
+
+def _context_comparison_ids(
+    working_memory: dict[str, Any],
+    comparison_level: str,
+) -> list[int]:
     catalog = working_memory.get("catalog")
     if not isinstance(catalog, dict):
         return []
     comparison = catalog.get("comparison")
-    values = comparison.get("sku_ids") if isinstance(comparison, dict) else None
+    key = "spu_ids" if comparison_level == "spu" else "sku_ids"
+    values = comparison.get(key) if isinstance(comparison, dict) else None
     if not isinstance(values, list):
         return []
     return list(

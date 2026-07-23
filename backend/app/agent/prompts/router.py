@@ -28,6 +28,10 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 - `produces` 描述 Task 的业务产物。销量第 N 名等确定性选择使用 `ranked_product` 和
   `result_selector={{type: sales_rank, rank: N, scope: spu}}`；用户明确询问某个版本/SKU 排名时才
   使用 `scope=sku`。销量口径和具体选中商品由 Catalog/Runtime 决定，Router 不猜 SKU。
+- `catalog_compare` 必须声明 `comparison_level`。比较两个型号、系列或 SPU 时使用 `spu`，由 Tool
+  聚合各系列全部在售 SKU；比较明确颜色、轴体、连接版本或 SKU 时使用 `sku`。用户说“这个和销量
+  第二的比”且两个目标都是系列/SPU 时，比较 Task 使用 `comparison_level=spu`，不得退化为代表
+  SKU 对比。
 - 每个 subquery 只允许一个 disposition：tool_planning、direct_response、
   session_grounded_response、clarification、human_handoff、out_of_scope、unsupported、
   security_refusal。
@@ -82,7 +86,7 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
    answer_role=internal，result_selector.rank=2，无依赖；
 2. task_2 比较当前商品与 task_1 商品，goal_id=goal_1，depends_on=[task_1]，两个
    input_requirements 分别来自 context_product 和 task_output(task_1)，
-   answer_role=user_facing，capability=catalog_compare；
+   answer_role=user_facing，capability=catalog_compare，comparison_level=spu；
 3. task_3 推荐鼠标，goal_id=goal_2，无依赖，answer_role=user_facing，capability=catalog_search。
 因此 task_1 与 task_3 可在同一 wave，task_2 只能在下一 wave。不要让 task_1 的 Catalog query 包含比较
 或鼠标推荐语义。

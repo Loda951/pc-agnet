@@ -79,6 +79,7 @@ class RoutedTask(BaseModel):
     answer_role: TaskAnswerRole
     capability: RouteCapability = "planner_required"
     result_selector: TaskResultSelector | None = None
+    comparison_level: Literal["sku", "spu"] | None = None
 
     @property
     def query(self) -> str:
@@ -96,6 +97,8 @@ class RoutedTask(BaseModel):
                 raise ValueError("task_output input must reference a declared dependency")
         if self.result_selector is not None and self.produces != "ranked_product":
             raise ValueError("result_selector requires produces=ranked_product")
+        if self.comparison_level is not None and self.capability != "catalog_compare":
+            raise ValueError("comparison_level is only valid for catalog_compare")
         expected_artifacts: dict[str, set[TaskArtifact]] = {
             "catalog_search": {"products", "ranked_product"},
             "catalog_compare": {"comparison"},
@@ -160,6 +163,7 @@ class RoutedSubquery(BaseModel):
             "input_requirements",
             "produces",
             "result_selector",
+            "comparison_level",
             "answer_role",
             "canonical_query",
             "goal_id",
@@ -184,6 +188,7 @@ class RoutedSubquery(BaseModel):
                     "answer_role": data.get("answer_role") or "user_facing",
                     "capability": data.get("capability") or "planner_required",
                     "result_selector": data.get("result_selector"),
+                    "comparison_level": data.get("comparison_level"),
                 }
             ]
         if has_legacy_task:

@@ -106,6 +106,9 @@ ORCHESTRATOR_OBSERVATION_PROMPT = f"""
   库存、销量、订单或物流事实。
 - catalog_facets.count 是 SKU 记录数，不是库存或销量。
 - sku_sales_count 是当前版本销量；sales_count 是整个商品系列累计销量，不得混用。
+- catalog_compare.comparison_level=spu 时，series 是主要证据：common_specs 表示全部在售 SKU
+  都相同，option_specs 表示系列可选项及覆盖数量，variants 只表示真实存在的 SKU 组合。不得拿
+  单个变体代替整个系列，不得把多个 option_specs 笛卡尔组合成数据库中不存在的版本。
 </fact_semantics>
 
 <tool_result_interpretation>

@@ -228,6 +228,40 @@ def bound_task_sku_ids(state: Mapping[str, Any], task: RoutedTask) -> list[int]:
     return resolved[:10]
 
 
+def bound_task_spu_ids(state: Mapping[str, Any], task: RoutedTask) -> list[int]:
+    """Bind series comparison inputs from declared context and upstream artifacts."""
+    resolved: list[int] = []
+    for requirement in task.input_requirements:
+        if requirement.source == "comparison_context":
+            snapshot = _mapping(
+                state.get("working_memory_snapshot") or state.get("working_memory")
+            )
+            comparison = _mapping(_mapping(snapshot.get("catalog")).get("comparison"))
+            _extend_positive_ints(resolved, comparison.get("spu_ids"))
+        elif requirement.source == "context_product":
+            snapshot = _mapping(
+                state.get("working_memory_snapshot") or state.get("working_memory")
+            )
+            catalog = _mapping(snapshot.get("catalog"))
+            value = catalog.get("referenced_spu_id")
+            if value is None:
+                candidates = catalog.get("candidate_spu_ids")
+                value = candidates[0] if isinstance(candidates, list) and candidates else None
+            _extend_positive_ints(resolved, [value])
+        elif requirement.task_id is not None:
+            artifacts = _mapping(state.get("task_artifacts"))
+            artifact = _mapping(artifacts.get(requirement.task_id))
+            value = _mapping(artifact.get("value"))
+            _extend_positive_ints(resolved, value.get("selected_spu_ids"))
+            products = value.get("products")
+            if isinstance(products, list):
+                _extend_positive_ints(
+                    resolved,
+                    [item.get("spu_id") for item in products if isinstance(item, Mapping)],
+                )
+    return resolved[:10]
+
+
 def bound_task_order_id(state: Mapping[str, Any], task: RoutedTask) -> int | None:
     """Bind an unambiguous order id from a declared upstream order artifact."""
     candidates: list[int] = []
@@ -271,6 +305,7 @@ def _extract_task_artifact(
             value = {
                 "products": [selected] if selected is not None else [],
                 "selected_sku_ids": [selected["sku_id"]] if selected is not None else [],
+                "selected_spu_ids": [selected["spu_id"]] if selected is not None else [],
                 "query_plan": output.get("query_plan") or {},
             }
             if not usable:
@@ -281,16 +316,42 @@ def _extract_task_artifact(
                 "selected_sku_ids": [
                     item["sku_id"] for item in products if _positive_int(item.get("sku_id"))
                 ],
+                "selected_spu_ids": list(
+                    dict.fromkeys(
+                        item["spu_id"]
+                        for item in products
+                        if _positive_int(item.get("spu_id"))
+                    )
+                ),
                 "query_plan": output.get("query_plan") or {},
             }
     elif usable and name == "catalog_compare":
         products = [dict(item) for item in output.get("products", []) if isinstance(item, Mapping)]
+        series = [dict(item) for item in output.get("series", []) if isinstance(item, Mapping)]
         value = {
+            "comparison_level": output.get("comparison_level") or "sku",
             "products": products,
+            "series": series,
+            "series_differences": output.get("series_differences") or [],
             "selected_sku_ids": [
                 item["sku_id"] for item in products if _positive_int(item.get("sku_id"))
             ],
+            "selected_spu_ids": list(
+                dict.fromkeys(
+                    [
+                        item["spu_id"]
+                        for item in products
+                        if _positive_int(item.get("spu_id"))
+                    ]
+                    + [
+                        item["spu_id"]
+                        for item in series
+                        if _positive_int(item.get("spu_id"))
+                    ]
+                )
+            ),
             "comparison_fields": output.get("comparison_fields") or [],
+            "query_plan": output.get("query_plan") or {},
         }
     elif usable and name == "catalog_facets":
         value = {"items": output.get("items") or [], "facet": output.get("facet")}
@@ -405,8 +466,18 @@ def _missing_input_requirements(
                 state.get("working_memory_snapshot") or state.get("working_memory")
             )
             catalog = _mapping(snapshot.get("catalog"))
-            candidates = catalog.get("candidate_sku_ids")
-            has_product = _positive_int(catalog.get("referenced_sku_id")) is not None or (
+            id_key = (
+                "referenced_spu_id"
+                if task.capability == "catalog_compare" and task.comparison_level == "spu"
+                else "referenced_sku_id"
+            )
+            candidates_key = (
+                "candidate_spu_ids"
+                if task.capability == "catalog_compare" and task.comparison_level == "spu"
+                else "candidate_sku_ids"
+            )
+            candidates = catalog.get(candidates_key)
+            has_product = _positive_int(catalog.get(id_key)) is not None or (
                 isinstance(candidates, list)
                 and any(_positive_int(item) is not None for item in candidates)
             )
@@ -418,13 +489,19 @@ def _missing_input_requirements(
                 state.get("working_memory_snapshot") or state.get("working_memory")
             )
             comparison = _mapping(_mapping(snapshot.get("catalog")).get("comparison"))
-            sku_ids = comparison.get("sku_ids")
-            if not isinstance(sku_ids, list) or len(
-                [item for item in sku_ids if _positive_int(item) is not None]
+            id_key = "spu_ids" if task.comparison_level == "spu" else "sku_ids"
+            ids = comparison.get(id_key)
+            if not isinstance(ids, list) or len(
+                [item for item in ids if _positive_int(item) is not None]
             ) < 2:
                 missing.append(requirement.name)
                 user_can_supply = True
-    if task.capability == "catalog_compare" and len(bound_task_sku_ids(state, task)) < 2:
+    bound_compare_ids = (
+        bound_task_spu_ids(state, task)
+        if task.comparison_level == "spu"
+        else bound_task_sku_ids(state, task)
+    )
+    if task.capability == "catalog_compare" and len(bound_compare_ids) < 2:
         missing.append("至少两个可比较商品")
         user_can_supply = True
     return list(dict.fromkeys(missing)), user_can_supply
@@ -458,6 +535,7 @@ def _int(value: Any) -> int:
 __all__ = [
     "TaskArtifactRecord",
     "bound_task_order_id",
+    "bound_task_spu_ids",
     "bound_task_sku_ids",
     "ensure_task_runtime",
     "extract_wave_artifacts",

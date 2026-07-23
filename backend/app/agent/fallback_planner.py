@@ -55,7 +55,11 @@ def fallback_routed_tool_decision(
             arguments = {"query": query, "limit": 3}
         elif capability == "catalog_compare":
             name = capability
-            arguments = {"query": query, "limit": 5}
+            arguments = {
+                "query": query,
+                "comparison_level": subquery.comparison_level or "sku",
+                "limit": 5,
+            }
         elif capability == "catalog_facets":
             name = capability
             arguments = _fallback_catalog_facets_arguments(query) or {

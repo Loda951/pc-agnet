@@ -57,6 +57,24 @@ def _control_message(name: str, **arguments: Any) -> AIMessage:
     )
 
 
+def test_spu_comparison_is_usable_when_two_series_are_present() -> None:
+    outcome = normalize_tool_result(
+        _result(
+            "catalog_compare",
+            {
+                "result_type": "comparison",
+                "comparison_level": "spu",
+                "products": [],
+                "series": [{"spu_id": 10}, {"spu_id": 20}],
+            },
+        )
+    )
+
+    assert outcome.outcome == "usable"
+    assert outcome.has_usable_information is True
+    assert outcome.reason == "comparison_has_two_or_more_series"
+
+
 def _tool_route_plan(query: str = "查询业务信息") -> dict[str, Any]:
     return {
         "rewritten_query": query,

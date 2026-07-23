@@ -243,6 +243,19 @@ def _response_contract(
             "forbidden": ["补写未返回的规格、用途认证或适配保证"],
         }
     if artifact_type == "comparison":
+        if fact_mapping.get("comparison_level") == "spu":
+            return {
+                "required": [
+                    "按系列逐项比较至少两个 SPU 的价格区间、库存覆盖和规格选项",
+                    "区分全系列共同规格与仅部分 SKU 提供的可选规格",
+                    "只把 variants 中真实存在的 SKU 规格组合描述为可购买版本",
+                ],
+                "forbidden": [
+                    "用单个代表 SKU 的规格概括整个系列",
+                    "把不同可选规格自由组合成不存在的 SKU",
+                    "把缺失字段补写成确定事实",
+                ],
+            }
         return {
             "required": ["围绕用户要求的比较维度逐项比较至少两款商品"],
             "forbidden": ["把缺失字段补写成确定事实"],

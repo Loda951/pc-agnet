@@ -12,6 +12,7 @@ from app.agent.answer_context import (
 )
 from app.agent.artifacts import (
     bound_task_sku_ids,
+    bound_task_spu_ids,
     ensure_task_runtime,
     ready_tasks,
     user_clarifiable_blockers,
@@ -422,17 +423,24 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         task = _ready_task_for_call(state, call)
         if task is None:
             return False
-        requested_sku_ids = call.arguments.get("sku_ids")
-        if not isinstance(requested_sku_ids, list):
+        comparison_level = task.comparison_level or "sku"
+        identifier_key = "spu_ids" if comparison_level == "spu" else "sku_ids"
+        requested_ids = call.arguments.get(identifier_key)
+        if not isinstance(requested_ids, list):
             return False
-        normalized_sku_ids = {
+        normalized_ids = {
             value
-            for value in requested_sku_ids
+            for value in requested_ids
             if isinstance(value, int) and not isinstance(value, bool)
         }
-        if len(normalized_sku_ids) < 2:
+        if len(normalized_ids) < 2:
             return False
-        return normalized_sku_ids == set(bound_task_sku_ids(state, task))
+        bound_ids = (
+            bound_task_spu_ids(state, task)
+            if comparison_level == "spu"
+            else bound_task_sku_ids(state, task)
+        )
+        return normalized_ids == set(bound_ids)
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
         if not output or output.get("result_type") != "order_candidates":

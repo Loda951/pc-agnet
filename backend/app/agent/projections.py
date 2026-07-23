@@ -30,7 +30,13 @@ def apply_tool_output(
         else:
             state.setdefault("parsed", {})["catalog_comparison"] = {
                 "query": call.arguments.get("query"),
+                "comparison_level": output.get("comparison_level") or "sku",
                 "sku_ids": [product.sku_id for product in state["products"]],
+                "spu_ids": [
+                    item.get("spu_id")
+                    for item in output.get("series", [])
+                    if isinstance(item, dict)
+                ],
                 "comparison_fields": output.get("comparison_fields", []),
             }
     elif call.name in {"policy_search", "knowledge_search"}:
@@ -98,7 +104,13 @@ def rebuild_tool_projections(state: AgentState) -> None:
             else:
                 parsed["catalog_comparison"] = {
                     "query": tool_call_arguments(state, call_id).get("query"),
+                    "comparison_level": output.get("comparison_level") or "sku",
                     "sku_ids": [item.get("sku_id") for item in output.get("products", [])],
+                    "spu_ids": [
+                        item.get("spu_id")
+                        for item in output.get("series", [])
+                        if isinstance(item, dict)
+                    ],
                     "comparison_fields": output.get("comparison_fields", []),
                 }
         elif name in {"policy_search", "knowledge_search"}:
@@ -155,7 +167,9 @@ def _rebuild_from_task_artifacts(state: AgentState) -> None:
             else:
                 parsed["catalog_comparison"] = {
                     "query": tool_call_arguments(state, call_id).get("query"),
+                    "comparison_level": value.get("comparison_level") or "sku",
                     "sku_ids": value.get("selected_sku_ids") or [],
+                    "spu_ids": value.get("selected_spu_ids") or [],
                     "comparison_fields": value.get("comparison_fields") or [],
                 }
         elif tool_name in {"policy_search", "knowledge_search"}:

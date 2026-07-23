@@ -531,10 +531,12 @@ Deterministic pre-route gate
   当前 turn 自动换 Tool、放宽条件或改写 query 重查。usable 通常直接回答，但原请求明确要求且
   依赖该结果的白名单后续步骤仍可进入下一 wave。
 - 下一 wave 只允许两类动作：Runtime 允许的一次等价 retry；冻结 Task DAG 中依赖 Artifact 已满足
-  的 ready Task。`catalog_compare.sku_ids` 只从 context artifact 与 task artifact 绑定；订单详情
+  的 ready Task。`catalog_compare` 按 Task 的 `comparison_level` 只从 context artifact 与
+  task artifact 绑定 `sku_ids` 或 `spu_ids`；订单详情
   只在上游 Artifact 给出唯一候选 ID 时自动绑定，多候选会 blocked 并请用户选择。
 - 销量第 N 名 task 使用确定性 `result_selector`。“商品/系列销量排行”默认按 SPU `sales_count`
-  去重排序，再选择该 SPU 中 SKU 销量最高的代表版本用于比较；用户明确说版本/SKU 排名时才按
+  去重排序，并把选中结果的 `spu_id` 交给后续系列比较；代表 SKU 只用于兼容商品搜索产物，
+  不能作为 SPU 对比事实。用户明确说版本/SKU 排名时才按
   `sku_sales_count`。Catalog Repository 对 SPU 排名直接按系列去重并返回每个系列的代表 SKU，
   不依赖固定扩大 TopK 或对单个系列 SKU 数量的假设。
 - Router 输出后、首次 Tool Call 之前 canonical query 已经冻结；首轮 Planner 也不能改写。同一
@@ -543,7 +545,8 @@ Deterministic pre-route gate
   usage_mapping_unavailable 都不允许改写 query 补救。用户新一轮输入可以生成新的 query。
 - 推荐结果只要与用户明确条件相关并能回答核心问题，就视为充分；用户没有要求多个品牌、指定
   数量或更多备选时，不为了结果丰富度继续调用 Tool。
-- `catalog_search` 至少一个相关 usable 商品、`catalog_compare` 至少两款 usable 商品、
+- `catalog_search` 至少一个相关 usable 商品；SKU 对比至少两个 usable SKU，SPU 对比至少两个
+  usable 系列；
   `policy_search` / `knowledge_search` 至少一个能直接支持核心问题的 usable chunk、
   `catalog_facets` 至少一个 usable 目录项，即可按已有事实回答。用途匹配未被结果证明时只能按
   返回规格介绍为候选；对比字段缺失时说明限制，不为补齐信息自动重复查询。
@@ -571,13 +574,14 @@ AIMessage
 
 ```text
 Wave 1: catalog_search
-Artifact: products / selected_sku_ids / source_tool_call_id
+Artifact: products / selected_sku_ids / selected_spu_ids / source_tool_call_id
 Wave 2: catalog_compare
 ```
 
 例如“对比这个和销量第二的键盘，再推荐一个鼠标”会形成三个 task：查销量第二键盘和推荐鼠标
 都无依赖，进入 Wave 1；比较 task 依赖前者，Runtime 在 Wave 1 usable 后绑定“当前商品 + 排名结果”
-并进入 Wave 2；最后 Answer Synthesizer 一次汇总三个 task 的证据。
+的两个 `spu_id` 并进入 Wave 2；`catalog_compare` 聚合两个系列的全部 active SKU，最后 Answer
+Synthesizer 一次汇总三个 task 的证据。
 
 Task DAG 可以表达任意无环依赖，但当前执行仍受最多两轮 wave 预算限制。
 

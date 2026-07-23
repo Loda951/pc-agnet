@@ -65,12 +65,14 @@ class CatalogComparisonMemory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str | None = None
+    comparison_level: Literal["sku", "spu"] = "sku"
     sku_ids: list[int] = Field(default_factory=list)
+    spu_ids: list[int] = Field(default_factory=list)
     comparison_fields: list[str] = Field(default_factory=list)
 
-    @field_validator("sku_ids", mode="before")
+    @field_validator("sku_ids", "spu_ids", mode="before")
     @classmethod
-    def unique_sku_ids(cls, value: Any) -> list[int]:
+    def unique_comparison_ids(cls, value: Any) -> list[int]:
         if not isinstance(value, list):
             return []
         return list(dict.fromkeys(int(item) for item in value if item is not None))[:10]

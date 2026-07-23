@@ -86,7 +86,10 @@ def _default_arguments(subquery: RoutedTask) -> dict[str, int | str]:
             return {"limit": selector.rank}
         return {"limit": 3}
     if capability == "catalog_compare":
-        return {"limit": 5}
+        return {
+            "limit": 5,
+            "comparison_level": subquery.comparison_level or "sku",
+        }
     if capability == "catalog_facets":
         return {"limit": 20}
     if capability == "order_lookup":

@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from decimal import Decimal
+from itertools import combinations
 from typing import Literal, Protocol
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,6 +22,12 @@ from app.tools.schemas import (
     CatalogFacetOutput,
     CatalogSearchInput,
     CatalogSearchOutput,
+    CatalogSeriesComparisonItem,
+    CatalogSeriesFieldDifference,
+    CatalogSeriesPairDifference,
+    CatalogSeriesSpecSummary,
+    CatalogSeriesSpecValue,
+    CatalogSeriesVariant,
     ProductComparisonItem,
     ToolDiagnostic,
 )
@@ -690,6 +697,9 @@ class CatalogToolService:
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
+        if request.comparison_level == "spu":
+            return await self._compare_spus(request)
+
         compare_plan = None
         if request.sku_ids:
             products = await self._products_by_sku_ids(request.sku_ids)
@@ -707,6 +717,7 @@ class CatalogToolService:
         )
         return CatalogCompareOutput(
             result_type=result_type,
+            comparison_level="sku",
             products=[_to_comparison_item(product) for product in products],
             comparison_fields=fields,
             missing_fields=_missing_fields(products, fields),
@@ -717,6 +728,38 @@ class CatalogToolService:
                 "compare_plan": (
                     _plan_dump_with_diagnostics(compare_plan, diagnostics) if compare_plan else None
                 ),
+                "error_type": _diagnostic_error_type(diagnostics),
+            },
+            diagnostics=diagnostics,
+        )
+
+    async def _compare_spus(self, request: CatalogCompareInput) -> CatalogCompareOutput:
+        products, spu_titles = await self._products_by_spu_ids(
+            request.spu_ids[: request.limit]
+        )
+        series = _aggregate_product_series(
+            products,
+            request.spu_ids[: request.limit],
+            spu_titles,
+        )
+        fields = _series_comparison_fields(series)
+        diagnostics = _spu_compare_diagnostics(
+            requested_spu_ids=request.spu_ids,
+            found_count=len(series),
+        )
+        return CatalogCompareOutput(
+            result_type="comparison" if len(series) >= 2 else "empty",
+            comparison_level="spu",
+            products=[],
+            series=series,
+            series_differences=_series_pair_differences(series, fields),
+            comparison_fields=fields,
+            missing_fields={},
+            query_plan={
+                "mode": "direct_spu_ids",
+                "comparison_level": "spu",
+                "spu_ids": request.spu_ids,
+                "query": request.query,
                 "error_type": _diagnostic_error_type(diagnostics),
             },
             diagnostics=diagnostics,
@@ -818,6 +861,40 @@ class CatalogToolService:
             for sku, spu, brand, category in rows
         }
         return [by_id[sku_id] for sku_id in sku_ids if sku_id in by_id]
+
+    async def _products_by_spu_ids(
+        self, spu_ids: list[int]
+    ) -> tuple[list[ProductCard], dict[int, str]]:
+        if not spu_ids:
+            return [], {}
+        stmt = _active_spu_rows_statement(spu_ids)
+        rows = (await self.session.execute(stmt)).all()
+        attributes = await CatalogRepository(self.session)._load_attributes(
+            [sku.id for sku, *_ in rows]
+        )
+        products = []
+        spu_titles: dict[int, str] = {}
+        for sku, spu, brand, category in rows:
+            spu_titles[spu.id] = spu.title
+            products.append(
+                ProductCard(
+                    spu_id=spu.id,
+                    sku_id=sku.id,
+                    title=sku.title,
+                    brand=brand.name,
+                    category=category.name,
+                    price=sku.price,
+                    stock=sku.stock,
+                    sku_sales_count=sku.sales_count,
+                    sales_count=spu.sales_count,
+                    specs={
+                        str(key): str(value) for key, value in (sku.specs_json or {}).items()
+                    }
+                    | attributes.get(sku.id, {}),
+                    image_url=sku.image_url,
+                )
+            )
+        return products, spu_titles
 
     async def _safe_plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         try:
@@ -1047,6 +1124,58 @@ def _compare_diagnostics(
     ]
 
 
+def _spu_compare_diagnostics(
+    *,
+    requested_spu_ids: list[int],
+    found_count: int,
+) -> list[ToolDiagnostic]:
+    if len(requested_spu_ids) < 2:
+        return [
+            ToolDiagnostic(
+                code="insufficient_spu_ids",
+                severity="error",
+                message="SPU comparison requires at least two explicit SPU IDs.",
+                recommended_action="resolve_at_least_two_spus",
+                details={"requested_spu_ids": requested_spu_ids},
+            )
+        ]
+    if found_count < 2:
+        return [
+            ToolDiagnostic(
+                code="insufficient_active_series",
+                severity="error",
+                message="Fewer than two active product series were found.",
+                recommended_action="resolve_other_active_spus",
+                details={
+                    "requested_spu_ids": requested_spu_ids,
+                    "found_count": found_count,
+                },
+            )
+        ]
+    if found_count < len(set(requested_spu_ids)):
+        return [
+            ToolDiagnostic(
+                code="partial_spu_match",
+                severity="warning",
+                message="Some requested product series were unavailable.",
+                recommended_action="use_result_with_caution",
+                details={
+                    "requested_spu_ids": requested_spu_ids,
+                    "found_count": found_count,
+                },
+            )
+        ]
+    return [
+        ToolDiagnostic(
+            code="ok",
+            severity="info",
+            message="Series comparison aggregated every active SKU successfully.",
+            recommended_action="use_result",
+            details={"spu_count": found_count},
+        )
+    ]
+
+
 def validate_catalog_sql(sql: str) -> None:
     """Guard for future LLM/NL2SQL planners before SQL reaches an executor."""
     normalized = re.sub(r"\s+", " ", sql.strip().lower())
@@ -1081,6 +1210,17 @@ def _active_sku_rows_statement(sku_ids: list[int]):
         .join(Brand, Spu.brand_id == Brand.id)
         .join(Category, Spu.category_id == Category.id)
         .where(Sku.id.in_(sku_ids), Sku.status == 1, Spu.status == 1)
+    )
+
+
+def _active_spu_rows_statement(spu_ids: list[int]):
+    return (
+        select(Sku, Spu, Brand, Category)
+        .join(Spu, Sku.spu_id == Spu.id)
+        .join(Brand, Spu.brand_id == Brand.id)
+        .join(Category, Spu.category_id == Category.id)
+        .where(Sku.spu_id.in_(spu_ids), Sku.status == 1, Spu.status == 1)
+        .order_by(Sku.spu_id, Sku.id)
     )
 
 
@@ -2324,6 +2464,188 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
 
 def _to_comparison_item(product: ProductCard) -> ProductComparisonItem:
     return ProductComparisonItem(**product.model_dump(mode="python"))
+
+
+def _aggregate_product_series(
+    products: list[ProductCard],
+    spu_ids: list[int],
+    spu_titles: dict[int, str],
+) -> list[CatalogSeriesComparisonItem]:
+    grouped: dict[int, list[ProductCard]] = {}
+    for product in products:
+        grouped.setdefault(product.spu_id, []).append(product)
+
+    series: list[CatalogSeriesComparisonItem] = []
+    for spu_id in spu_ids:
+        variants = grouped.get(spu_id, [])
+        if not variants:
+            continue
+        normalized_specs = [_normalized_series_specs(product.specs) for product in variants]
+        all_keys = sorted({key for specs in normalized_specs for key in specs})
+        common_specs: dict[str, str] = {}
+        option_specs: dict[str, CatalogSeriesSpecSummary] = {}
+        for key in all_keys:
+            present = [
+                (specs[key], variants[index].stock > 0)
+                for index, specs in enumerate(normalized_specs)
+                if key in specs
+            ]
+            values = _series_value_summaries(present)
+            missing_count = len(variants) - len(present)
+            if missing_count == 0 and len(values) == 1:
+                common_specs[key] = values[0].value
+            else:
+                option_specs[key] = CatalogSeriesSpecSummary(
+                    present_sku_count=len(present),
+                    missing_sku_count=missing_count,
+                    values=values,
+                )
+
+        first = variants[0]
+        prices = [product.price for product in variants]
+        series.append(
+            CatalogSeriesComparisonItem(
+                spu_id=spu_id,
+                title=spu_titles.get(spu_id, first.title),
+                brand=first.brand,
+                category=first.category,
+                sales_count=first.sales_count,
+                sku_count=len(variants),
+                in_stock_sku_count=sum(product.stock > 0 for product in variants),
+                total_stock=sum(max(0, product.stock) for product in variants),
+                min_price=min(prices),
+                max_price=max(prices),
+                common_specs=common_specs,
+                option_specs=option_specs,
+                variants=[
+                    CatalogSeriesVariant(
+                        sku_id=product.sku_id,
+                        title=product.title,
+                        price=product.price,
+                        stock=product.stock,
+                        sku_sales_count=product.sku_sales_count,
+                        specs=normalized_specs[index],
+                        image_url=product.image_url,
+                    )
+                    for index, product in enumerate(variants)
+                ],
+            )
+        )
+    return series
+
+
+def _normalized_series_specs(specs: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in specs.items():
+        key = _normalize_filter_key(str(raw_key))
+        value = str(raw_value).strip()
+        if key and value:
+            normalized[key] = value
+    return normalized
+
+
+def _series_value_summaries(
+    values: list[tuple[str, bool]],
+) -> list[CatalogSeriesSpecValue]:
+    counts: dict[str, tuple[str, int, int]] = {}
+    for value, in_stock in values:
+        identity = value.casefold()
+        display, sku_count, stock_count = counts.get(identity, (value, 0, 0))
+        counts[identity] = (display, sku_count + 1, stock_count + int(in_stock))
+    return [
+        CatalogSeriesSpecValue(
+            value=display,
+            sku_count=sku_count,
+            in_stock_sku_count=stock_count,
+        )
+        for display, sku_count, stock_count in sorted(
+            counts.values(),
+            key=lambda item: item[0].casefold(),
+        )
+    ]
+
+
+def _series_comparison_fields(
+    series: list[CatalogSeriesComparisonItem],
+) -> list[str]:
+    spec_fields = sorted(
+        {
+            key
+            for item in series
+            for key in [*item.common_specs, *item.option_specs]
+        }
+    )
+    preferred = [
+        "connection_type",
+        "wireless",
+        "switches",
+        "max_dpi",
+        "backlit",
+        "color",
+    ]
+    ordered_specs = [field for field in preferred if field in spec_fields]
+    ordered_specs.extend(field for field in spec_fields if field not in ordered_specs)
+    return ["price_range", "availability", "sales_count", *ordered_specs]
+
+
+def _series_pair_differences(
+    series: list[CatalogSeriesComparisonItem],
+    fields: list[str],
+) -> list[CatalogSeriesPairDifference]:
+    spec_fields = [
+        field
+        for field in fields
+        if field not in {"price_range", "availability", "sales_count"}
+    ]
+    return [
+        CatalogSeriesPairDifference(
+            left_spu_id=left.spu_id,
+            right_spu_id=right.spu_id,
+            fields=[
+                _series_field_difference(left, right, field)
+                for field in spec_fields
+            ],
+        )
+        for left, right in combinations(series, 2)
+    ]
+
+
+def _series_field_difference(
+    left: CatalogSeriesComparisonItem,
+    right: CatalogSeriesComparisonItem,
+    field: str,
+) -> CatalogSeriesFieldDifference:
+    left_values, left_missing = _series_field_values(left, field)
+    right_values, right_missing = _series_field_values(right, field)
+    left_by_identity = {value.casefold(): value for value in left_values}
+    right_by_identity = {value.casefold(): value for value in right_values}
+    shared = sorted(
+        set(left_by_identity) & set(right_by_identity),
+        key=str.casefold,
+    )
+    left_only = sorted(set(left_by_identity) - set(right_by_identity), key=str.casefold)
+    right_only = sorted(set(right_by_identity) - set(left_by_identity), key=str.casefold)
+    return CatalogSeriesFieldDifference(
+        field=field,
+        shared_values=[left_by_identity[value] for value in shared],
+        left_only_values=[left_by_identity[value] for value in left_only],
+        right_only_values=[right_by_identity[value] for value in right_only],
+        left_missing_sku_count=left_missing,
+        right_missing_sku_count=right_missing,
+    )
+
+
+def _series_field_values(
+    item: CatalogSeriesComparisonItem,
+    field: str,
+) -> tuple[list[str], int]:
+    common = item.common_specs.get(field)
+    if common is not None:
+        return [common], 0
+    summary = item.option_specs.get(field)
+    if summary is None:
+        return [], item.sku_count
+    return [value.value for value in summary.values], summary.missing_sku_count
 
 
 def _comparison_fields(products: list[ProductCard]) -> list[str]:

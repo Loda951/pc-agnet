@@ -360,9 +360,10 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             llm_name="catalog_compare",
             registry_name="catalog.compare",
             description=(
-                "Compare PC peripheral products or explicit SKU IDs using catalog facts such "
-                "as price, stock, brand, category, SKU/SPU sales counts, and specifications. "
-                "Return comparison evidence only; do not make final purchase promises."
+                "Compare explicit SKUs or whole SPU product series. SKU mode compares exact "
+                "variants; SPU mode aggregates every active SKU into price ranges, shared "
+                "specifications, available options, and real variant combinations. Return "
+                "comparison evidence only; do not make final purchase promises."
             ),
             public_input_model=CatalogCompareInput,
             internal_input_model=CatalogCompareInput,

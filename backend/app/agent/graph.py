@@ -15,6 +15,7 @@ from app.agent.answer_context import (
 from app.agent.artifacts import (
     bound_task_order_id,
     bound_task_sku_ids,
+    bound_task_spu_ids,
     extract_wave_artifacts,
     initialize_task_runtime,
     refresh_task_status,
@@ -683,22 +684,39 @@ class AgentRuntime:
                 )
 
         elif call.name == "catalog_compare":
+            comparison_level = (
+                task.comparison_level
+                if task is not None and task.comparison_level is not None
+                else str(arguments.get("comparison_level") or "sku")
+            )
+            arguments["comparison_level"] = comparison_level
+            arguments.pop("spu_ids" if comparison_level == "sku" else "sku_ids", None)
             request = CatalogCompareInput.model_validate(arguments)
-            bound_sku_ids = bound_task_sku_ids(state, task) if task is not None else []
-            if task is not None and task.input_requirements:
-                # A frozen Task DAG owns comparison binding. Do not append products inferred
-                # again from the raw utterance after Router and Artifact Store have resolved
-                # the declared inputs.
-                sku_ids = bound_sku_ids
-            else:
-                resolved_sku_ids = _resolve_compare_sku_ids(
-                    state["message"], state.get("working_memory_snapshot", {})
+            if comparison_level == "spu":
+                bound_spu_ids = bound_task_spu_ids(state, task) if task is not None else []
+                spu_ids = (
+                    bound_spu_ids
+                    if task is not None and task.input_requirements
+                    else list(dict.fromkeys([*bound_spu_ids, *request.spu_ids]))[:10]
                 )
-                sku_ids = list(
-                    dict.fromkeys([*bound_sku_ids, *request.sku_ids, *resolved_sku_ids])
-                )[:10]
-            if sku_ids:
-                request = request.model_copy(update={"sku_ids": sku_ids})
+                if spu_ids:
+                    request = request.model_copy(update={"spu_ids": spu_ids})
+            else:
+                bound_sku_ids = bound_task_sku_ids(state, task) if task is not None else []
+                if task is not None and task.input_requirements:
+                    # The frozen Task DAG owns comparison binding.
+                    sku_ids = bound_sku_ids
+                else:
+                    resolved_sku_ids = _resolve_compare_sku_ids(
+                        state["message"], state.get("working_memory_snapshot", {})
+                    )
+                    sku_ids = list(
+                        dict.fromkeys(
+                            [*bound_sku_ids, *request.sku_ids, *resolved_sku_ids]
+                        )
+                    )[:10]
+                if sku_ids:
+                    request = request.model_copy(update={"sku_ids": sku_ids})
             arguments = request.model_dump(mode="json", exclude_none=True)
 
         elif call.name == "order_lookup":
@@ -725,13 +743,17 @@ class AgentRuntime:
                 }
             ), []
         public_input = contract.public_input_model.model_validate(arguments)
+        public_arguments = public_input.model_dump(mode="json", exclude_none=True)
+        if call.name == "catalog_compare":
+            spu_comparison = public_arguments.get("comparison_level") == "spu"
+            identifier_to_remove = "sku_ids" if spu_comparison else "spu_ids"
+            public_arguments.pop(identifier_to_remove, None)
+            if not spu_comparison:
+                public_arguments.pop("comparison_level", None)
         return (
             call.model_copy(
                 update={
-                    "arguments": public_input.model_dump(
-                        mode="json",
-                        exclude_none=True,
-                    ),
+                    "arguments": public_arguments,
                     "canonical_query": routed_query or call.canonical_query,
                     "tool_query": str(arguments.get("query") or call.tool_query),
                 }

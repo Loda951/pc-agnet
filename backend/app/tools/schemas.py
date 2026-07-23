@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.catalog import ProductCard
 from app.schemas.order import OrderCard
@@ -73,8 +73,18 @@ class CatalogCompareInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1)
+    comparison_level: Literal["sku", "spu"] = "sku"
     sku_ids: list[int] = Field(default_factory=list, max_length=10)
+    spu_ids: list[int] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=5, ge=2, le=10)
+
+    @model_validator(mode="after")
+    def validate_identifier_scope(self) -> "CatalogCompareInput":
+        if self.comparison_level == "sku" and self.spu_ids:
+            raise ValueError("spu_ids require comparison_level=spu")
+        if self.comparison_level == "spu" and self.sku_ids:
+            raise ValueError("sku_ids require comparison_level=sku")
+        return self
 
 
 class ProductComparisonItem(BaseModel):
@@ -93,9 +103,65 @@ class ProductComparisonItem(BaseModel):
     image_url: str | None = None
 
 
+class CatalogSeriesSpecValue(BaseModel):
+    value: str
+    sku_count: int = Field(ge=1)
+    in_stock_sku_count: int = Field(ge=0)
+
+
+class CatalogSeriesSpecSummary(BaseModel):
+    present_sku_count: int = Field(ge=1)
+    missing_sku_count: int = Field(ge=0)
+    values: list[CatalogSeriesSpecValue] = Field(default_factory=list)
+
+
+class CatalogSeriesVariant(BaseModel):
+    sku_id: int
+    title: str
+    price: Decimal
+    stock: int
+    sku_sales_count: int = 0
+    specs: dict[str, str] = Field(default_factory=dict)
+    image_url: str | None = None
+
+
+class CatalogSeriesComparisonItem(BaseModel):
+    spu_id: int
+    title: str
+    brand: str
+    category: str
+    sales_count: int = 0
+    sku_count: int = Field(ge=1)
+    in_stock_sku_count: int = Field(ge=0)
+    total_stock: int = Field(ge=0)
+    min_price: Decimal
+    max_price: Decimal
+    common_specs: dict[str, str] = Field(default_factory=dict)
+    option_specs: dict[str, CatalogSeriesSpecSummary] = Field(default_factory=dict)
+    variants: list[CatalogSeriesVariant] = Field(default_factory=list)
+
+
+class CatalogSeriesFieldDifference(BaseModel):
+    field: str
+    shared_values: list[str] = Field(default_factory=list)
+    left_only_values: list[str] = Field(default_factory=list)
+    right_only_values: list[str] = Field(default_factory=list)
+    left_missing_sku_count: int = Field(ge=0)
+    right_missing_sku_count: int = Field(ge=0)
+
+
+class CatalogSeriesPairDifference(BaseModel):
+    left_spu_id: int
+    right_spu_id: int
+    fields: list[CatalogSeriesFieldDifference] = Field(default_factory=list)
+
+
 class CatalogCompareOutput(BaseModel):
     result_type: Literal["comparison", "empty"]
+    comparison_level: Literal["sku", "spu"] = "sku"
     products: list[ProductComparisonItem] = Field(default_factory=list)
+    series: list[CatalogSeriesComparisonItem] = Field(default_factory=list)
+    series_differences: list[CatalogSeriesPairDifference] = Field(default_factory=list)
     comparison_fields: list[str] = Field(default_factory=list)
     missing_fields: dict[int, list[str]] = Field(default_factory=dict)
     query_plan: dict = Field(default_factory=dict)

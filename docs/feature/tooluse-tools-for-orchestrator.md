@@ -19,7 +19,8 @@
   `comparison_fields` 等内部复杂字段。
 - `catalog.search`：优先传 `{"query":"用户原话","limit":3}`；类目、品牌、预算、规格和用途
   场景由 Tool 内部 `ProductQueryPlan` 解析并经过白名单校验。
-- `catalog.compare`：优先传 `query`；只有当上下文已有明确 SKU 时才传 `sku_ids`。
+- `catalog.compare`：明确版本对比使用默认 SKU 模式并绑定 `sku_ids`；型号/系列对比使用
+  `comparison_level=spu` 并绑定 `spu_ids`。
 - `catalog.facets`：Tool 会从 `query` 推断 `facet`、`category`、`brand` 和 `spec_key`；主流程
   不需要自行猜测 `facet`。
 - `order.lookup`：`user_id` 只能由 Runtime 注入；Tool 可以从 `query` 提取明确长数字订单号，
@@ -404,8 +405,9 @@ unavailable：当前商品数据没有能可靠判断办公鼠标是否静音的
 
 用途：
 
-- 根据自然语言或指定 SKU 列表返回商品对比事实。
+- 根据自然语言、指定 SKU 列表或指定 SPU 列表返回商品对比事实。
 - 适合“对比 A 和 B”“哪个更适合 FPS”“帮我比较两款键盘”等场景。
+- SKU 模式比较明确版本；SPU 模式聚合系列下全部 active SKU。
 
 数据来源：
 
@@ -417,7 +419,9 @@ unavailable：当前商品数据没有能可靠判断办公鼠标是否静音的
 ```json
 {
   "query": "Compare Logitech G502 and Razer Viper for FPS",
+  "comparison_level": "sku",
   "sku_ids": [],
+  "spu_ids": [],
   "limit": 5
 }
 ```
@@ -425,7 +429,9 @@ unavailable：当前商品数据没有能可靠判断办公鼠标是否静音的
 字段说明：
 
 - `query`：必填，自然语言对比需求。
-- `sku_ids`：可选，主流程如果已经拿到明确 SKU，可以直接传入。
+- `comparison_level`：`sku` 或 `spu`，默认 `sku`，两种 ID 不能混用。
+- `sku_ids`：SKU 模式的明确版本 ID。
+- `spu_ids`：SPU 模式的明确系列 ID；SPU 模式当前要求 Runtime 先解析至少两个系列。
 - `limit`：默认 `5`，范围 `2..10`。
 
 输出：
@@ -456,6 +462,11 @@ unavailable：当前商品数据没有能可靠判断办公鼠标是否静音的
 边界：
 
 - Tool 只返回事实依据，不做最终购买承诺。
+- SPU 模式的主要输出是 `series` 和 `series_differences`：`common_specs` 仅包含全部 active SKU
+  都具有且值相同的规格，`option_specs` 给出每个可选值的 SKU/有货 SKU 覆盖数，`variants`
+  保留数据库中真实存在的 SKU 组合；不得把一个代表 SKU 当作系列结论，也不得构造笛卡尔组合。
+- SPU 模式同时返回 `min_price`/`max_price`、`sku_count`、`in_stock_sku_count` 和
+  `total_stock`；`products` 留空以避免旧商品卡把辅助 SKU 误解成主比较对象。
 - 当前自然语言路径会生成 `CatalogComparePlan`，识别候选对象、品牌、类目、对比字段和使用场景。
 - 已提供 LLM compare planner；运行时默认启用，失败时仍可 fallback 到规则 planner。
 - 对比字段会经过白名单校验，只允许基础字段和商品规格白名单字段。
@@ -807,6 +818,8 @@ All checks passed
 - 如果 compare plan 识别出多个对比对象，例如 `Logitech G502` 和 `Razer Viper`，tool 会按对象分别召回候选。
 - 这样可以避免一次整体查询导致结果被单一品牌或单一对象占满。
 - 如果主流程已经拿到明确 `sku_ids`，仍优先走 direct SKU 对比，不再做自然语言召回。
+- 如果 Router 判定为系列对比，Runtime 绑定明确 `spu_ids` 后走 SPU 聚合路径，不使用自然语言
+  候选 SKU 代替整个系列。
 ## 补充：默认 LLM Planner 行为
 
 - `catalog.search` 和 `catalog.compare` 运行时默认启用真实 `LLMCatalogQueryPlanner`。

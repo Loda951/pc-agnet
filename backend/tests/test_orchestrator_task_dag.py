@@ -169,6 +169,112 @@ def _state_after_first_wave() -> AgentState:
     )
 
 
+def test_spu_compare_task_binds_series_ids_from_context_and_ranked_artifact() -> None:
+    plan = RequestRoutePlan.model_validate(
+        {
+            "rewritten_query": "对比当前键盘系列和销量第二的键盘系列",
+            "subqueries": [
+                {
+                    "id": "goal_1",
+                    "query": "对比当前键盘系列和销量第二的键盘系列",
+                    "disposition": "tool_planning",
+                    "reason_code": "compare_ranked_series",
+                    "tasks": [
+                        {
+                            "id": "task_1",
+                            "goal_id": "goal_1",
+                            "canonical_query": "查询键盘 SPU 销量第二的商品",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "ranked_product",
+                            "answer_role": "internal",
+                            "capability": "catalog_search",
+                            "result_selector": {
+                                "type": "sales_rank",
+                                "rank": 2,
+                                "scope": "spu",
+                            },
+                        },
+                        {
+                            "id": "task_2",
+                            "goal_id": "goal_1",
+                            "canonical_query": "比较两个键盘系列的全部在售版本",
+                            "depends_on": ["task_1"],
+                            "input_requirements": [
+                                {"name": "left", "source": "context_product"},
+                                {
+                                    "name": "right",
+                                    "source": "task_output",
+                                    "task_id": "task_1",
+                                },
+                            ],
+                            "produces": "comparison",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_compare",
+                            "comparison_level": "spu",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    state = cast(
+        AgentState,
+        {
+            "message": "这个和销量第二的比",
+            "route_plan": plan.model_dump(mode="json"),
+            "working_memory_snapshot": {
+                "catalog": {
+                    "referenced_spu_id": 75,
+                    "referenced_sku_id": 757,
+                    "candidate_spu_ids": [75],
+                    "candidate_sku_ids": [757],
+                }
+            },
+            "tool_waves": [],
+            "tool_results": [],
+            "subquery_ledger": [],
+            "tool_wave_count": 0,
+            "orchestrator_call_count": 0,
+        },
+    )
+    initialize_task_runtime(state)
+    first_decision = decision_from_route_capabilities(plan, state)
+    assert first_decision is not None
+    assert [call.subquery for call in first_decision.tool_calls] == ["task_1"]
+
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    first_call, _ = runtime._prepare_tool_call(state, first_decision.tool_calls[0])
+    ranked_products = [
+        _product(701, 70, sales_count=9000, sku_sales_count=900),
+        _product(711, 71, sales_count=8000, sku_sales_count=600),
+    ]
+    first_wave = {
+        "wave": 1,
+        "calls": [first_call.model_dump(mode="json")],
+        "results": [
+            _successful_result(first_call.id, "catalog_search", ranked_products)
+        ],
+    }
+    state["tool_waves"] = [first_wave]
+    state["tool_results"] = list(first_wave["results"])
+    state["tool_wave_count"] = 1
+    extract_wave_artifacts(state)
+    state["subquery_ledger"] = [
+        item.model_dump(mode="json") for item in build_subquery_ledger([first_wave])
+    ]
+    refresh_task_status(state)
+
+    assert state["task_artifacts"]["task_1"]["value"]["selected_spu_ids"] == [71]
+    assert state["task_status"]["task_2"]["status"] == "ready"
+    second_decision = decision_from_route_capabilities(plan, state)
+    assert second_decision is not None
+    compare_call, _ = runtime._prepare_tool_call(state, second_decision.tool_calls[0])
+    assert compare_call.arguments["comparison_level"] == "spu"
+    assert compare_call.arguments["spu_ids"] == [75, 71]
+    assert "sku_ids" not in compare_call.arguments
+
+
 def test_task_graph_rejects_cycles() -> None:
     payload = _plan().model_dump(mode="json")
     payload["subqueries"][0]["tasks"][0]["depends_on"] = ["sq_2"]
