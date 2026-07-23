@@ -231,6 +231,14 @@ def _fallback_unavailable_answer(state: AgentState) -> str:
     return "本次查询没有得到可用于回答的信息，请补充更具体的商品、订单或政策问题。"
 
 
+LATE_HANDOFF_CONFIRMATION = "如果你希望办理这项操作，我可以为你转人工客服，是否需要？"
+
+
+def _append_late_handoff_confirmation(response: str) -> str:
+    """Render the only Answer-stage handoff behavior without changing frontend state."""
+    return f"{response.rstrip()}\n\n{LATE_HANDOFF_CONFIRMATION}"
+
+
 def _has_catalog_diagnostic(output: dict[str, Any], code: str) -> bool:
     diagnostics = output.get("diagnostics")
     if not isinstance(diagnostics, list):

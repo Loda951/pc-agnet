@@ -27,31 +27,49 @@ def _plan(query: str, capability: str) -> RequestRoutePlan:
     )
 
 
-def test_router_capability_builds_only_high_precision_direct_wave() -> None:
+@pytest.mark.parametrize(
+    ("query", "capability", "expected_name"),
+    [
+        ("推荐 500 元以内的无线鼠标", "catalog_search", "catalog_search"),
+        ("有哪些鼠标品牌", "catalog_facets", "catalog_facets"),
+        ("介绍机械键盘轴体", "knowledge_search", "knowledge_search"),
+    ],
+)
+def test_concrete_router_capability_builds_direct_wave(
+    query: str,
+    capability: str,
+    expected_name: str,
+) -> None:
     decision = decision_from_route_capabilities(
-        _plan("推荐 500 元以内的无线鼠标", "catalog_search")
+        _plan(query, capability)
     )
 
     assert decision is not None
     assert decision.reason == "router_capability_direct_wave"
-    assert decision.tool_calls[0].name == "catalog_search"
+    assert decision.tool_calls[0].name == expected_name
     assert decision.tool_calls[0].subquery == "sq_1"
-    assert decision.tool_calls[0].arguments == {"limit": 3}
 
 
 @pytest.mark.parametrize(
     ("query", "capability"),
     [
-        ("比较这两款鼠标", "catalog_search"),
         ("推荐无线鼠标", "planner_required"),
-        ("有哪些鼠标品牌", "catalog_facets"),
-        ("介绍机械键盘轴体", "knowledge_search"),
+        ("比较这两款鼠标", "catalog_compare"),
     ],
 )
-def test_router_capability_disagreement_falls_back_to_planner(
+def test_ambiguous_or_structurally_incomplete_capability_falls_back_to_planner(
     query: str, capability: str
 ) -> None:
     assert decision_from_route_capabilities(_plan(query, capability)) is None
+
+
+def test_runtime_does_not_reclassify_concrete_router_capability_from_task_text() -> None:
+    decision = decision_from_route_capabilities(
+        _plan("把这两款鼠标放在一起看看", "catalog_search")
+    )
+
+    assert decision is not None
+    assert decision.tool_calls[0].name == "catalog_search"
 
 
 def test_non_tool_route_cannot_smuggle_capability() -> None:

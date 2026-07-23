@@ -37,6 +37,7 @@ class OrchestratorDecision(BaseModel):
     control_action: ControlAction | None = None
     used_tool_call_ids: list[str] = Field(default_factory=list)
     unavailable_parts: list[str] = Field(default_factory=list)
+    offer_handoff_confirmation: bool = False
 
 
 class _ControlInput(BaseModel):
@@ -55,10 +56,24 @@ class FinishAnswerInput(_ControlInput):
 
 class FinishPartialInput(FinishAnswerInput):
     unavailable_parts: list[str] = Field(min_length=1, max_length=10)
+    offer_handoff_confirmation: bool = Field(
+        default=False,
+        description=(
+            "True only when an unresolved part may require human handling and the user has "
+            "not clearly requested handoff yet. Runtime renders the confirmation question."
+        ),
+    )
 
 
 class FinishUnavailableInput(_ControlInput):
     unavailable_parts: list[str] = Field(min_length=1, max_length=10)
+    offer_handoff_confirmation: bool = Field(
+        default=False,
+        description=(
+            "True only when the unresolved request may require human handling and the user "
+            "has not clearly requested handoff yet. Runtime renders the confirmation question."
+        ),
+    )
 
 
 _CONTROL_MODELS: dict[str, type[BaseModel]] = {
@@ -75,7 +90,8 @@ _CONTROL_DESCRIPTIONS = {
         "Ask exactly one focused clarification when required information is missing."
     ),
     "finish_answer": (
-        "Finish a fully supported answer. Every listed tool call id must have usable information."
+        "Finish when every user-facing task has an answerable result, including reliable "
+        "no-match results. Every listed tool call id must support one resolved task."
     ),
     "finish_partial": (
         "Finish with supported findings plus explicit unavailable parts for a mixed request."
@@ -182,12 +198,14 @@ def _decision_from_control_call(call: dict[str, Any]) -> OrchestratorDecision:
             control_action=name,
             used_tool_call_ids=list(data["used_tool_call_ids"]),
             unavailable_parts=list(data["unavailable_parts"]),
+            offer_handoff_confirmation=bool(data["offer_handoff_confirmation"]),
         )
     return OrchestratorDecision(
         type="unavailable_response",
         response=response,
         control_action="finish_unavailable",
         unavailable_parts=list(data["unavailable_parts"]),
+        offer_handoff_confirmation=bool(data["offer_handoff_confirmation"]),
     )
 
 

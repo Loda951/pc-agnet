@@ -491,7 +491,7 @@ def test_wave_loop_followup_policy_cases(
     assert _followup_tool_call_allowed(state, next_call) is expected_allowed
 
 
-def test_dependent_compare_requires_original_request_and_returned_sku_ids() -> None:
+def test_legacy_dependent_compare_without_a_ready_routed_task_is_blocked() -> None:
     result = _result(
         "search-1",
         "catalog_search",
@@ -520,10 +520,10 @@ def test_dependent_compare_requires_original_request_and_returned_sku_ids() -> N
     )
 
     state["message"] = "先推荐办公键盘，再比较候选商品的区别"
-    assert _followup_tool_call_allowed(state, call) is True
+    assert _followup_tool_call_allowed(state, call) is False
 
     state["message"] = "Find office keyboards and compare the returned products"
-    assert _followup_tool_call_allowed(state, call) is True
+    assert _followup_tool_call_allowed(state, call) is False
 
     state["message"] = "推荐办公键盘"
     assert _followup_tool_call_allowed(state, call) is False
@@ -535,7 +535,7 @@ def test_dependent_compare_requires_original_request_and_returned_sku_ids() -> N
     assert _followup_tool_call_allowed(state, unknown_sku_call) is False
 
 
-def test_dependent_compare_is_allowed_within_the_same_routed_subquery() -> None:
+def test_compare_cannot_reuse_a_completed_search_task_as_implicit_authorization() -> None:
     query = "查找销量最高的两款显示器并进行对比"
     result = _result(
         "search-1",
@@ -554,7 +554,7 @@ def test_dependent_compare_is_allowed_within_the_same_routed_subquery() -> None:
         subquery="sq_1",
     )
 
-    assert _followup_tool_call_allowed(state, call) is True
+    assert _followup_tool_call_allowed(state, call) is False
 
 
 def test_dependent_order_lookup_requires_a_returned_candidate_id() -> None:

@@ -1,46 +1,22 @@
-import re
-
 from app.agent.artifacts import ensure_task_runtime, ready_tasks
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall
-from app.agent.intent import classify_intent
 from app.agent.routing import RequestRoutePlan, RoutedTask, ready_tool_subqueries
 
-_DIRECT_INTENTS = {
-    "catalog_search": "product_recommendation",
-    "catalog_compare": "product_recommendation",
-    "order_lookup": "order_status",
-    "policy_search": "after_sales",
+_DIRECT_CAPABILITIES = {
+    "catalog_search",
+    "catalog_compare",
+    "catalog_facets",
+    "order_lookup",
+    "policy_search",
+    "knowledge_search",
 }
-_COMPARE_MARKERS = (
-    "对比",
-    "比较",
-    "区别",
-    "差异",
-    "哪个好",
-    "compare",
-    "versus",
-    " vs ",
-)
-_FACET_MARKERS = (
-    "有哪些品牌",
-    "什么品牌",
-    "哪些品牌",
-    "有哪些品类",
-    "哪些品类",
-    "规格选项",
-    "可选规格",
-)
 
 
 def decision_from_route_capabilities(
     plan: RequestRoutePlan,
     state: dict | None = None,
 ) -> OrchestratorDecision | None:
-    """Build the next ready Tool wave when Router and deterministic vetoes agree.
-
-    The deterministic checks are deliberately a veto rather than an alternative router: a
-    disagreement falls back to the Tool Planner and can only reduce acceleration coverage.
-    """
+    """Compile concrete, structurally valid Router Tasks into the next Tool wave."""
     runtime_state = state or {}
     if state is not None and state.get("route_plan"):
         ensure_task_runtime(runtime_state)
@@ -69,31 +45,36 @@ def decision_from_route_capabilities(
 
 
 def _direct_capability_is_safe(subquery: RoutedTask) -> bool:
-    capability = subquery.capability
-    compact = re.sub(r"\s+", " ", subquery.query.casefold())
-    if capability == "catalog_compare":
-        sources = {item.source for item in subquery.input_requirements}
-        comparison_followup = not subquery.depends_on and sources == {"comparison_context"}
-        if comparison_followup:
-            return any(marker in compact for marker in _COMPARE_MARKERS)
-
-    expected_intent = _DIRECT_INTENTS.get(str(capability))
-    if expected_intent is None or classify_intent(subquery.query) != expected_intent:
+    capability = str(subquery.capability)
+    if capability not in _DIRECT_CAPABILITIES:
         return False
 
-    if capability == "catalog_search":
-        if any(marker in compact for marker in _COMPARE_MARKERS):
-            return False
-        if any(marker in compact for marker in _FACET_MARKERS):
-            return False
     if capability == "catalog_compare":
-        sources = {item.source for item in subquery.input_requirements}
-        dependent_compare = bool(subquery.depends_on) and sources == {
-            "context_product",
-            "task_output",
-        }
-        if not dependent_compare:
+        requirements = subquery.input_requirements
+        sources = {item.source for item in requirements}
+        if not subquery.depends_on:
+            return len(requirements) == 1 and sources == {"comparison_context"}
+        if len(requirements) < 2 or not sources <= {"context_product", "task_output"}:
             return False
+        bound_dependencies = {
+            item.task_id
+            for item in requirements
+            if item.source == "task_output" and item.task_id is not None
+        }
+        return bound_dependencies == set(subquery.depends_on)
+
+    if capability == "order_lookup" and subquery.depends_on:
+        requirements = subquery.input_requirements
+        return bool(requirements) and {
+            item.task_id
+            for item in requirements
+            if item.source == "task_output" and item.task_id is not None
+        } == set(subquery.depends_on) and all(
+            item.source == "task_output" for item in requirements
+        )
+
+    if subquery.depends_on or subquery.input_requirements:
+        return False
     return True
 
 
@@ -106,6 +87,8 @@ def _default_arguments(subquery: RoutedTask) -> dict[str, int | str]:
         return {"limit": 3}
     if capability == "catalog_compare":
         return {"limit": 5}
+    if capability == "catalog_facets":
+        return {"limit": 20}
     if capability == "order_lookup":
         return {"limit": 1}
     if capability == "policy_search":

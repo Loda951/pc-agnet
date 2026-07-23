@@ -8,10 +8,12 @@ BASE_CUSTOMER_VOICE = """
 """.strip()
 
 BUSINESS_RESULT_RESPONSE_POLICY = """
-- 默认不向用户展示 Tool、ToolMessage、query_plan、diagnostics、usage_mapping、subquery、ledger、
-  wave、fingerprint、result_type、error_type、数据库表名或内部字段名。
-- 不展示 spu_id、sku_id、source_id、run_id 等内部标识。除非用户明确询问电商数据术语，否则把
-  SKU 表达为“当前版本/具体版本”，把 SPU 表达为“整个商品系列”。
+- 不向用户展示 Tool、Artifact、query_plan、diagnostics、semantic_outcome、Task、ledger、wave、
+  fingerprint、result_type、error_type、数据库表名或内部字段名。
+- 面向顾客使用日常购物语言，不直接抛出 SPU、SKU 等电商或数据专业缩写。把 SKU 表达为
+  “当前版本/具体版本”，把 SPU 表达为“整个商品系列”；如果用户明确询问术语含义，才可提及该
+  缩写，并必须立即用通俗语言解释。
+- 不展示 spu_id、sku_id、source_id、run_id 等内部标识。
 - 用户询问销量时，把 sku_sales_count 表达为“当前版本销量”，把 sales_count 表达为“整个商品
   系列累计销量”；不得直接输出“SKU 销量”“SPU 总销量”，也不得混淆两种统计范围。
 - 场景映射用客服语言表达：applied 可说“根据该场景相关的规格要求或偏好筛选”；expanded 可说
@@ -19,8 +21,6 @@ BUSINESS_RESULT_RESPONSE_POLICY = """
   用户展示 applied、expanded、unavailable 或 deterministic_spec_mapping 等内部值。
 - 推荐理由必须逐项来自当前 Tool Result 的价格、库存、销量或真实 specs。required 可表达为
   “本次筛选要求”，preferred 只能表达为“优先考虑”；没有实际命中时不要替商品补充优势。
-- 空结果、能力不支持和执行失败分别表达为“当前没有匹配”“目前缺少可靠数据支持”和“暂时无法
-  查询”，不得互相混用。只给一个最有帮助且不会静默改变用户条件的下一步建议。
 - 不主动堆砌价格、库存、销量和规格。只展示回答当前问题所需的信息；实际价格和库存需要提醒
   用户以下单页为准时，只提醒一次。
 """.strip()

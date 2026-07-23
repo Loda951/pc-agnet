@@ -6,7 +6,16 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from app.agent.artifacts import ready_tasks, user_clarifiable_blockers
+from app.agent.answer_context import (
+    answerable_source_tool_call_ids,
+    build_answer_context,
+)
+from app.agent.artifacts import (
+    bound_task_sku_ids,
+    ensure_task_runtime,
+    ready_tasks,
+    user_clarifiable_blockers,
+)
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall, infer_tool_subquery
 from app.agent.limits import MAX_TOOL_WAVES
 from app.agent.outcomes import (
@@ -21,7 +30,6 @@ from app.agent.prompts import (
     build_orchestrator_user_prompt,
 )
 from app.agent.responses import (
-    _active_tool_results,
     _fallback_answer,
     _fallback_unavailable_answer,
     _latest_successful_tool_output,
@@ -70,6 +78,10 @@ def _orchestrator_messages(
         }
         for item in _prompt_tool_subqueries(state)
     ]
+    answer_context = None
+    if not planning_phase:
+        answer_context = build_answer_context(state)
+        state["answer_context"] = answer_context
     messages.append(
         HumanMessage(
             content=build_orchestrator_user_prompt(
@@ -77,11 +89,12 @@ def _orchestrator_messages(
                 tool_wave_count=state.get("tool_wave_count", 0),
                 orchestrator_call_count=call_count,
                 memory_context=None,
-                routed_subqueries=routed_subqueries,
-                subquery_ledger=None if planning_phase else state.get("subquery_ledger", []),
-                task_status=None if planning_phase else state.get("task_status", {}),
-                task_artifacts=None if planning_phase else state.get("task_artifacts", {}),
+                routed_subqueries=routed_subqueries if planning_phase else None,
+                subquery_ledger=None,
+                task_status=None,
+                task_artifacts=None,
                 terminal_guard_feedback=state.get("terminal_guard_feedback"),
+                answer_context=answer_context,
             )
         )
     )
@@ -234,6 +247,10 @@ def _planner_requires_business_tools(state: AgentState) -> bool:
     """Return whether an observation turn can still make an admissible business call."""
     if state.get("tool_wave_count", 0) >= MAX_TOOL_WAVES:
         return False
+    if state.get("route_plan") and (
+        "task_status" not in state or "task_artifacts" not in state
+    ):
+        ensure_task_runtime(state)
 
     if _ready_unattempted_tool_subqueries(state):
         return True
@@ -318,16 +335,9 @@ def _prompt_tool_subqueries(state: AgentState) -> list[RoutedTask]:
 
 
 def _all_planned_subqueries_usable(state: AgentState) -> bool:
-    """Return whether every user-facing Task has a usable extracted artifact."""
-    routed_ids = {item.id for item in user_facing_tasks(state.get("route_plan"))}
-    if not routed_ids:
-        return False
-    usable_ids = {
-        task_id
-        for task_id, item in state.get("task_status", {}).items()
-        if isinstance(item, dict) and item.get("status") == "succeeded"
-    }
-    return routed_ids <= usable_ids
+    """Return whether every user-facing Task has an answerable semantic result."""
+    context = build_answer_context(state)
+    return bool(context["tasks"]) and context["completion"] == "full"
 
 
 def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> bool:
@@ -407,16 +417,10 @@ def _followup_tool_call_allowed(state: AgentState, call: PlannedToolCall) -> boo
 
 
 def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bool:
-    """Allow only bounded continuations that the original request already requires."""
-    active = [
-        entry
-        for entry in state.get("subquery_ledger", [])
-        if is_active_ledger_entry(entry) and entry.get("has_usable_information")
-    ]
+    """Allow only bounded continuations authorized by a ready routed Task."""
     if call.name == "catalog_compare":
-        if not any(entry.get("tool_name") == "catalog_search" for entry in active):
-            return False
-        if not _request_explicitly_requires_comparison(state.get("message", "")):
+        task = _ready_task_for_call(state, call)
+        if task is None:
             return False
         requested_sku_ids = call.arguments.get("sku_ids")
         if not isinstance(requested_sku_ids, list):
@@ -428,8 +432,7 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         }
         if len(normalized_sku_ids) < 2:
             return False
-        trusted_sku_ids = _active_catalog_search_sku_ids(state) | _context_catalog_sku_ids(state)
-        return normalized_sku_ids <= trusted_sku_ids
+        return normalized_sku_ids == set(bound_task_sku_ids(state, task))
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
         if not output or output.get("result_type") != "order_candidates":
@@ -452,68 +455,22 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
 
 
 def _call_targets_ready_task(state: AgentState, call: PlannedToolCall) -> bool:
+    return _ready_task_for_call(state, call) is not None
+
+
+def _ready_task_for_call(
+    state: AgentState,
+    call: PlannedToolCall,
+) -> RoutedTask | None:
     ready = {item.id: item for item in _ready_unattempted_tool_subqueries(state)}
     task = ready.get(call.subquery.strip())
     if task is None:
-        return False
+        return None
     if task.capability not in {None, "planner_required", call.name}:
-        return False
-    return query_fingerprint(call.arguments.get("query")) == query_fingerprint(task.query)
-
-
-def _request_explicitly_requires_comparison(message: str) -> bool:
-    compact = re.sub(r"\s+", "", message.casefold())
-    return any(
-        marker in compact
-        for marker in (
-            "对比",
-            "比较",
-            "区别",
-            "差异",
-            "差别",
-            "哪个好",
-            "哪款更",
-            "哪个更",
-            "选哪个",
-            "怎么选",
-            "compare",
-            "comparison",
-            "difference",
-            "whichisbetter",
-        )
-    )
-
-
-def _active_catalog_search_sku_ids(state: AgentState) -> set[int]:
-    sku_ids: set[int] = set()
-    for result in _active_tool_results(state):
-        if result.get("name") != "catalog_search":
-            continue
-        execution = result.get("execution")
-        if not isinstance(execution, dict) or not execution.get("ok"):
-            continue
-        output = execution.get("output")
-        products = output.get("products") if isinstance(output, dict) else None
-        if not isinstance(products, list):
-            continue
-        for product in products:
-            sku_id = product.get("sku_id") if isinstance(product, dict) else None
-            if isinstance(sku_id, int) and not isinstance(sku_id, bool):
-                sku_ids.add(sku_id)
-    return sku_ids
-
-
-def _context_catalog_sku_ids(state: AgentState) -> set[int]:
-    snapshot = state.get("working_memory_snapshot") or state.get("working_memory", {})
-    catalog = snapshot.get("catalog")
-    if not isinstance(catalog, dict):
-        return set()
-    values = catalog.get("candidate_sku_ids")
-    candidates = values if isinstance(values, list) else []
-    referenced = catalog.get("referenced_sku_id")
-    if referenced is not None:
-        candidates = [referenced, *candidates]
-    return {value for value in candidates if isinstance(value, int) and not isinstance(value, bool)}
+        return None
+    if query_fingerprint(call.arguments.get("query")) != query_fingerprint(task.query):
+        return None
+    return task
 
 
 def _tool_result_by_call_id(state: AgentState, call_id: str) -> dict[str, Any] | None:
@@ -589,10 +546,27 @@ def _ai_message_text(message: AIMessage) -> str:
 
 def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDecision:
     """Stop the loop without discarding observations already useful to the user."""
-    usable_ids = _usable_tool_call_ids(state)
-    unresolved = _unresolved_initial_subqueries(state)
-    if usable_ids:
-        response = _fallback_answer(state)
+    answer_context = build_answer_context(state)
+    has_task_context = bool(answer_context["tasks"])
+    answerable_ids = (
+        answerable_source_tool_call_ids(state)
+        if has_task_context
+        else _usable_tool_call_ids(state)
+    )
+    unresolved = (
+        list(answer_context["unavailable_parts"])
+        if has_task_context
+        else _unresolved_initial_subqueries(state)
+    )
+    if answerable_ids:
+        has_positive_facts = not has_task_context or any(
+            task["semantic_outcome"] == "answered_with_facts" for task in answer_context["tasks"]
+        )
+        response = (
+            _fallback_answer(state)
+            if has_positive_facts
+            else _fallback_unavailable_answer(state)
+        )
         if unresolved:
             response = (
                 f"{response}\n\n"
@@ -604,7 +578,7 @@ def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDeci
                 response=response,
                 reason=reason,
                 control_action="finish_partial",
-                used_tool_call_ids=usable_ids,
+                used_tool_call_ids=answerable_ids,
                 unavailable_parts=unresolved,
             )
         return OrchestratorDecision(
@@ -612,7 +586,7 @@ def _state_terminal_decision(state: AgentState, reason: str) -> OrchestratorDeci
             response=response,
             reason=reason,
             control_action="finish_answer",
-            used_tool_call_ids=usable_ids,
+            used_tool_call_ids=answerable_ids,
         )
     if state.get("tool_results"):
         return OrchestratorDecision(

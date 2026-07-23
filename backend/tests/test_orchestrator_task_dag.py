@@ -150,7 +150,7 @@ def _state_after_first_wave() -> AgentState:
     return cast(
         AgentState,
         {
-            "message": "对比这个和销量第二的键盘，再推荐一个鼠标",
+            "message": "那跟销量第二的比呢？",
             "route_plan": plan.model_dump(mode="json"),
             "working_memory": {
                 "catalog": {
@@ -213,7 +213,7 @@ def test_ranked_search_preparation_stays_within_public_tool_contract() -> None:
     }
 
 
-def test_next_wave_binds_context_and_ranked_task_output_for_compare() -> None:
+def test_next_wave_uses_ready_compare_task_without_reclassifying_raw_message() -> None:
     state = _state_after_first_wave()
     decision = decision_from_route_capabilities(_plan(), state)
 
@@ -229,6 +229,19 @@ def test_next_wave_binds_context_and_ranked_task_output_for_compare() -> None:
     assert effective.arguments["query"] == "比较当前商品与键盘销量第二名的区别"
     assert effective.canonical_query == "比较当前商品与键盘销量第二名的区别"
     assert _followup_tool_call_allowed(state, effective) is True
+
+
+def test_structured_compare_binding_does_not_append_raw_message_candidates() -> None:
+    state = _state_after_first_wave()
+    state["message"] = "那跟第二个比呢？"
+    state["working_memory"]["catalog"]["candidate_sku_ids"] = [757, 999]
+    decision = decision_from_route_capabilities(_plan(), state)
+    assert decision is not None
+
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    effective, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
+
+    assert effective.arguments["sku_ids"] == [757, 711]
 
 
 def test_comparison_followup_binds_previous_pair_without_catalog_search() -> None:

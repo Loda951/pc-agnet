@@ -126,6 +126,7 @@ def build_orchestrator_user_prompt(
     task_status: Mapping[str, Any] | None = None,
     task_artifacts: Mapping[str, Any] | None = None,
     terminal_guard_feedback: str | None = None,
+    answer_context: Mapping[str, Any] | None = None,
 ) -> str:
     execution_state = {
         "completed_tool_waves": tool_wave_count,
@@ -195,6 +196,19 @@ def build_orchestrator_user_prompt(
                 "<task_artifacts>",
                 json.dumps(dict(task_artifacts), ensure_ascii=False, sort_keys=True, default=str),
                 "</task_artifacts>",
+            ]
+        )
+    if answer_context:
+        parts.extend(
+            [
+                "<answer_context>",
+                json.dumps(
+                    dict(answer_context),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+                "</answer_context>",
             ]
         )
     if terminal_guard_feedback:

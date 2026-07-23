@@ -169,6 +169,20 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
                     "status": "succeeded",
                 }
             },
+            "task_artifacts": {
+                "sq_1": {
+                    "task_id": "sq_1",
+                    "goal_id": "sq_1",
+                    "artifact_type": "products",
+                    "usable": True,
+                    "value": {"products": [{"title": "Test Mouse"}]},
+                    "evidence": [{"source_tool_call_id": "call-1"}],
+                    "source_tool_call_id": "call-1",
+                    "source_tool_name": "catalog_search",
+                    "extractor": "deterministic",
+                    "reason": "products_found",
+                }
+            },
             "subquery_ledger": [
                 {
                     "tool_call_id": "call-1",
@@ -185,6 +199,7 @@ def test_route_path_uses_phase_specific_tool_bindings() -> None:
         AgentState,
         {
             **observed,
+            "task_artifacts": {},
             "task_status": {
                 "sq_1": {
                     "task_id": "sq_1",
@@ -366,6 +381,8 @@ def test_customer_response_prompt_hides_internal_terms_and_translates_sales_scop
 
     assert "不向用户展示 Tool" in policy
     assert "不展示 spu_id、sku_id" in policy
+    assert "不直接抛出 SPU、SKU" in policy
+    assert "日常购物语言" in policy
     assert "当前版本销量" in policy
     assert "整个商品" in policy and "系列累计销量" in policy
     assert "不得直接输出“SKU 销量”“SPU 总销量”" in policy

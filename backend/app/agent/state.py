@@ -20,6 +20,7 @@ class AgentState(TypedDict, total=False):
     blocked_subqueries: list[dict[str, Any]]
     task_status: dict[str, dict[str, Any]]
     task_artifacts: dict[str, dict[str, Any]]
+    answer_context: dict[str, Any]
     intent: str
     decision: dict[str, Any]
     orchestrator_call_count: int

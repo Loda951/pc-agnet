@@ -104,7 +104,9 @@ def test_orchestrator_messages_use_artifacts_without_raw_tool_observations() -> 
 
     assert not any(getattr(message, "tool_call_id", None) for message in messages)
     assert '"source_tool_call_id": "call-1"' in str(messages[-1].content)
-    assert "<task_artifacts>" in str(messages[-1].content)
+    assert "<answer_context>" in str(messages[-1].content)
+    assert '"rewritten_query": "Recommend a wireless mouse"' in str(messages[-1].content)
+    assert '"semantic_outcome": "answered_no_match"' in str(messages[-1].content)
     assert '"result_type": "empty"' not in str(messages[-1].content)
 
 

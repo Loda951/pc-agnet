@@ -77,18 +77,15 @@ class _ArtifactAnswerModel:
     def answer(self, messages: list[Any]) -> AIMessage:
         self.answer_call_count += 1
         content = str(messages[-1].content)
-        tasks = _tagged_json(content, "routed_subqueries")
-        artifacts = _tagged_json(content, "task_artifacts")
+        answer_context = _tagged_json(content, "answer_context")
         parts: list[str] = []
         used_ids: list[str] = []
 
-        for task in tasks:
-            if task["answer_role"] != "user_facing":
-                continue
-            artifact = artifacts[task["id"]]
-            assert artifact["usable"] is True
+        for task in answer_context["tasks"]:
+            artifact = task["artifact"]
+            assert task["semantic_outcome"] == "answered_with_facts"
             used_ids.append(artifact["source_tool_call_id"])
-            value = artifact["value"]
+            value = artifact["facts"]
             tool_name = artifact["source_tool_name"]
             if tool_name == "catalog_compare":
                 products = value["products"]
@@ -1413,7 +1410,7 @@ def _single_goal_multitask_cases() -> list[Any]:
                 [("task_110", "catalog_compare")],
             ],
             ["Rank-1 Keyboard SKU", "Rank-1 Mouse"],
-            1,
+            0,
             id="two-ranked-products-then-compare",
         ),
         pytest.param(
@@ -1431,7 +1428,7 @@ def _single_goal_multitask_cases() -> list[Any]:
             None,
             [[("task_113", "catalog_search"), ("task_114", "knowledge_search")]],
             ["Keyboard Choice（SKU 401，¥499.00）", "连接方式、尺寸和使用场景"],
-            1,
+            0,
             id="recommendation-and-knowledge-in-parallel",
         ),
         pytest.param(
@@ -1440,7 +1437,7 @@ def _single_goal_multitask_cases() -> list[Any]:
             None,
             [[("task_115", "catalog_facets"), ("task_116", "catalog_search")]],
             ["E2E Display、Fixture Vision", "Rank-3 Monitor（SKU 301，¥1599.00）"],
-            1,
+            0,
             id="facets-and-recommendation-in-parallel",
         ),
         pytest.param(
@@ -1464,7 +1461,7 @@ def _single_goal_multitask_cases() -> list[Any]:
                 [("task_121", "catalog_compare")],
             ],
             ["Rank-2 Headset（SKU 802，¥599.00）", "连接方式、尺寸和使用场景"],
-            1,
+            0,
             id="ranked-headset-compare-with-parallel-knowledge",
         ),
     ]

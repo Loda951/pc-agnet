@@ -327,10 +327,23 @@ def validate_terminal_decision(
     clarification_allowed: bool = False,
     resolved_task_ids: Sequence[str] | None = None,
     usable_artifact_tool_call_ids: Sequence[str] | None = None,
+    answerable_tool_call_ids: Sequence[str] | None = None,
+    boundary_consistent: bool = True,
+    handoff_confirmation_allowed: bool = False,
 ) -> TerminalValidation:
     action = decision.control_action
     if decision.type == "invalid" or action is None:
         return TerminalValidation(valid=False, reason="missing_or_invalid_control_action")
+    if not boundary_consistent:
+        return TerminalValidation(valid=False, reason="terminal_boundary_changed")
+    if decision.offer_handoff_confirmation and (
+        not handoff_confirmation_allowed
+        or action not in {"finish_partial", "finish_unavailable"}
+    ):
+        return TerminalValidation(
+            valid=False,
+            reason="handoff_confirmation_not_allowed_for_terminal_state",
+        )
 
     active_entries = [entry for entry in ledger if is_active_ledger_entry(entry)]
     usable_ids = (
@@ -343,6 +356,11 @@ def validate_terminal_decision(
         else set(active_usable_tool_call_ids(ledger))
     )
     active_ids = {str(entry.get("tool_call_id")) for entry in active_entries}
+    answerable_ids = (
+        {str(call_id) for call_id in answerable_tool_call_ids if str(call_id)}
+        if answerable_tool_call_ids is not None
+        else usable_ids
+    )
     used_ids = set(decision.used_tool_call_ids)
 
     initial_subqueries = {
@@ -371,10 +389,10 @@ def validate_terminal_decision(
     all_initial_subqueries_resolved = initial_subqueries <= resolved_subqueries
 
     if action == "ask_clarification":
-        if usable_ids:
+        if answerable_ids:
             return TerminalValidation(
                 valid=False,
-                reason="clarification_cannot_discard_usable_tool_results",
+                reason="clarification_cannot_discard_answerable_task_results",
             )
         return _terminal_validation(
             decision.type == "clarification" and clarification_allowed,
@@ -383,7 +401,7 @@ def validate_terminal_decision(
     if action == "finish_answer":
         valid = (
             bool(used_ids)
-            and used_ids <= usable_ids
+            and used_ids <= answerable_ids
             and all_initial_subqueries_resolved
         )
         return _terminal_validation(
@@ -391,20 +409,24 @@ def validate_terminal_decision(
             (
                 "finish_answer_requires_all_initial_subqueries_resolved"
                 if not all_initial_subqueries_resolved
-                else "finish_answer_requires_only_active_usable_tool_call_ids"
+                else "finish_answer_requires_only_answerable_tool_call_ids"
             ),
         )
     if action == "finish_partial":
-        valid = bool(used_ids) and used_ids <= usable_ids and bool(decision.unavailable_parts)
+        valid = (
+            bool(used_ids)
+            and used_ids <= answerable_ids
+            and bool(decision.unavailable_parts)
+        )
         return _terminal_validation(
             decision.type == "partial_response" and valid,
-            "finish_partial_requires_usable_ids_and_unavailable_parts",
+            "finish_partial_requires_answerable_ids_and_unavailable_parts",
         )
     if action == "finish_unavailable":
-        valid = bool(active_ids) and not usable_ids and bool(decision.unavailable_parts)
+        valid = bool(active_ids) and not answerable_ids and bool(decision.unavailable_parts)
         return _terminal_validation(
             decision.type == "unavailable_response" and valid,
-            "finish_unavailable_requires_results_but_no_usable_information",
+            "finish_unavailable_requires_results_but_no_answerable_task",
         )
     return TerminalValidation(valid=False, reason="unknown_control_action")
 

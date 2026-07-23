@@ -7,6 +7,11 @@ from langgraph.config import get_stream_writer
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.answer_context import (
+    answerable_source_tool_call_ids,
+    build_answer_context,
+    resolved_answer_task_ids,
+)
 from app.agent.artifacts import (
     bound_task_order_id,
     bound_task_sku_ids,
@@ -52,12 +57,13 @@ from app.agent.prompts import (
     SESSION_GROUNDED_RESPONSE_PROMPT,
 )
 from app.agent.responses import (
+    LATE_HANDOFF_CONFIRMATION,
     _append_blocked_route_notices,
+    _append_late_handoff_confirmation,
     _fallback_answer,
     _fallback_unavailable_answer,
     _route_terminal_answer,
     _suggest_actions,
-    _usable_tool_call_ids,
 )
 from app.agent.responses import (
     _has_successful_tool_result as _has_successful_tool_result,
@@ -576,21 +582,33 @@ class AgentRuntime:
 
     async def _terminal_guard(self, state: AgentState) -> AgentState:
         decision = OrchestratorDecision.model_validate(state["decision"])
+        answer_context = build_answer_context(state)
+        route_boundary = _boundary_from_route_plan(
+            RequestRoutePlan.model_validate(state["route_plan"])
+        )
+        current_boundary = str(state.get("boundary", {}).get("classification") or "")
+        boundary_consistent = (
+            not current_boundary
+            or current_boundary == str(route_boundary.get("classification") or "")
+        )
         validation = validate_terminal_decision(
             decision,
             state.get("subquery_ledger", []),
             planned_subquery_ids=[item.id for item in user_facing_tasks(state["route_plan"])],
             clarification_allowed=bool(user_clarifiable_blockers(state)),
-            resolved_task_ids=[
-                task_id
-                for task_id, task_state in state.get("task_status", {}).items()
-                if task_state.get("status") == "succeeded"
-            ],
+            resolved_task_ids=resolved_answer_task_ids(state),
             usable_artifact_tool_call_ids=[
                 str(artifact.get("source_tool_call_id"))
                 for artifact in state.get("task_artifacts", {}).values()
                 if artifact.get("usable") and artifact.get("source_tool_call_id")
             ],
+            answerable_tool_call_ids=answerable_source_tool_call_ids(state),
+            boundary_consistent=boundary_consistent,
+            handoff_confirmation_allowed=(
+                answer_context["completion"] in {"partial", "none"}
+                and bool(answer_context["unresolved_task_ids"])
+                and route_boundary.get("classification") == "in_scope_auto"
+            ),
         )
         if validation.valid:
             if decision.control_action in {"finish_answer", "finish_partial"}:
@@ -598,14 +616,11 @@ class AgentRuntime:
                 for entry in state.get("subquery_ledger", []):
                     if str(entry.get("tool_call_id") or "") in used_ids:
                         entry["status"] = "answered"
-            if decision.control_action == "finish_unavailable":
-                decision.response = _fallback_unavailable_answer(state)
-                state["decision"] = decision.model_dump(mode="json")
             state["terminal_guard_status"] = "accepted"
             state.pop("terminal_guard_feedback", None)
             return state
 
-        if _usable_tool_call_ids(state):
+        if answer_context["answerable_source_tool_call_ids"]:
             fallback = _terminal_fallback_decision(state, validation.reason)
             state["decision"] = fallback.model_dump(mode="json")
             state["intent"] = _tag_from_decision(fallback, state.get("intent"))
@@ -670,13 +685,18 @@ class AgentRuntime:
         elif call.name == "catalog_compare":
             request = CatalogCompareInput.model_validate(arguments)
             bound_sku_ids = bound_task_sku_ids(state, task) if task is not None else []
-            resolved_sku_ids = _resolve_compare_sku_ids(
-                state["message"], state.get("working_memory_snapshot", {})
-            )
-            planned_sku_ids = [] if task and task.input_requirements else request.sku_ids
-            sku_ids = list(dict.fromkeys([*bound_sku_ids, *planned_sku_ids, *resolved_sku_ids]))[
-                :10
-            ]
+            if task is not None and task.input_requirements:
+                # A frozen Task DAG owns comparison binding. Do not append products inferred
+                # again from the raw utterance after Router and Artifact Store have resolved
+                # the declared inputs.
+                sku_ids = bound_sku_ids
+            else:
+                resolved_sku_ids = _resolve_compare_sku_ids(
+                    state["message"], state.get("working_memory_snapshot", {})
+                )
+                sku_ids = list(
+                    dict.fromkeys([*bound_sku_ids, *request.sku_ids, *resolved_sku_ids])
+                )[:10]
             if sku_ids:
                 request = request.model_copy(update={"sku_ids": sku_ids})
             arguments = request.model_dump(mode="json", exclude_none=True)
@@ -722,6 +742,15 @@ class AgentRuntime:
     async def _finalize_response(self, state: AgentState) -> AgentState:
         decision = OrchestratorDecision.model_validate(state["decision"])
         answer = decision.response.strip() or _fallback_answer(state)
+        if (
+            decision.control_action == "finish_unavailable"
+            and decision.offer_handoff_confirmation
+        ):
+            answer = LATE_HANDOFF_CONFIRMATION
+        elif decision.control_action == "finish_unavailable":
+            answer = _fallback_unavailable_answer(state)
+        elif decision.offer_handoff_confirmation:
+            answer = _append_late_handoff_confirmation(answer)
         state["answer"] = _append_blocked_route_notices(answer, state)
         state["suggested_actions"] = _suggest_actions(state)
         return state

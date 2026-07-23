@@ -619,6 +619,20 @@ def test_finish_unavailable_requires_tool_results_and_zero_usable_information() 
     assert validate_terminal_decision(decision, usable_ledger).valid is False
 
 
+def test_finish_unavailable_parses_structured_handoff_confirmation_offer() -> None:
+    message = _control_message(
+        "finish_unavailable",
+        response="目前不能直接办理这项操作。",
+        unavailable_parts=["办理退货"],
+        offer_handoff_confirmation=True,
+    )
+
+    decision = decision_from_ai_message(message)
+
+    assert decision.control_action == "finish_unavailable"
+    assert decision.offer_handoff_confirmation is True
+
+
 def test_control_action_cannot_be_mixed_with_business_tool_call() -> None:
     message = _control_message("finish_answer", response="你好", used_tool_call_ids=["catalog-1"])
     message.tool_calls.append(
@@ -656,7 +670,7 @@ class _FakeChatModel:
 
 
 @pytest.mark.asyncio
-async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() -> None:
+async def test_guard_replans_false_grounded_answer_then_renderer_uses_unavailable() -> None:
     model = _FakeChatModel(
         [
             _control_message(
@@ -733,9 +747,10 @@ async def test_guard_replans_false_grounded_answer_then_accepts_unavailable() ->
 
     second = await runtime._orchestrate(first_guard)
     second_guard = await runtime._terminal_guard(second)
+    finalized = await runtime._finalize_response(second_guard)
 
     assert second_guard["terminal_guard_status"] == "accepted"
     assert second_guard["decision"]["type"] == "unavailable_response"
     assert second_guard["boundary"]["classification"] == "in_scope_auto"
-    assert "不支持" in second_guard["decision"]["response"]
-    assert "上涨" not in second_guard["decision"]["response"]
+    assert "不支持" in finalized["answer"]
+    assert "上涨" not in finalized["answer"]
