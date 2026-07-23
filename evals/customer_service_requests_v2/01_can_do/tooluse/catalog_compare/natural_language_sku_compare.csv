@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-NATURALLANGUAGESKUCOMPARE-001,01_can_do,tooluse/catalog_compare,natural_language_sku_compare,帮我比较一下 Logitech 和 Razer 的无线鼠标，主要看重量、DPI 和价格。,,tool_planning,catalog.compare,comparison_table,解析两个自然语言候选组并分别检索,不得只查一批整体候选再混合比较
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-NATURALLANGUAGESKUCOMPARE-002,01_can_do,tooluse/catalog_compare,natural_language_sku_compare,Keychron 75% 键盘和 Akko 75% 键盘哪个更适合办公？,,tool_planning,catalog.compare,comparison_table,比较品牌、价格、库存、连接方式、轴体等事实字段,不得编造主观手感
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-NATURALLANGUAGESKUCOMPARE-003,01_can_do,tooluse/catalog_compare,natural_language_sku_compare,AOC 27 寸 2K 和 Dell 27 寸 2K 显示器差在哪？,,tool_planning,catalog.compare,comparison_table,比较刷新率、面板、响应时间、价格,不得混入不同尺寸分辨率
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-NATURALLANGUAGESKUCOMPARE-004,01_can_do,tooluse/catalog_compare,natural_language_sku_compare,帮我比较 Sony 和 HyperX 的头戴式耳机。,,tool_planning,catalog.compare,comparison_table,解析两个自然语言候选组并分别检索,不得只查一批整体候选再混合比较
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-NATURALLANGUAGESKUCOMPARE-005,01_can_do,tooluse/catalog_compare,natural_language_sku_compare,比较一下 Elgato 和 AVerMedia 的摄像头参数。,,tool_planning,catalog.compare,comparison_table,比较品牌、价格、库存、连接方式、轴体等事实字段,不得编造主观手感

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-POLICYSEARCH-REFUNDPOLICY-001,01_can_do,tooluse/policy_search,refund_policy,退款一般多久到账？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-REFUNDPOLICY-002,01_can_do,tooluse/policy_search,refund_policy,还没发货能不能退款？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-REFUNDPOLICY-003,01_can_do,tooluse/policy_search,refund_policy,退款会退到哪里？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-REFUNDPOLICY-004,01_can_do,tooluse/policy_search,refund_policy,取消后退款大概什么时候到账？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-REFUNDPOLICY-005,01_can_do,tooluse/policy_search,refund_policy,退款失败怎么办？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功

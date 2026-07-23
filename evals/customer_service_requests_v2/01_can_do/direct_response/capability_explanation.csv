@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-CAPABILITYEXPLANATION-001,customer_service_requests_v2,01_can_do/direct_response,capability_explanation,你能推荐商品、查订单和回答售后政策吗？,,direct_response,,capability_summary,确认这些能力分别由商品、订单、政策工具支持,不得声称能直接退款或下单
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-CAPABILITYEXPLANATION-002,customer_service_requests_v2,01_can_do/direct_response,capability_explanation,你会不会比较两款外设的参数？,,direct_response,,capability_summary,说明可以对比库存商品的价格、库存、品牌、类目和 specs,不得在没有商品对象时编造对比
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-CAPABILITYEXPLANATION-003,customer_service_requests_v2,01_can_do/direct_response,capability_explanation,你能查到品牌介绍和选购知识吗？,,direct_response,,capability_summary,说明可回答品牌、商家、FAQ 和外设知识,不得做外部网页搜索承诺
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-CAPABILITYEXPLANATION-004,customer_service_requests_v2,01_can_do/direct_response,capability_explanation,你能不能同时查商品和售后规则？,,direct_response,,capability_summary,确认这些能力分别由商品、订单、政策工具支持,不得声称能直接退款或下单
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-CAPABILITYEXPLANATION-005,customer_service_requests_v2,01_can_do/direct_response,capability_explanation,你支持查我自己的订单详情吗？,,direct_response,,capability_summary,说明可以对比库存商品的价格、库存、品牌、类目和 specs,不得在没有商品对象时编造对比

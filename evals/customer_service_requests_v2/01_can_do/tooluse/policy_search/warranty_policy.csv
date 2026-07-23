@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-POLICYSEARCH-WARRANTYPOLICY-001,01_can_do,tooluse/policy_search,warranty_policy,显示器保修多久？坏点算不算保修？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-WARRANTYPOLICY-002,01_can_do,tooluse/policy_search,warranty_policy,耳机有质量问题怎么保修？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-WARRANTYPOLICY-003,01_can_do,tooluse/policy_search,warranty_policy,音箱坏了保修需要什么材料？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-WARRANTYPOLICY-004,01_can_do,tooluse/policy_search,warranty_policy,键盘按键失灵保修吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-WARRANTYPOLICY-005,01_can_do,tooluse/policy_search,warranty_policy,摄像头质量问题保修需要寄回吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功

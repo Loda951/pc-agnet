@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-VALIDEMPTYRESULT-001,01_can_do,tooluse/catalog_search,valid_empty_result,有没有 8K、360Hz、20 寸的显示器？,,tool_planning,catalog.search,empty_result,返回 empty_result 和 unsupported/over_constrained 诊断,不得编造不存在商品
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-VALIDEMPTYRESULT-002,01_can_do,tooluse/catalog_search,valid_empty_result,我想要粉色 4K 240fps 的摄像头。,,tool_planning,catalog.search,empty_result,能识别约束并返回无匹配原因,不得放宽条件却不说明
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-VALIDEMPTYRESULT-003,01_can_do,tooluse/catalog_search,valid_empty_result,有没有 Bose 的 100W 头戴式耳机？,,tool_planning,catalog.search,empty_result,识别品类/品牌/规格冲突或无结果,不得把音箱当耳机推荐
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-VALIDEMPTYRESULT-004,01_can_do,tooluse/catalog_search,valid_empty_result,有没有 16K 分辨率的摄像头？,,tool_planning,catalog.search,empty_result,返回 empty_result 和 unsupported/over_constrained 诊断,不得编造不存在商品
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-VALIDEMPTYRESULT-005,01_can_do,tooluse/catalog_search,valid_empty_result,我想要 500Hz、17 寸 OLED 显示器。,,tool_planning,catalog.search,empty_result,能识别约束并返回无匹配原因,不得放宽条件却不说明

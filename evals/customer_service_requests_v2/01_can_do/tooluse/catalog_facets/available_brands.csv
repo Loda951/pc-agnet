@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLEBRANDS-001,01_can_do,tooluse/catalog_facets,available_brands,你们卖哪些品牌的鼠标？,,tool_planning,catalog.facets,facet_list,返回指定品类的品牌枚举，基于数据库 distinct 值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLEBRANDS-002,01_can_do,tooluse/catalog_facets,available_brands,键盘有哪些牌子可以选？,,tool_planning,catalog.facets,facet_list,返回指定品类的品牌枚举，基于数据库 distinct 值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLEBRANDS-003,01_can_do,tooluse/catalog_facets,available_brands,显示器品牌列表给我看一下。,,tool_planning,catalog.facets,facet_list,返回指定品类的品牌枚举，基于数据库 distinct 值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLEBRANDS-004,01_can_do,tooluse/catalog_facets,available_brands,耳机有哪些品牌？,,tool_planning,catalog.facets,facet_list,返回指定品类的品牌枚举，基于数据库 distinct 值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLEBRANDS-005,01_can_do,tooluse/catalog_facets,available_brands,摄像头有哪些牌子？,,tool_planning,catalog.facets,facet_list,返回指定品类的品牌枚举，基于数据库 distinct 值,不得推荐一批 SKU 替代枚举回答

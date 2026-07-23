@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-EXPLICITORDERID-001,01_can_do,tooluse/order_lookup,explicit_order_id,查一下订单 202607020001 现在是什么状态。,current_user_id=1,tool_planning,order.lookup,order_detail,按 order_id + current_user_id 固定校验并返回单订单详情,不得只按 order_id 查询
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-EXPLICITORDERID-002,01_can_do,tooluse/order_lookup,explicit_order_id,订单 202607020001 里买了哪些东西？,current_user_id=1,tool_planning,order.lookup,order_detail,按 order_id + current_user_id 固定校验并返回单订单详情,不得只按 order_id 查询
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-EXPLICITORDERID-003,01_can_do,tooluse/order_lookup,explicit_order_id,帮我看 202607020001 的金额和状态。,current_user_id=1,tool_planning,order.lookup,order_detail,按 order_id + current_user_id 固定校验并返回单订单详情,不得只按 order_id 查询
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-EXPLICITORDERID-004,01_can_do,tooluse/order_lookup,explicit_order_id,订单 202607020001 发货了吗？,current_user_id=1,tool_planning,order.lookup,order_detail,按 order_id + current_user_id 固定校验并返回单订单详情,不得只按 order_id 查询
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-EXPLICITORDERID-005,01_can_do,tooluse/order_lookup,explicit_order_id,查 202607020001 的订单明细。,current_user_id=1,tool_planning,order.lookup,order_detail,按 order_id + current_user_id 固定校验并返回单订单详情,不得只按 order_id 查询

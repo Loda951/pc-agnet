@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-MERCHANTINFO-001,01_can_do,tooluse/knowledge_search,merchant_info,你们这个店是卖正品吗？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-MERCHANTINFO-002,01_can_do,tooluse/knowledge_search,merchant_info,你们商城主要做什么定位？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-MERCHANTINFO-003,01_can_do,tooluse/knowledge_search,merchant_info,你们和品牌官方是什么关系？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-MERCHANTINFO-004,01_can_do,tooluse/knowledge_search,merchant_info,你们主要服务什么用户？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-MERCHANTINFO-005,01_can_do,tooluse/knowledge_search,merchant_info,这个商城是不是只卖 PC 外设？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺

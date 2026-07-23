@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-GREETINGANDIDENTITY-001,customer_service_requests_v2,01_can_do/direct_response,greeting_and_identity,你好，你是人工客服还是智能客服？,,direct_response,,identity_message,说明是 PC 外设商城智能客服，可协助商品、订单、政策和知识问题,不得假装人工客服
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-GREETINGANDIDENTITY-002,customer_service_requests_v2,01_can_do/direct_response,greeting_and_identity,嗨，你现在能帮我处理什么？,,direct_response,,capability_summary,简要说明能力范围，不调用工具,不得承诺写操作
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-GREETINGANDIDENTITY-003,customer_service_requests_v2,01_can_do/direct_response,greeting_and_identity,我第一次用，你先介绍一下自己。,,direct_response,,identity_message,说明身份和服务边界,不得索要隐私信息
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-GREETINGANDIDENTITY-004,customer_service_requests_v2,01_can_do/direct_response,greeting_and_identity,你好，我能在这里买外设吗？,,direct_response,,identity_message,说明是 PC 外设商城智能客服，可协助商品、订单、政策和知识问题,不得假装人工客服
+CSR2-EDGE-01CANDO-DIRECTRESPONSE-GREETINGANDIDENTITY-005,customer_service_requests_v2,01_can_do/direct_response,greeting_and_identity,你是这个商城的客服助手吗？,,direct_response,,capability_summary,简要说明能力范围，不调用工具,不得承诺写操作

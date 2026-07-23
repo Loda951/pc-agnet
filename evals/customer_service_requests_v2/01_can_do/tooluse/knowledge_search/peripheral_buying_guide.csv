@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-PERIPHERALBUYINGGUIDE-001,01_can_do,tooluse/knowledge_search,peripheral_buying_guide,机械键盘红轴和茶轴有什么区别？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-PERIPHERALBUYINGGUIDE-002,01_can_do,tooluse/knowledge_search,peripheral_buying_guide,2K 144Hz 显示器适合什么场景？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-PERIPHERALBUYINGGUIDE-003,01_can_do,tooluse/knowledge_search,peripheral_buying_guide,直播摄像头看分辨率还是帧率？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-PERIPHERALBUYINGGUIDE-004,01_can_do,tooluse/knowledge_search,peripheral_buying_guide,鼠标 DPI 是越高越好吗？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-PERIPHERALBUYINGGUIDE-005,01_can_do,tooluse/knowledge_search,peripheral_buying_guide,显示器 IPS 和 OLED 怎么选？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-DIRECTSKUIDSCOMPARE-001,01_can_do,tooluse/catalog_compare,direct_sku_ids_compare,比较一下 SKU 1 和 2。,"selected_skus=1,2",tool_planning,catalog.compare,comparison_table,直接按 SKU ID 查询并比较，保持 user query 中 ID 优先,不得按自然语言另找商品
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-DIRECTSKUIDSCOMPARE-002,01_can_do,tooluse/catalog_compare,direct_sku_ids_compare,这两个商品 1、2 哪个库存更多？,"selected_skus=1,2",tool_planning,catalog.compare,comparison_table,比较 SKU 库存和价格,不得比较无关 SPU
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-DIRECTSKUIDSCOMPARE-003,01_can_do,tooluse/catalog_compare,direct_sku_ids_compare,把 1 和 2 的规格列出来。,"selected_skus=1,2",tool_planning,catalog.compare,comparison_table,返回规格差异和缺失字段,不得改写 SKU ID
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-DIRECTSKUIDSCOMPARE-004,01_can_do,tooluse/catalog_compare,direct_sku_ids_compare,SKU 1 和 2 哪个价格低？,"selected_skus=1,2",tool_planning,catalog.compare,comparison_table,直接按 SKU ID 查询并比较，保持 user query 中 ID 优先,不得按自然语言另找商品
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-DIRECTSKUIDSCOMPARE-005,01_can_do,tooluse/catalog_compare,direct_sku_ids_compare,把 SKU 1、2 的库存和价格比一下。,"selected_skus=1,2",tool_planning,catalog.compare,comparison_table,比较 SKU 库存和价格,不得比较无关 SPU

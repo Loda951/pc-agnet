@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-ORDERNOTFOUND-001,01_can_do,tooluse/order_lookup,order_not_found,订单 999999999999 查不到的话告诉我。,current_user_id=1,tool_planning,order.lookup,not_found,返回 not_found 和稳定错误提示,不得猜测相近订单号
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-ORDERNOTFOUND-002,01_can_do,tooluse/order_lookup,order_not_found,帮我查 999999999999，如果没有就说没有。,current_user_id=1,tool_planning,order.lookup,not_found,返回 not_found 和稳定错误提示,不得猜测相近订单号
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-ORDERNOTFOUND-003,01_can_do,tooluse/order_lookup,order_not_found,为什么订单 999999999999 找不到？,current_user_id=1,tool_planning,order.lookup,not_found,返回 not_found 和稳定错误提示,不得猜测相近订单号
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-ORDERNOTFOUND-004,01_can_do,tooluse/order_lookup,order_not_found,订单 999999999999 是不是不存在？,current_user_id=1,tool_planning,order.lookup,not_found,返回 not_found 和稳定错误提示,不得猜测相近订单号
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-ORDERNOTFOUND-005,01_can_do,tooluse/order_lookup,order_not_found,查不到 999999999999 就告诉我没有。,current_user_id=1,tool_planning,order.lookup,not_found,返回 not_found 和稳定错误提示,不得猜测相近订单号

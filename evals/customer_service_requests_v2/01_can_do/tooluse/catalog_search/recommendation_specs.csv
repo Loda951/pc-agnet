@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONSPECS-001,01_can_do,tooluse/catalog_search,recommendation_specs,有没有 60g 左右、DPI 高一点的 Pulsar 鼠标？,,tool_planning,catalog.search,product_list,识别 Pulsar、鼠标、weight_g 近似 60、max_dpi 排序,不得把 SPU 销量解释成每个颜色销量
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONSPECS-002,01_can_do,tooluse/catalog_search,recommendation_specs,找个 50W 以上的 JBL 蓝牙音箱。,,tool_planning,catalog.search,product_list,识别 JBL、音箱、power_w>=50、蓝牙,不得把显示器字段混入音箱
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONSPECS-003,01_can_do,tooluse/catalog_search,recommendation_specs,我要 4K、USB-C、60fps 的摄像头。,,tool_planning,catalog.search,product_list,识别摄像头、4K、USB-C、frame_rate>=60fps,不得承诺直播平台兼容性
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONSPECS-004,01_can_do,tooluse/catalog_search,recommendation_specs,有没有 240Hz 的显示器，响应时间越低越好？,,tool_planning,catalog.search,product_list,识别 Pulsar、鼠标、weight_g 近似 60、max_dpi 排序,不得把 SPU 销量解释成每个颜色销量
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONSPECS-005,01_can_do,tooluse/catalog_search,recommendation_specs,找个带麦克风的无线耳机，最好是头戴式。,,tool_planning,catalog.search,product_list,识别 JBL、音箱、power_w>=50、蓝牙,不得把显示器字段混入音箱
