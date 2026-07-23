@@ -182,9 +182,7 @@ def _condition(
     return ProductSpecCondition(key=key, operator=operator, values=list(values))
 
 
-USAGE_SCENARIO_RULES: dict[
-    tuple[str, str], dict[str, tuple[ProductSpecCondition, ...]]
-] = {
+USAGE_SCENARIO_RULES: dict[tuple[str, str], dict[str, tuple[ProductSpecCondition, ...]]] = {
     ("office", "keyboard"): {
         "preferred": (_condition("switches", "exact", "静音红轴"),),
     },
@@ -212,9 +210,7 @@ USAGE_SCENARIO_RULES: dict[
         ),
     },
     ("gaming", "keyboard"): {
-        "preferred": (
-            _condition("switches", "in", "磁轴", "线性红轴"),
-        ),
+        "preferred": (_condition("switches", "in", "磁轴", "线性红轴"),),
     },
     ("gaming", "headset"): {
         "preferred": (
@@ -489,7 +485,6 @@ class LLMCatalogQueryPlanner:
         _apply_explicit_overrides(plan, overrides)
         return plan
 
-
     async def _invoke_with_retry(self, system_prompt: str, payload: dict, validator) -> dict:
         last_error: Exception | None = None
         retry_payload = dict(payload)
@@ -553,7 +548,9 @@ class CatalogToolService:
             ranking_strategy = "spu_sales_representative"
         else:
             products = await repository.search_products(product_request)
-            ranking_strategy = "match_score_sales_stock_price"
+            ranking_strategy = (
+                "match_score_sales_stock_price" if plan.sort == "recommend" else plan.sort
+            )
         products = _filter_brands(products, plan.brands)
         products = _filter_excluded_preferences(products, plan.excluded_brands, plan.excluded_usage)
         result_type = "products" if products else "empty"
@@ -718,9 +715,7 @@ class CatalogToolService:
                 "sku_ids": request.sku_ids,
                 "query": request.query,
                 "compare_plan": (
-                    _plan_dump_with_diagnostics(compare_plan, diagnostics)
-                    if compare_plan
-                    else None
+                    _plan_dump_with_diagnostics(compare_plan, diagnostics) if compare_plan else None
                 ),
                 "error_type": _diagnostic_error_type(diagnostics),
             },
@@ -1105,9 +1100,7 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
         plan.usage_scenario = normalized_usage
 
     plan.filters, normalization_debug = _normalize_catalog_filters_with_debug(plan.filters)
-    plan.filters, pruned_debug = _prune_redundant_filter_values(
-        plan.filters, normalized_category
-    )
+    plan.filters, pruned_debug = _prune_redundant_filter_values(plan.filters, normalized_category)
     normalization_debug = {**normalization_debug, **pruned_debug}
     if normalization_debug:
         plan.normalization_debug = {**plan.normalization_debug, **normalization_debug}
@@ -1457,6 +1450,7 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
         filters=plan.filters,
         excluded_brands=plan.excluded_brands,
         excluded_usage=plan.excluded_usage,
+        sort=plan.sort,
         limit=min(20, max(12, plan.limit * 4)) if has_exclusions else plan.limit,
     )
 
@@ -1548,11 +1542,8 @@ def _safe_query_prefilter_keywords(plan: ProductQueryPlan) -> list[str]:
 def _is_spec_like_prefilter_token(token: str) -> bool:
     if token.isdigit():
         return True
-    return bool(
-        re.fullmatch(
-            r"\d+(?:\.\d+)?(?:hz|fps|w|k|p|ms|g|dpi|inch|in)", token
-        )
-    )
+    return bool(re.fullmatch(r"\d+(?:\.\d+)?(?:hz|fps|w|k|p|ms|g|dpi|inch|in)", token))
+
 
 def _compare_plan_to_product_query_plan(plan: CatalogComparePlan) -> ProductQueryPlan:
     return ProductQueryPlan(
@@ -1916,9 +1907,7 @@ tables, such as time-series growth, revenue, profit, or user purchase statistics
 def _retry_feedback(plan_data: dict, exc: Exception) -> dict:
     category = _canonical_category(str(plan_data.get("category") or ""))
     allowed_for_category = (
-        sorted(CATEGORY_FILTERS[category])
-        if category and category in CATEGORY_FILTERS
-        else None
+        sorted(CATEGORY_FILTERS[category]) if category and category in CATEGORY_FILTERS else None
     )
     return {
         "error": str(exc),
@@ -2017,6 +2006,36 @@ def _sort_from_query(
     if any(
         marker in lowered
         for marker in (
+            "最贵",
+            "价格最高",
+            "价钱最高",
+            "售价最高",
+            "价格从高到低",
+            "价格降序",
+            "highestprice",
+            "mostexpensive",
+            "priciest",
+        )
+    ):
+        return "price_desc"
+    if any(
+        marker in lowered
+        for marker in (
+            "最便宜",
+            "价格最低",
+            "价钱最低",
+            "售价最低",
+            "价格从低到高",
+            "价格升序",
+            "lowestprice",
+            "cheapest",
+            "leastexpensive",
+        )
+    ):
+        return "price_asc"
+    if any(
+        marker in lowered
+        for marker in (
             "销量最高",
             "销量最好",
             "销量排行",
@@ -2109,9 +2128,7 @@ def _is_supported_sales_rank_query(query: str) -> bool:
         "salesrank",
         "salesranking",
     )
-    return _unsupported_reason(query) is None and any(
-        marker in compact for marker in rank_markers
-    )
+    return _unsupported_reason(query) is None and any(marker in compact for marker in rank_markers)
 
 
 def _is_spu_sales_rank_query(query: str) -> bool:

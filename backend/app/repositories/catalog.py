@@ -181,20 +181,58 @@ class CatalogRepository:
                 break
             offset += page_size
 
-        ranked_products = [
-            (_score_product(product, request, query_tokens), product)
-            for product in eligible_products
-        ]
-        ranked_products.sort(
-            key=lambda item: (
-                -item[0],
-                -item[1].sku_sales_count,
-                0 if item[1].stock > 0 else 1,
-                item[1].price,
-                item[1].title,
+        if request.sort == "price_desc":
+            eligible_products.sort(
+                key=lambda product: (
+                    -product.price,
+                    0 if product.stock > 0 else 1,
+                    -product.sku_sales_count,
+                    product.sku_id,
+                )
             )
-        )
-        return [product for _, product in ranked_products[: request.limit]]
+        elif request.sort == "price_asc":
+            eligible_products.sort(
+                key=lambda product: (
+                    product.price,
+                    0 if product.stock > 0 else 1,
+                    -product.sku_sales_count,
+                    product.sku_id,
+                )
+            )
+        elif request.sort == "sales":
+            eligible_products.sort(
+                key=lambda product: (
+                    -product.sku_sales_count,
+                    0 if product.stock > 0 else 1,
+                    product.price,
+                    product.sku_id,
+                )
+            )
+        elif request.sort == "stock":
+            eligible_products.sort(
+                key=lambda product: (
+                    -product.stock,
+                    -product.sku_sales_count,
+                    product.price,
+                    product.sku_id,
+                )
+            )
+        else:
+            ranked_products = [
+                (_score_product(product, request, query_tokens), product)
+                for product in eligible_products
+            ]
+            ranked_products.sort(
+                key=lambda item: (
+                    -item[0],
+                    -item[1].sku_sales_count,
+                    0 if item[1].stock > 0 else 1,
+                    item[1].price,
+                    item[1].title,
+                )
+            )
+            eligible_products = [product for _, product in ranked_products]
+        return eligible_products[: request.limit]
 
     async def search_product_series_by_sales(
         self,
@@ -372,13 +410,21 @@ def _catalog_search_statement(
     offset: int = 0,
 ) -> Select:
     page_limit = limit or _candidate_page_size(request.limit)
+    if request.sort == "price_desc":
+        order_by = (Sku.price.desc(), Sku.stock.desc(), Sku.sales_count.desc(), Sku.id.asc())
+    elif request.sort == "price_asc":
+        order_by = (Sku.price.asc(), Sku.stock.desc(), Sku.sales_count.desc(), Sku.id.asc())
+    elif request.sort == "stock":
+        order_by = (Sku.stock.desc(), Sku.sales_count.desc(), Sku.price.asc(), Sku.id.asc())
+    else:
+        order_by = (Sku.sales_count.desc(), Sku.stock.desc(), Sku.price.asc(), Sku.id.asc())
     stmt: Select = (
         select(Sku, Spu, Brand, Category)
         .join(Spu, Sku.spu_id == Spu.id)
         .join(Brand, Spu.brand_id == Brand.id)
         .join(Category, Spu.category_id == Category.id)
         .where(Sku.status == 1, Spu.status == 1)
-        .order_by(Sku.sales_count.desc(), Sku.stock.desc(), Sku.price.asc())
+        .order_by(*order_by)
         .limit(page_limit)
         .offset(offset)
     )
@@ -418,15 +464,12 @@ def _take_eligible_products(
     required_conditions = required_conditions or []
     if not excluded_usage and not usage_scenario and not required_conditions:
         return products[:limit]
-    excluded_usage_terms = {
-        term for usage in excluded_usage for term in _usage_terms(usage)
-    }
+    excluded_usage_terms = {term for usage in excluded_usage for term in _usage_terms(usage)}
     required_usage_terms = _usage_terms(usage_scenario) if usage_scenario else set()
     eligible: list[ProductCard] = []
     for product in products:
         if not all(
-            _matches_spec_condition(product.specs, condition)
-            for condition in required_conditions
+            _matches_spec_condition(product.specs, condition) for condition in required_conditions
         ):
             continue
         haystack = " ".join([product.title, product.category, *product.specs.values()]).lower()
@@ -520,9 +563,7 @@ def _matches_filters(specs: dict[str, str], filters: dict[str, str]) -> bool:
     return True
 
 
-def _matches_spec_condition(
-    specs: dict[str, str], condition: ProductSpecCondition
-) -> bool:
+def _matches_spec_condition(specs: dict[str, str], condition: ProductSpecCondition) -> bool:
     if condition.operator == "exact":
         actual = next(
             (value for key, value in specs.items() if key.lower() == condition.key.lower()),

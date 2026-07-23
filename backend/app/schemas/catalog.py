@@ -21,6 +21,7 @@ class ProductSearchRequest(BaseModel):
     filters: dict[str, str] = Field(default_factory=dict)
     excluded_brands: list[str] = Field(default_factory=list, max_length=8)
     excluded_usage: list[str] = Field(default_factory=list, max_length=8)
+    sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
     limit: int = Field(default=8, ge=1, le=20)
 
 

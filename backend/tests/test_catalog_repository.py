@@ -21,10 +21,7 @@ def test_category_aliases_include_compact_catalog_categories() -> None:
 def test_sales_rank_control_terms_do_not_become_catalog_keywords() -> None:
     from app.repositories import catalog as catalog_repository
 
-    assert (
-        catalog_repository._query_tokens("查询键盘品类中销量排名第二的 SPU 是什么")
-        == []
-    )
+    assert catalog_repository._query_tokens("查询键盘品类中销量排名第二的 SPU 是什么") == []
 
 
 @pytest.mark.asyncio
@@ -88,6 +85,84 @@ def test_search_statement_pushes_excluded_brands_into_sql() -> None:
     sql = str(statement.compile(dialect=postgresql.dialect()))
 
     assert sql.count("brand.name NOT ILIKE") == 2
+
+
+@pytest.mark.parametrize(
+    ("sort", "expected_order"),
+    [
+        ("price_desc", [2, 3, 1]),
+        ("price_asc", [1, 3, 2]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_products_honors_price_extrema_sort(
+    sort: str,
+    expected_order: list[int],
+) -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=1,
+            sku_id=1,
+            title="Mouse 252",
+            brand="Test",
+            category="mouse",
+            price="252.00",
+            stock=102,
+            sku_sales_count=30,
+        ),
+        ProductCard(
+            spu_id=2,
+            sku_id=2,
+            title="Mouse 262",
+            brand="Test",
+            category="mouse",
+            price="262.00",
+            stock=112,
+            sku_sales_count=10,
+        ),
+        ProductCard(
+            spu_id=3,
+            sku_id=3,
+            title="Mouse 257",
+            brand="Test",
+            category="mouse",
+            price="257.00",
+            stock=107,
+            sku_sales_count=20,
+        ),
+    ]
+
+    class PriceRepository(catalog_repository.CatalogRepository):
+        async def _fetch_candidate_page(self, request, *, offset: int, limit: int):
+            return products, True
+
+    result = await PriceRepository(None).search_products(ProductSearchRequest(sort=sort, limit=3))
+
+    assert [product.sku_id for product in result] == expected_order
+
+
+@pytest.mark.parametrize(
+    ("sort", "sql_order"),
+    [
+        ("price_desc", "sku.price DESC"),
+        ("price_asc", "sku.price ASC"),
+    ],
+)
+def test_search_statement_orders_price_extrema_before_candidate_limit(
+    sort: str,
+    sql_order: str,
+) -> None:
+    from app.repositories import catalog as catalog_repository
+
+    statement = catalog_repository._catalog_search_statement(
+        ProductSearchRequest(category="鼠标", sort=sort, limit=1)
+    )
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert f"ORDER BY {sql_order}" in sql
 
 
 def test_usage_exclusions_are_applied_before_result_limit() -> None:
@@ -196,9 +271,7 @@ def test_usage_spec_requirements_are_applied_before_result_limit() -> None:
     selected = catalog_repository._take_eligible_products(
         products,
         excluded_usage=[],
-        required_conditions=[
-            ProductSpecCondition(key="microphone", operator="eq", values=["是"])
-        ],
+        required_conditions=[ProductSpecCondition(key="microphone", operator="eq", values=["是"])],
         limit=3,
     )
 

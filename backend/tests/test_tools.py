@@ -76,15 +76,10 @@ def test_catalog_exclusions_filter_brand_and_usage_matches() -> None:
     assert [
         item.sku_id
         for item in catalog_tools._filter_excluded_preferences(products, ["Logitech"], [])
-    ] == [
-        22
-    ]
+    ] == [22]
     assert [
-        item.sku_id
-        for item in catalog_tools._filter_excluded_preferences(products, [], ["gaming"])
-    ] == [
-        11
-    ]
+        item.sku_id for item in catalog_tools._filter_excluded_preferences(products, [], ["gaming"])
+    ] == [11]
 
 
 @pytest.mark.asyncio
@@ -604,6 +599,28 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
     assert "Wireless" in result.output["products"][0]["specs"]["connection_type"]
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_sort", "expected_title"),
+    [
+        ("哪款鼠标卖的最贵", "price_desc", "Razer Codex Viper V3 Pro White"),
+        ("哪款鼠标最便宜", "price_asc", "Logitech 影刃 M01 游戏鼠标 黑色标准版"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_catalog_search_returns_price_extrema(
+    db_session_factory: Callable[[], AsyncSession],
+    query: str,
+    expected_sort: str,
+    expected_title: str,
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(CatalogSearchInput(query=query, limit=1))
+
+    assert result.query_plan["sort"] == expected_sort
+    assert result.ranking_strategy == expected_sort
+    assert result.products[0].title == expected_title
+
+
 @pytest.mark.asyncio
 async def test_catalog_search_uses_query_plan_and_guard(
     db_session_factory: Callable[[], AsyncSession],
@@ -729,6 +746,29 @@ async def test_rule_catalog_planner_recognizes_sales_rank_wording() -> None:
 
     assert plan.sort == "sales"
     assert plan.limit == 6
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_sort"),
+    [
+        ("哪款鼠标卖的最贵", "price_desc"),
+        ("价格最高的鼠标", "price_desc"),
+        ("哪款鼠标最便宜", "price_asc"),
+        ("价格最低的鼠标", "price_asc"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rule_catalog_planner_recognizes_price_extrema(
+    query: str,
+    expected_sort: str,
+) -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query=query, limit=1)
+    )
+
+    assert plan.sort == expected_sort
 
 
 @pytest.mark.asyncio
@@ -1126,7 +1166,7 @@ def test_catalog_filter_values_are_normalized(
 def test_catalog_search_prompt_contains_compact_enum_guidance() -> None:
     prompt = catalog_tools._catalog_planner_system_prompt()
 
-    assert 'connection_type: Wireless covers wireless' in prompt
+    assert "connection_type: Wireless covers wireless" in prompt
     assert 'speaker power_w examples: "20", "30", "40", "50"' in prompt
     assert 'not "30W"' in prompt
 
@@ -1231,8 +1271,7 @@ async def test_catalog_search_applies_office_keyboard_spec_mapping(
     assert execution.output["result_type"] == "products"
     assert execution.output["products"]
     assert all(
-        product["specs"]["switches"] == "静音红轴"
-        for product in execution.output["products"]
+        product["specs"]["switches"] == "静音红轴" for product in execution.output["products"]
     )
     assert execution.output["query_plan"]["error_type"] is None
     assert execution.output["diagnostics"][0]["code"] == "ok"
@@ -1509,10 +1548,14 @@ async def test_direct_sku_compare_omits_inactive_sku_and_spu(
             await session.execute(
                 select(Sku.id, Spu.id)
                 .join(Spu, Sku.spu_id == Spu.id)
-                .where(Sku.title.in_([
-                    "Logitech Codex G502 Hero Black",
-                    "Razer Codex Viper V3 Pro White",
-                ]))
+                .where(
+                    Sku.title.in_(
+                        [
+                            "Logitech Codex G502 Hero Black",
+                            "Razer Codex Viper V3 Pro White",
+                        ]
+                    )
+                )
                 .order_by(Sku.id)
             )
         ).all()
@@ -1688,9 +1731,10 @@ async def test_document_search_limit_is_chunk_top_k_with_minimum_two() -> None:
     )
 
     assert len(result.documents) == 2
-    assert {
-        item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents
-    } == {"1:0", "2:0"}
+    assert {item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents} == {
+        "1:0",
+        "2:0",
+    }
 
 
 @pytest.mark.asyncio
@@ -1709,9 +1753,7 @@ async def test_document_search_returns_complete_top_chunks_without_overlap_only_
         DocumentSearchInput(query="退货条件和退款时效", retrieval_mode="bm25", limit=3)
     )
 
-    chunk_ids = [
-        item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents
-    ]
+    chunk_ids = [item.metadata["retrieval_debug"]["chunk_id"] for item in result.documents]
     assert len(result.documents) == 2
     assert set(chunk_ids) == {"1:0", "1:1"}
     assert max(len(item.snippet) for item in result.documents) == 420
@@ -1732,10 +1774,7 @@ async def test_policy_search_finds_customer_privacy_boundary() -> None:
 
     assert result.result_type == "documents"
     assert result.documents[0].title == "用户隐私与数据访问规则"
-    assert any(
-        "不得查询、披露、汇总或推断其他用户" in item.snippet
-        for item in result.documents
-    )
+    assert any("不得查询、披露、汇总或推断其他用户" in item.snippet for item in result.documents)
 
 
 @pytest.mark.asyncio
