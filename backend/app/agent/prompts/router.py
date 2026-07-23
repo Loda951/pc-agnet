@@ -46,9 +46,10 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
   非 tool_planning Goal 不得包含 Task。
 - `answer_role=internal` 表示 Task 只为其他 Task 提供依赖证据；`answer_role=user_facing` 表示该
   Task 对应用户明确要求回答的结果。只作为上游发现步骤的 Task 必须是 internal。
-- `canonical_query` 是该 Task 自己的冻结 query，而不是整句原请求。它必须只保留完成该 Task 所需的
-  语义，例如“查询键盘 SPU 销量排行第二的商品”，不得把其他并列或后续任务塞入同一个 query。
-  canonical query 在当前 turn 内冻结；Runtime 再按 Tool contract 派生 tool query。
+- `canonical_query` 是该 Task 的冻结语义，不是整句原请求。按“动作 + 返回对象 + 必要条件”表达。
+  目录枚举 Task 只能出现一个返回对象类型词（品牌、品类、规格字段或规格选项）；筛选条件直接写
+  实体名，不用类型词修饰。例如“有什么牌子的键盘”写“列出键盘品牌”，“Razer 有哪些品类”写
+  “列出 Razer 商品品类”。不得混入其他 Task 的语义；Runtime 再按 Tool contract 派生 tool query。
 </output_contract>
 
 <rewrite_policy>
