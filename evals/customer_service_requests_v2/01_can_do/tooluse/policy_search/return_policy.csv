@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-POLICYSEARCH-RETURNPOLICY-001,01_can_do,tooluse/policy_search,return_policy,鼠标拆封试用后还能七天无理由退货吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-RETURNPOLICY-002,01_can_do,tooluse/policy_search,return_policy,键盘不喜欢可以退吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-RETURNPOLICY-003,01_can_do,tooluse/policy_search,return_policy,外包装拆了还能退货吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-RETURNPOLICY-004,01_can_do,tooluse/policy_search,return_policy,七天无理由退货有什么限制？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-RETURNPOLICY-005,01_can_do,tooluse/policy_search,return_policy,耳机拆封后退货规则是什么？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功

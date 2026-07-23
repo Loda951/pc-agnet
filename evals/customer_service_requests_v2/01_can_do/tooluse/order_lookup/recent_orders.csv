@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-RECENTORDERS-001,01_can_do,tooluse/order_lookup,recent_orders,帮我查一下我最近的订单。,current_user_id=1,tool_planning,order.lookup,order_candidates,按 current_user_id 查询最近订单候选，主流程追问选择,不得返回其他用户订单
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-RECENTORDERS-002,01_can_do,tooluse/order_lookup,recent_orders,我有几个订单？最近的列出来让我选。,current_user_id=1,tool_planning,order.lookup,order_candidates,按 current_user_id 查询最近订单候选，主流程追问选择,不得返回其他用户订单
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-RECENTORDERS-003,01_can_do,tooluse/order_lookup,recent_orders,帮我看最近 5 个订单摘要。,current_user_id=1,tool_planning,order.lookup,order_candidates,按 current_user_id 查询最近订单候选，主流程追问选择,不得返回其他用户订单
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-RECENTORDERS-004,01_can_do,tooluse/order_lookup,recent_orders,帮我列一下最近订单。,current_user_id=1,tool_planning,order.lookup,order_candidates,按 current_user_id 查询最近订单候选，主流程追问选择,不得返回其他用户订单
+CSR2-CAN-TOOLUSE-ORDERLOOKUP-RECENTORDERS-005,01_can_do,tooluse/order_lookup,recent_orders,我最近一笔订单是什么？,current_user_id=1,tool_planning,order.lookup,order_candidates,按 current_user_id 查询最近订单候选，主流程追问选择,不得返回其他用户订单

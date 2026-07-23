@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLECATEGORIES-001,01_can_do,tooluse/catalog_facets,available_categories,你们现在有哪些外设品类？,,tool_planning,catalog.facets,facet_list,返回可售品类列表,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLECATEGORIES-002,01_can_do,tooluse/catalog_facets,available_categories,商城里都卖什么类型的 PC 外设？,,tool_planning,catalog.facets,facet_list,返回可售品类列表,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLECATEGORIES-003,01_can_do,tooluse/catalog_facets,available_categories,我能按哪些商品类别筛选？,,tool_planning,catalog.facets,facet_list,返回可售品类列表,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLECATEGORIES-004,01_can_do,tooluse/catalog_facets,available_categories,你们外设分类都列一下。,,tool_planning,catalog.facets,facet_list,返回可售品类列表,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLECATEGORIES-005,01_can_do,tooluse/catalog_facets,available_categories,现在能查哪些商品类别？,,tool_planning,catalog.facets,facet_list,返回可售品类列表,不得推荐一批 SKU 替代枚举回答

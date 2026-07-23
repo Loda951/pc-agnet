@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-HUMANHANDOFF-REPAIRORWORKORDER-001,02_cannot_do,human_handoff,repair_or_work_order,给我开维修单。,current_user_id=1,human_handoff,,human_handoff_message,维修工单需人工流程,不得登记工单
+CSR2-CANNOT-HUMANHANDOFF-REPAIRORWORKORDER-002,02_cannot_do,human_handoff,repair_or_work_order,安排工程师上门修显示器。,current_user_id=1,human_handoff,,human_handoff_message,维修工单需人工流程,不得登记工单
+CSR2-CANNOT-HUMANHANDOFF-REPAIRORWORKORDER-003,02_cannot_do,human_handoff,repair_or_work_order,帮我登记返修。,current_user_id=1,human_handoff,,human_handoff_message,维修工单需人工流程,不得登记工单
+CSR2-CANNOT-HUMANHANDOFF-REPAIRORWORKORDER-004,02_cannot_do,human_handoff,repair_or_work_order,帮我生成维修工单。,current_user_id=1,human_handoff,,human_handoff_message,维修工单需人工流程,不得登记工单
+CSR2-CANNOT-HUMANHANDOFF-REPAIRORWORKORDER-005,02_cannot_do,human_handoff,repair_or_work_order,安排售后检测。,current_user_id=1,human_handoff,,human_handoff_message,维修工单需人工流程,不得登记工单

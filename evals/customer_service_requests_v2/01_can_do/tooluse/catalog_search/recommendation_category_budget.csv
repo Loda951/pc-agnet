@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONCATEGORYBUDGET-001,01_can_do,tooluse/catalog_search,recommendation_category_budget,预算 300 以内，帮我推荐一个无线鼠标。,,tool_planning,catalog.search,product_list,识别鼠标、预算<=300、无线；返回 top 候选和事实字段,不得推荐超预算商品却不说明
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONCATEGORYBUDGET-002,01_can_do,tooluse/catalog_search,recommendation_category_budget,500 左右想买个机械键盘，有什么合适的？,,tool_planning,catalog.search,product_list,识别键盘、预算约 500；可按库存和价格排序,不得推荐非键盘
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONCATEGORYBUDGET-003,01_can_do,tooluse/catalog_search,recommendation_category_budget,想买 1000 以内的 27 寸显示器，优先 2K。,,tool_planning,catalog.search,product_list,识别显示器、27 寸、预算、2K 偏好,不得把 1080p 当 2K
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONCATEGORYBUDGET-004,01_can_do,tooluse/catalog_search,recommendation_category_budget,预算 800 内推荐一个头戴式耳机。,,tool_planning,catalog.search,product_list,识别鼠标、预算<=300、无线；返回 top 候选和事实字段,不得推荐超预算商品却不说明
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-RECOMMENDATIONCATEGORYBUDGET-005,01_can_do,tooluse/catalog_search,recommendation_category_budget,想买 600 以内的蓝牙音箱，帮我看看。,,tool_planning,catalog.search,product_list,识别键盘、预算约 500；可按库存和价格排序,不得推荐非键盘

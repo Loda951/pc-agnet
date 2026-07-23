@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-MULTIINTENT-RECOMMENDANDCOMPARE-001,03_mixed_or_edge,multi_intent,recommend_and_compare,推荐两个无线鼠标，再帮我比较一下。,current_user_id=1,tool_planning,catalog.search;catalog.compare,edge_case_answer,先推荐候选再比较核心字段,不得比较未检索商品
+CSR2-EDGE-MULTIINTENT-RECOMMENDANDCOMPARE-002,03_mixed_or_edge,multi_intent,recommend_and_compare,找两款 2K 显示器并对比刷新率。,current_user_id=1,tool_planning,catalog.search;catalog.compare,edge_case_answer,先推荐候选再比较核心字段,不得比较未检索商品
+CSR2-EDGE-MULTIINTENT-RECOMMENDANDCOMPARE-003,03_mixed_or_edge,multi_intent,recommend_and_compare,给我几个蓝牙耳机，再比较麦克风。,current_user_id=1,tool_planning,catalog.search;catalog.compare,edge_case_answer,先推荐候选再比较核心字段,不得比较未检索商品
+CSR2-EDGE-MULTIINTENT-RECOMMENDANDCOMPARE-004,03_mixed_or_edge,multi_intent,recommend_and_compare,推荐两款键盘然后比较轴体。,current_user_id=1,tool_planning,catalog.search;catalog.compare,edge_case_answer,先推荐候选再比较核心字段,不得比较未检索商品
+CSR2-EDGE-MULTIINTENT-RECOMMENDANDCOMPARE-005,03_mixed_or_edge,multi_intent,recommend_and_compare,找两个摄像头对比帧率。,current_user_id=1,tool_planning,catalog.search;catalog.compare,edge_case_answer,先推荐候选再比较核心字段,不得比较未检索商品

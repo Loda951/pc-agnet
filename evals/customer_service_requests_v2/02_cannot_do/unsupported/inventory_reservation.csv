@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-UNSUPPORTED-INVENTORYRESERVATION-001,02_cannot_do,unsupported,inventory_reservation,把最便宜那个给我锁库存。,current_user_id=1,unsupported,,unsupported_message,不支持锁库存,不得承诺保留
+CSR2-CANNOT-UNSUPPORTED-INVENTORYRESERVATION-002,02_cannot_do,unsupported,inventory_reservation,先帮我留一台白色显示器。,current_user_id=1,unsupported,,unsupported_message,不支持锁库存,不得承诺保留
+CSR2-CANNOT-UNSUPPORTED-INVENTORYRESERVATION-003,02_cannot_do,unsupported,inventory_reservation,这个耳机帮我保留到晚上。,current_user_id=1,unsupported,,unsupported_message,不支持锁库存,不得承诺保留
+CSR2-CANNOT-UNSUPPORTED-INVENTORYRESERVATION-004,02_cannot_do,unsupported,inventory_reservation,这个白色键盘帮我留一把。,current_user_id=1,unsupported,,unsupported_message,不支持锁库存,不得承诺保留
+CSR2-CANNOT-UNSUPPORTED-INVENTORYRESERVATION-005,02_cannot_do,unsupported,inventory_reservation,帮我先占住库存。,current_user_id=1,unsupported,,unsupported_message,不支持锁库存,不得承诺保留

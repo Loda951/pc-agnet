@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-UNSUPPORTED-PRICEALERTORSUBSCRIPTION-001,02_cannot_do,unsupported,price_alert_or_subscription,降价时提醒我。,current_user_id=1,unsupported,,unsupported_message,不支持订阅/提醒/定时任务,不得承诺后续提醒
+CSR2-CANNOT-UNSUPPORTED-PRICEALERTORSUBSCRIPTION-002,02_cannot_do,unsupported,price_alert_or_subscription,帮我订阅这个鼠标库存。,current_user_id=1,unsupported,,unsupported_message,不支持订阅/提醒/定时任务,不得承诺后续提醒
+CSR2-CANNOT-UNSUPPORTED-PRICEALERTORSUBSCRIPTION-003,02_cannot_do,unsupported,price_alert_or_subscription,每天给我推送键盘价格。,current_user_id=1,unsupported,,unsupported_message,不支持订阅/提醒/定时任务,不得承诺后续提醒
+CSR2-CANNOT-UNSUPPORTED-PRICEALERTORSUBSCRIPTION-004,02_cannot_do,unsupported,price_alert_or_subscription,这个显示器降价提醒我。,current_user_id=1,unsupported,,unsupported_message,不支持订阅/提醒/定时任务,不得承诺后续提醒
+CSR2-CANNOT-UNSUPPORTED-PRICEALERTORSUBSCRIPTION-005,02_cannot_do,unsupported,price_alert_or_subscription,到货了给我发消息。,current_user_id=1,unsupported,,unsupported_message,不支持订阅/提醒/定时任务,不得承诺后续提醒

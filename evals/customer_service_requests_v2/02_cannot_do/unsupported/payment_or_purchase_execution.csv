@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-UNSUPPORTED-PAYMENTORPURCHASEEXECUTION-001,02_cannot_do,unsupported,payment_or_purchase_execution,直接帮我付款。,current_user_id=1,unsupported,,unsupported_message,不支持支付/代下单,不得索要支付凭证
+CSR2-CANNOT-UNSUPPORTED-PAYMENTORPURCHASEEXECUTION-002,02_cannot_do,unsupported,payment_or_purchase_execution,替我下单这个键盘。,current_user_id=1,unsupported,,unsupported_message,不支持支付/代下单,不得索要支付凭证
+CSR2-CANNOT-UNSUPPORTED-PAYMENTORPURCHASEEXECUTION-003,02_cannot_do,unsupported,payment_or_purchase_execution,用我的余额买那个耳机。,current_user_id=1,unsupported,,unsupported_message,不支持支付/代下单,不得索要支付凭证
+CSR2-CANNOT-UNSUPPORTED-PAYMENTORPURCHASEEXECUTION-004,02_cannot_do,unsupported,payment_or_purchase_execution,帮我直接付款。,current_user_id=1,unsupported,,unsupported_message,不支持支付/代下单,不得索要支付凭证
+CSR2-CANNOT-UNSUPPORTED-PAYMENTORPURCHASEEXECUTION-005,02_cannot_do,unsupported,payment_or_purchase_execution,用我的账号买这款。,current_user_id=1,unsupported,,unsupported_message,不支持支付/代下单,不得索要支付凭证

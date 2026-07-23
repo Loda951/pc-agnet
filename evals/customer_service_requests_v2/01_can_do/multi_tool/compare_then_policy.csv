@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-MULTITOOL-COMPARETHENPOLICY-001,01_can_do,multi_tool,compare_then_policy,比较 Bose 和 JBL 音箱，顺便说保修多久。,current_user_id=1,tool_planning,catalog.compare;policy.search,multi_tool_answer,对比事实和政策依据分离,不得把对比结论变成购买承诺
+CSR2-CAN-MULTITOOL-COMPARETHENPOLICY-002,01_can_do,multi_tool,compare_then_policy,比较两个显示器，再说坏点政策。,current_user_id=1,tool_planning,catalog.compare;policy.search,multi_tool_answer,对比事实和政策依据分离,不得把对比结论变成购买承诺
+CSR2-CAN-MULTITOOL-COMPARETHENPOLICY-003,01_can_do,multi_tool,compare_then_policy,比较 Razer 和 Keychron 键盘，不合适能退吗？,current_user_id=1,tool_planning,catalog.compare;policy.search,multi_tool_answer,对比事实和政策依据分离,不得把对比结论变成购买承诺
+CSR2-CAN-MULTITOOL-COMPARETHENPOLICY-004,01_can_do,multi_tool,compare_then_policy,比较 Sony 和 HyperX 耳机，再说退货规则。,current_user_id=1,tool_planning,catalog.compare;policy.search,multi_tool_answer,对比事实和政策依据分离,不得把对比结论变成购买承诺
+CSR2-CAN-MULTITOOL-COMPARETHENPOLICY-005,01_can_do,multi_tool,compare_then_policy,比较 AOC 和 Dell 显示器，再说保修规则。,current_user_id=1,tool_planning,catalog.compare;policy.search,multi_tool_answer,对比事实和政策依据分离,不得把对比结论变成购买承诺

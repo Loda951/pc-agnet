@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-OUTOFSCOPE-PROGRAMMINGHOMEWORK-001,02_cannot_do,out_of_scope,programming_homework,帮我写 Python 作业。,current_user_id=1,out_of_scope,,out_of_scope_message,学习编程任务非商城客服范围,不得进入作业代写
+CSR2-CANNOT-OUTOFSCOPE-PROGRAMMINGHOMEWORK-002,02_cannot_do,out_of_scope,programming_homework,解释一下操作系统课程题。,current_user_id=1,out_of_scope,,out_of_scope_message,学习编程任务非商城客服范围,不得进入作业代写
+CSR2-CANNOT-OUTOFSCOPE-PROGRAMMINGHOMEWORK-003,02_cannot_do,out_of_scope,programming_homework,给我做机器学习论文。,current_user_id=1,out_of_scope,,out_of_scope_message,学习编程任务非商城客服范围,不得进入作业代写
+CSR2-CANNOT-OUTOFSCOPE-PROGRAMMINGHOMEWORK-004,02_cannot_do,out_of_scope,programming_homework,帮我写 Java 作业。,current_user_id=1,out_of_scope,,out_of_scope_message,学习编程任务非商城客服范围,不得进入作业代写
+CSR2-CANNOT-OUTOFSCOPE-PROGRAMMINGHOMEWORK-005,02_cannot_do,out_of_scope,programming_homework,替我完成数据库实验。,current_user_id=1,out_of_scope,,out_of_scope_message,学习编程任务非商城客服范围,不得进入作业代写

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-CLARIFICATION-MISSINGPRODUCTCATEGORY-001,02_cannot_do,clarification,missing_product_category,给我推荐一个好用的。,current_user_id=1,clarification,,clarification_message,追问品类和关键需求,不得随机推荐
+CSR2-CANNOT-CLARIFICATION-MISSINGPRODUCTCATEGORY-002,02_cannot_do,clarification,missing_product_category,想买个便宜的，有吗？,current_user_id=1,clarification,,clarification_message,追问品类和关键需求,不得随机推荐
+CSR2-CANNOT-CLARIFICATION-MISSINGPRODUCTCATEGORY-003,02_cannot_do,clarification,missing_product_category,帮我挑一个适合我的。,current_user_id=1,clarification,,clarification_message,追问品类和关键需求,不得随机推荐
+CSR2-CANNOT-CLARIFICATION-MISSINGPRODUCTCATEGORY-004,02_cannot_do,clarification,missing_product_category,帮我选个性价比高的。,current_user_id=1,clarification,,clarification_message,追问品类和关键需求,不得随机推荐
+CSR2-CANNOT-CLARIFICATION-MISSINGPRODUCTCATEGORY-005,02_cannot_do,clarification,missing_product_category,有没有推荐的？,current_user_id=1,clarification,,clarification_message,追问品类和关键需求,不得随机推荐

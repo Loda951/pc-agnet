@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-DIRECTRESPONSE-SHOPPINGFLOWGUIDANCE-001,01_can_do,direct_response,shopping_flow_guidance,我想买外设但不知道怎么问，你教我一下。,,direct_response,,usage_guidance,引导用户提供品类、预算、品牌、连接方式、规格和用途,不得直接跳到随机推荐
+CSR2-CAN-DIRECTRESPONSE-SHOPPINGFLOWGUIDANCE-002,01_can_do,direct_response,shopping_flow_guidance,如果我要买显示器，应该告诉你哪些条件？,,direct_response,,usage_guidance,提示尺寸、分辨率、刷新率、预算、品牌、用途,不得编造具体库存
+CSR2-CAN-DIRECTRESPONSE-SHOPPINGFLOWGUIDANCE-003,01_can_do,direct_response,shopping_flow_guidance,问你推荐鼠标的时候，我说哪些信息最有用？,,direct_response,,usage_guidance,提示预算、品牌、重量、DPI、连接方式、颜色,不得要求无关个人信息
+CSR2-CAN-DIRECTRESPONSE-SHOPPINGFLOWGUIDANCE-004,01_can_do,direct_response,shopping_flow_guidance,我想买耳机，应该先告诉你什么？,,direct_response,,usage_guidance,引导用户提供品类、预算、品牌、连接方式、规格和用途,不得直接跳到随机推荐
+CSR2-CAN-DIRECTRESPONSE-SHOPPINGFLOWGUIDANCE-005,01_can_do,direct_response,shopping_flow_guidance,如果我要买摄像头，哪些参数最关键？,,direct_response,,usage_guidance,提示尺寸、分辨率、刷新率、预算、品牌、用途,不得编造具体库存

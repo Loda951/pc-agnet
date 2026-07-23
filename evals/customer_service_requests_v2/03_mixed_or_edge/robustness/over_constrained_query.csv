@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-ROBUSTNESS-OVERCONSTRAINEDQUERY-001,03_mixed_or_edge,robustness,over_constrained_query,有没有 8K、360Hz、20 寸的显示器？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,返回 empty_result/over_constrained 诊断并说明哪些条件可能导致无结果,不得编造库存
+CSR2-EDGE-ROBUSTNESS-OVERCONSTRAINEDQUERY-002,03_mixed_or_edge,robustness,over_constrained_query,找 100W 的 Bose 头戴式耳机。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,返回 empty_result/over_constrained 诊断并说明哪些条件可能导致无结果,不得编造库存
+CSR2-EDGE-ROBUSTNESS-OVERCONSTRAINEDQUERY-003,03_mixed_or_edge,robustness,over_constrained_query,我要 4K 240fps 粉色 USB-C 摄像头。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,返回 empty_result/over_constrained 诊断并说明哪些条件可能导致无结果,不得编造库存
+CSR2-EDGE-ROBUSTNESS-OVERCONSTRAINEDQUERY-004,03_mixed_or_edge,robustness,over_constrained_query,有没有 1000Hz 刷新率显示器？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,返回 empty_result/over_constrained 诊断并说明哪些条件可能导致无结果,不得编造库存
+CSR2-EDGE-ROBUSTNESS-OVERCONSTRAINEDQUERY-005,03_mixed_or_edge,robustness,over_constrained_query,找 1g 重量的鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,返回 empty_result/over_constrained 诊断并说明哪些条件可能导致无结果,不得编造库存

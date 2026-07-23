@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-CONTEXTMEMORY-FOLLOWUPPRODUCTREFERENCE-001,01_can_do,context_memory,follow_up_product_reference,那有没有白色版本？,memory.previous_turn=<RELEVANT_CONTEXT>,tool_planning,catalog.search,contextual_tool_answer,继承上一轮商品约束并应用新增条件,不得丢失上下文
+CSR2-CAN-CONTEXTMEMORY-FOLLOWUPPRODUCTREFERENCE-002,01_can_do,context_memory,follow_up_product_reference,预算再降到 300 以内呢？,memory.previous_turn=<RELEVANT_CONTEXT>,tool_planning,catalog.search,contextual_tool_answer,继承上一轮商品约束并应用新增条件,不得丢失上下文
+CSR2-CAN-CONTEXTMEMORY-FOLLOWUPPRODUCTREFERENCE-003,01_can_do,context_memory,follow_up_product_reference,把有线的也一起算上。,memory.previous_turn=<RELEVANT_CONTEXT>,tool_planning,catalog.search,contextual_tool_answer,继承上一轮商品约束并应用新增条件,不得丢失上下文
+CSR2-CAN-CONTEXTMEMORY-FOLLOWUPPRODUCTREFERENCE-004,01_can_do,context_memory,follow_up_product_reference,那黑色版本呢？,memory.previous_turn=<RELEVANT_CONTEXT>,tool_planning,catalog.search,contextual_tool_answer,继承上一轮商品约束并应用新增条件,不得丢失上下文
+CSR2-CAN-CONTEXTMEMORY-FOLLOWUPPRODUCTREFERENCE-005,01_can_do,context_memory,follow_up_product_reference,贵一点但配置更好的有吗？,memory.previous_turn=<RELEVANT_CONTEXT>,tool_planning,catalog.search,contextual_tool_answer,继承上一轮商品约束并应用新增条件,不得丢失上下文

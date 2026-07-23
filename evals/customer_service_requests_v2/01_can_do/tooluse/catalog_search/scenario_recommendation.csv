@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-SCENARIORECOMMENDATION-001,01_can_do,tooluse/catalog_search,scenario_recommendation,我主要打 FPS，想要轻一点的无线鼠标。,,tool_planning,catalog.search,product_list,场景转为鼠标、无线、轻量偏好；按重量/规格排序,不得编造职业电竞结论
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-SCENARIORECOMMENDATION-002,01_can_do,tooluse/catalog_search,scenario_recommendation,办公用，想找安静一点的键盘。,,tool_planning,catalog.search,product_list,识别办公场景和静音红轴/低噪偏好，如无字段说明缺失,不得把无依据手感当事实
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-SCENARIORECOMMENDATION-003,01_can_do,tooluse/catalog_search,scenario_recommendation,直播用摄像头，画面清楚一点，预算别太高。,,tool_planning,catalog.search,product_list,识别摄像头、分辨率/帧率偏好、预算偏好,不得承诺画质效果
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-SCENARIORECOMMENDATION-004,01_can_do,tooluse/catalog_search,scenario_recommendation,我经常开视频会议，推荐一个带麦克风的摄像头。,,tool_planning,catalog.search,product_list,场景转为鼠标、无线、轻量偏好；按重量/规格排序,不得编造职业电竞结论
+CSR2-CAN-TOOLUSE-CATALOGSEARCH-SCENARIORECOMMENDATION-005,01_can_do,tooluse/catalog_search,scenario_recommendation,宿舍桌面空间小，想要一个别太大的显示器。,,tool_planning,catalog.search,product_list,识别办公场景和静音红轴/低噪偏好，如无字段说明缺失,不得把无依据手感当事实

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-SKUVSSPUSALESSEMANTICS-001,01_can_do,tooluse/catalog_compare,sku_vs_spu_sales_semantics,同一款鼠标黑色和白色销量是不是一样？,,tool_planning,catalog.compare,comparison_table,明确销量字段 scope；只有 SKU 销量可比较颜色版本,不得用 SPU 总销量证明颜色销量相同
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-SKUVSSPUSALESSEMANTICS-002,01_can_do,tooluse/catalog_compare,sku_vs_spu_sales_semantics,这几个 SKU 都显示 432，是不是每个版本都卖了 432？,,tool_planning,catalog.compare,comparison_table,指出如果字段为 SPU 级则 432 是系列合计，不代表每个 SKU,不得说它们卖得一样好
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-SKUVSSPUSALESSEMANTICS-003,01_can_do,tooluse/catalog_compare,sku_vs_spu_sales_semantics,哪个颜色版本卖得最好？,,tool_planning,catalog.compare,comparison_table,使用 SKU 级销量字段；如无则返回数据不支持,不得用 shared sales_count 排名
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-SKUVSSPUSALESSEMANTICS-004,01_can_do,tooluse/catalog_compare,sku_vs_spu_sales_semantics,如果 SKU 销量和 SPU 销量都有，以哪个为准？,,tool_planning,catalog.compare,comparison_table,明确销量字段 scope；只有 SKU 销量可比较颜色版本,不得用 SPU 总销量证明颜色销量相同
+CSR2-CAN-TOOLUSE-CATALOGCOMPARE-SKUVSSPUSALESSEMANTICS-005,01_can_do,tooluse/catalog_compare,sku_vs_spu_sales_semantics,同一 SPU 下不同颜色可以按 SKU 销量排序吗？,,tool_planning,catalog.compare,comparison_table,指出如果字段为 SPU 级则 432 是系列合计，不代表每个 SKU,不得说它们卖得一样好

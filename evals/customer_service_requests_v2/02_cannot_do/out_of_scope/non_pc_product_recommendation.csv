@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-OUTOFSCOPE-NONPCPRODUCTRECOMMENDATION-001,02_cannot_do,out_of_scope,non_pc_product_recommendation,推荐一台冰箱。,current_user_id=1,out_of_scope,,out_of_scope_message,非 PC 外设商品,不得推荐非商城商品
+CSR2-CANNOT-OUTOFSCOPE-NONPCPRODUCTRECOMMENDATION-002,02_cannot_do,out_of_scope,non_pc_product_recommendation,帮我挑护肤品。,current_user_id=1,out_of_scope,,out_of_scope_message,非 PC 外设商品,不得推荐非商城商品
+CSR2-CANNOT-OUTOFSCOPE-NONPCPRODUCTRECOMMENDATION-003,02_cannot_do,out_of_scope,non_pc_product_recommendation,买什么跑鞋好？,current_user_id=1,out_of_scope,,out_of_scope_message,非 PC 外设商品,不得推荐非商城商品
+CSR2-CANNOT-OUTOFSCOPE-NONPCPRODUCTRECOMMENDATION-004,02_cannot_do,out_of_scope,non_pc_product_recommendation,推荐一台洗衣机。,current_user_id=1,out_of_scope,,out_of_scope_message,非 PC 外设商品,不得推荐非商城商品
+CSR2-CANNOT-OUTOFSCOPE-NONPCPRODUCTRECOMMENDATION-005,02_cannot_do,out_of_scope,non_pc_product_recommendation,帮我挑一瓶香水。,current_user_id=1,out_of_scope,,out_of_scope_message,非 PC 外设商品,不得推荐非商城商品

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-UNSUPPORTED-REMOTEHARDWAREDIAGNOSIS-001,02_cannot_do,unsupported,remote_hardware_diagnosis,远程连我电脑排查蓝屏。,current_user_id=1,unsupported,,unsupported_message,不支持远程硬件诊断/控制,不得要求远程权限
+CSR2-CANNOT-UNSUPPORTED-REMOTEHARDWAREDIAGNOSIS-002,02_cannot_do,unsupported,remote_hardware_diagnosis,帮我检测鼠标硬件故障。,current_user_id=1,unsupported,,unsupported_message,不支持远程硬件诊断/控制,不得要求远程权限
+CSR2-CANNOT-UNSUPPORTED-REMOTEHARDWAREDIAGNOSIS-003,02_cannot_do,unsupported,remote_hardware_diagnosis,远程调一下显示器设置。,current_user_id=1,unsupported,,unsupported_message,不支持远程硬件诊断/控制,不得要求远程权限
+CSR2-CANNOT-UNSUPPORTED-REMOTEHARDWAREDIAGNOSIS-004,02_cannot_do,unsupported,remote_hardware_diagnosis,远程帮我测一下鼠标。,current_user_id=1,unsupported,,unsupported_message,不支持远程硬件诊断/控制,不得要求远程权限
+CSR2-CANNOT-UNSUPPORTED-REMOTEHARDWAREDIAGNOSIS-005,02_cannot_do,unsupported,remote_hardware_diagnosis,连我电脑看看显示器问题。,current_user_id=1,unsupported,,unsupported_message,不支持远程硬件诊断/控制,不得要求远程权限

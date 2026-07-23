@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-ROBUSTNESS-CONFLICTINGCONSTRAINTS-001,03_mixed_or_edge,robustness,conflicting_constraints,我要有线蓝牙鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,识别冲突条件并返回 clarification 或 invalid_catalog_plan,不得随意选择一个条件
+CSR2-EDGE-ROBUSTNESS-CONFLICTINGCONSTRAINTS-002,03_mixed_or_edge,robustness,conflicting_constraints,找一个 2.0 声道的 5.1 音箱。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,识别冲突条件并返回 clarification 或 invalid_catalog_plan,不得随意选择一个条件
+CSR2-EDGE-ROBUSTNESS-CONFLICTINGCONSTRAINTS-003,03_mixed_or_edge,robustness,conflicting_constraints,要 24 寸但是 34 寸带鱼屏。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,识别冲突条件并返回 clarification 或 invalid_catalog_plan,不得随意选择一个条件
+CSR2-EDGE-ROBUSTNESS-CONFLICTINGCONSTRAINTS-004,03_mixed_or_edge,robustness,conflicting_constraints,我要开放式封闭式耳机。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,识别冲突条件并返回 clarification 或 invalid_catalog_plan,不得随意选择一个条件
+CSR2-EDGE-ROBUSTNESS-CONFLICTINGCONSTRAINTS-005,03_mixed_or_edge,robustness,conflicting_constraints,找一个有线但必须蓝牙的键盘。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,识别冲突条件并返回 clarification 或 invalid_catalog_plan,不得随意选择一个条件

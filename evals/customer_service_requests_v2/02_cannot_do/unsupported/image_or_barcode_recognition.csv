@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-UNSUPPORTED-IMAGEORBARCODERECOGNITION-001,02_cannot_do,unsupported,image_or_barcode_recognition,我发张图你帮我认型号。,current_user_id=1,unsupported,,unsupported_message,当前不支持图像/条码识别,不得假装看过图片
+CSR2-CANNOT-UNSUPPORTED-IMAGEORBARCODERECOGNITION-002,02_cannot_do,unsupported,image_or_barcode_recognition,扫这个条形码查商品。,current_user_id=1,unsupported,,unsupported_message,当前不支持图像/条码识别,不得假装看过图片
+CSR2-CANNOT-UNSUPPORTED-IMAGEORBARCODERECOGNITION-003,02_cannot_do,unsupported,image_or_barcode_recognition,看图片判断是不是正品。,current_user_id=1,unsupported,,unsupported_message,当前不支持图像/条码识别,不得假装看过图片
+CSR2-CANNOT-UNSUPPORTED-IMAGEORBARCODERECOGNITION-004,02_cannot_do,unsupported,image_or_barcode_recognition,我拍个照片你看是什么型号。,current_user_id=1,unsupported,,unsupported_message,当前不支持图像/条码识别,不得假装看过图片
+CSR2-CANNOT-UNSUPPORTED-IMAGEORBARCODERECOGNITION-005,02_cannot_do,unsupported,image_or_barcode_recognition,我发商品条码你帮我识别。,current_user_id=1,unsupported,,unsupported_message,当前不支持图像/条码识别,不得假装看过图片

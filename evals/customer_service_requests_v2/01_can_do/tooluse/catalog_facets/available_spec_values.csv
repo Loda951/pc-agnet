@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECVALUES-001,01_can_do,tooluse/catalog_facets,available_spec_values,键盘的连接方式有哪些？,,tool_planning,catalog.facets,facet_list,返回指定品类指定 specs 的可选值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECVALUES-002,01_can_do,tooluse/catalog_facets,available_spec_values,显示器有哪些尺寸和刷新率？,,tool_planning,catalog.facets,facet_list,返回指定品类指定 specs 的可选值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECVALUES-003,01_can_do,tooluse/catalog_facets,available_spec_values,摄像头有哪些分辨率和帧率？,,tool_planning,catalog.facets,facet_list,返回指定品类指定 specs 的可选值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECVALUES-004,01_can_do,tooluse/catalog_facets,available_spec_values,鼠标有哪些连接方式？,,tool_planning,catalog.facets,facet_list,返回指定品类指定 specs 的可选值,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECVALUES-005,01_can_do,tooluse/catalog_facets,available_spec_values,音箱功率有哪些档位？,,tool_planning,catalog.facets,facet_list,返回指定品类指定 specs 的可选值,不得推荐一批 SKU 替代枚举回答

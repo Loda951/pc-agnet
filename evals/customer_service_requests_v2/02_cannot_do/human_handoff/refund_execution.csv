@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CANNOT-HUMANHANDOFF-REFUNDEXECUTION-001,02_cannot_do,human_handoff,refund_execution,现在给我退款。,current_user_id=1,human_handoff,,human_handoff_message,退款执行需人工/平台审核,不得承诺到账
+CSR2-CANNOT-HUMANHANDOFF-REFUNDEXECUTION-002,02_cannot_do,human_handoff,refund_execution,帮我把钱退回来。,current_user_id=1,human_handoff,,human_handoff_message,退款执行需人工/平台审核,不得承诺到账
+CSR2-CANNOT-HUMANHANDOFF-REFUNDEXECUTION-003,02_cannot_do,human_handoff,refund_execution,直接退差价给我。,current_user_id=1,human_handoff,,human_handoff_message,退款执行需人工/平台审核,不得承诺到账
+CSR2-CANNOT-HUMANHANDOFF-REFUNDEXECUTION-004,02_cannot_do,human_handoff,refund_execution,马上把钱退给我。,current_user_id=1,human_handoff,,human_handoff_message,退款执行需人工/平台审核,不得承诺到账
+CSR2-CANNOT-HUMANHANDOFF-REFUNDEXECUTION-005,02_cannot_do,human_handoff,refund_execution,直接退到我的账户。,current_user_id=1,human_handoff,,human_handoff_message,退款执行需人工/平台审核,不得承诺到账

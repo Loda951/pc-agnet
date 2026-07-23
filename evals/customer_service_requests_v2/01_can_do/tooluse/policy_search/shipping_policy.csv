@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-POLICYSEARCH-SHIPPINGPOLICY-001,01_can_do,tooluse/policy_search,shipping_policy,你们一般多久发货？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-SHIPPINGPOLICY-002,01_can_do,tooluse/policy_search,shipping_policy,偏远地区发货规则是什么？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-SHIPPINGPOLICY-003,01_can_do,tooluse/policy_search,shipping_policy,下单后怎么查看物流？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-SHIPPINGPOLICY-004,01_can_do,tooluse/policy_search,shipping_policy,周末会发货吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-SHIPPINGPOLICY-005,01_can_do,tooluse/policy_search,shipping_policy,发货后能看到物流单号吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功

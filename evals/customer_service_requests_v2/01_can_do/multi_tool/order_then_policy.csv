@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-MULTITOOL-ORDERTHENPOLICY-001,01_can_do,multi_tool,order_then_policy,查订单 202607020001，再告诉我坏了怎么保修。,current_user_id=1,tool_planning,order.lookup;policy.search,multi_tool_answer,订单查询与政策检索组合，保留 user_id 隔离,不得直接办理售后
+CSR2-CAN-MULTITOOL-ORDERTHENPOLICY-002,01_can_do,multi_tool,order_then_policy,帮我看看订单 202607020001，如果还没发货能不能退？,current_user_id=1,tool_planning,order.lookup;policy.search,multi_tool_answer,订单查询与政策检索组合，保留 user_id 隔离,不得直接办理售后
+CSR2-CAN-MULTITOOL-ORDERTHENPOLICY-003,01_can_do,multi_tool,order_then_policy,我最近买的东西如果有问题，售后怎么走？,current_user_id=1,tool_planning,order.lookup;policy.search,multi_tool_answer,订单查询与政策检索组合，保留 user_id 隔离,不得直接办理售后
+CSR2-CAN-MULTITOOL-ORDERTHENPOLICY-004,01_can_do,multi_tool,order_then_policy,查订单 202607020001，顺便问下发票能不能补开。,current_user_id=1,tool_planning,order.lookup;policy.search,multi_tool_answer,订单查询与政策检索组合，保留 user_id 隔离,不得直接办理售后
+CSR2-CAN-MULTITOOL-ORDERTHENPOLICY-005,01_can_do,multi_tool,order_then_policy,看一下 202607020001，如果商品坏了售后怎么走。,current_user_id=1,tool_planning,order.lookup;policy.search,multi_tool_answer,订单查询与政策检索组合，保留 user_id 隔离,不得直接办理售后

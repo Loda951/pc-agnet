@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-POLICYSEARCH-PRICEPROTECTIONPOLICY-001,01_can_do,tooluse/policy_search,price_protection_policy,你们有价保吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-PRICEPROTECTIONPOLICY-002,01_can_do,tooluse/policy_search,price_protection_policy,刚买完降价能退差价吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-PRICEPROTECTIONPOLICY-003,01_can_do,tooluse/policy_search,price_protection_policy,价保需要满足什么条件？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-PRICEPROTECTIONPOLICY-004,01_can_do,tooluse/policy_search,price_protection_policy,价保要在多久内申请？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功
+CSR2-CAN-TOOLUSE-POLICYSEARCH-PRICEPROTECTIONPOLICY-005,01_can_do,tooluse/policy_search,price_protection_policy,用了优惠券还能价保吗？,,tool_planning,policy.search,evidence_summary,检索政策文档并返回依据、条件、流程和限制,不得承诺一定退款/退货/保修成功

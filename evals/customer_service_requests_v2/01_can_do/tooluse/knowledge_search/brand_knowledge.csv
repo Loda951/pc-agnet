@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-BRANDKNOWLEDGE-001,01_can_do,tooluse/knowledge_search,brand_knowledge,罗技和雷蛇的鼠标一般有什么区别？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-BRANDKNOWLEDGE-002,01_can_do,tooluse/knowledge_search,brand_knowledge,Keychron 这个品牌适合办公吗？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-BRANDKNOWLEDGE-003,01_can_do,tooluse/knowledge_search,brand_knowledge,Sony 耳机主要有什么特点？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-BRANDKNOWLEDGE-004,01_can_do,tooluse/knowledge_search,brand_knowledge,Pulsar 鼠标适合什么人？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺
+CSR2-CAN-TOOLUSE-KNOWLEDGESEARCH-BRANDKNOWLEDGE-005,01_can_do,tooluse/knowledge_search,brand_knowledge,Wooting 键盘有什么特点？,,tool_planning,knowledge.search,evidence_summary,检索知识文档并给出有依据的简要回答,不得编造文档外承诺

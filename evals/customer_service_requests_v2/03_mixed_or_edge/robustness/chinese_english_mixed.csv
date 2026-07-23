@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-EDGE-ROBUSTNESS-CHINESEENGLISHMIXED-001,03_mixed_or_edge,robustness,chinese_english_mixed,我要 wireless mouse，最好是罗技，白色，under 500。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,中英混合归一化品牌、颜色、连接方式、品类和预算,不得因英文词漏检
+CSR2-EDGE-ROBUSTNESS-CHINESEENGLISHMIXED-002,03_mixed_or_edge,robustness,chinese_english_mixed,Razer black keyboard RGB 有吗？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,中英混合归一化品牌、颜色、连接方式、品类和预算,不得因英文词漏检
+CSR2-EDGE-ROBUSTNESS-CHINESEENGLISHMIXED-003,03_mixed_or_edge,robustness,chinese_english_mixed,Sony bluetooth headset with mic 帮我找找。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,中英混合归一化品牌、颜色、连接方式、品类和预算,不得因英文词漏检
+CSR2-EDGE-ROBUSTNESS-CHINESEENGLISHMIXED-004,03_mixed_or_edge,robustness,chinese_english_mixed,Keychron wireless keyboard under 600 有吗？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,中英混合归一化品牌、颜色、连接方式、品类和预算,不得因英文词漏检
+CSR2-EDGE-ROBUSTNESS-CHINESEENGLISHMIXED-005,03_mixed_or_edge,robustness,chinese_english_mixed,我要 white USB-C camera。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,中英混合归一化品牌、颜色、连接方式、品类和预算,不得因英文词漏检

@@ -1,0 +1,6 @@
+﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECKEYS-001,01_can_do,tooluse/catalog_facets,available_spec_keys,鼠标能按哪些参数筛选？,,tool_planning,catalog.facets,facet_list,返回指定品类可筛选规格 key,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECKEYS-002,01_can_do,tooluse/catalog_facets,available_spec_keys,显示器支持按哪些规格查？,,tool_planning,catalog.facets,facet_list,返回指定品类可筛选规格 key,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECKEYS-003,01_can_do,tooluse/catalog_facets,available_spec_keys,音箱可以筛哪些字段？,,tool_planning,catalog.facets,facet_list,返回指定品类可筛选规格 key,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECKEYS-004,01_can_do,tooluse/catalog_facets,available_spec_keys,键盘有哪些规格字段？,,tool_planning,catalog.facets,facet_list,返回指定品类可筛选规格 key,不得推荐一批 SKU 替代枚举回答
+CSR2-CAN-TOOLUSE-CATALOGFACETS-AVAILABLESPECKEYS-005,01_can_do,tooluse/catalog_facets,available_spec_keys,摄像头能按什么参数筛选？,,tool_planning,catalog.facets,facet_list,返回指定品类可筛选规格 key,不得推荐一批 SKU 替代枚举回答
