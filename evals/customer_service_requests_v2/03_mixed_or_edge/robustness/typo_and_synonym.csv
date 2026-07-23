@@ -1,6 +1,6 @@
 ﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
-CSR2-EDGE-03MIXEDOREDGE-ROBUSTNESS-TYPOANDSYNONYM-001,customer_service_requests_v2,03_mixed_or_edge/robustness,typo_and_synonym,帮我推荐一个罗计无线鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
-CSR2-EDGE-03MIXEDOREDGE-ROBUSTNESS-TYPOANDSYNONYM-002,customer_service_requests_v2,03_mixed_or_edge/robustness,typo_and_synonym,有没有蓝芽键盘？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
-CSR2-EDGE-03MIXEDOREDGE-ROBUSTNESS-TYPOANDSYNONYM-003,customer_service_requests_v2,03_mixed_or_edge/robustness,typo_and_synonym,想买个带鱼平显示器。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
-CSR2-EDGE-03MIXEDOREDGE-ROBUSTNESS-TYPOANDSYNONYM-004,customer_service_requests_v2,03_mixed_or_edge/robustness,typo_and_synonym,帮我找罗鸡鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
-CSR2-EDGE-03MIXEDOREDGE-ROBUSTNESS-TYPOANDSYNONYM-005,customer_service_requests_v2,03_mixed_or_edge/robustness,typo_and_synonym,有没有篮牙耳机？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
+CSR2-EDGE-ROBUSTNESS-TYPOANDSYNONYM-001,03_mixed_or_edge,robustness,typo_and_synonym,帮我推荐一个罗计无线鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
+CSR2-EDGE-ROBUSTNESS-TYPOANDSYNONYM-002,03_mixed_or_edge,robustness,typo_and_synonym,有没有蓝芽键盘？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
+CSR2-EDGE-ROBUSTNESS-TYPOANDSYNONYM-003,03_mixed_or_edge,robustness,typo_and_synonym,想买个带鱼平显示器。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
+CSR2-EDGE-ROBUSTNESS-TYPOANDSYNONYM-004,03_mixed_or_edge,robustness,typo_and_synonym,帮我找罗鸡鼠标。,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类
+CSR2-EDGE-ROBUSTNESS-TYPOANDSYNONYM-005,03_mixed_or_edge,robustness,typo_and_synonym,有没有篮牙耳机？,current_user_id=1,tool_planning,catalog.search,edge_case_answer,处理常见错别字/同义词或返回可诊断错误,不得静默误查无关品类

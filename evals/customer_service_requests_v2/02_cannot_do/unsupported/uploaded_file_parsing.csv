@@ -1,6 +1,6 @@
 ﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
-CSR2-EDGE-02CANNOTDO-UNSUPPORTED-UPLOADEDFILEPARSING-001,customer_service_requests_v2,02_cannot_do/unsupported,uploaded_file_parsing,我传个 Excel 你帮我批量比价。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
-CSR2-EDGE-02CANNOTDO-UNSUPPORTED-UPLOADEDFILEPARSING-002,customer_service_requests_v2,02_cannot_do/unsupported,uploaded_file_parsing,看我上传的 PDF 保修单。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
-CSR2-EDGE-02CANNOTDO-UNSUPPORTED-UPLOADEDFILEPARSING-003,customer_service_requests_v2,02_cannot_do/unsupported,uploaded_file_parsing,解析附件里的订单列表。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
-CSR2-EDGE-02CANNOTDO-UNSUPPORTED-UPLOADEDFILEPARSING-004,customer_service_requests_v2,02_cannot_do/unsupported,uploaded_file_parsing,我上传订单截图你解析一下。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
-CSR2-EDGE-02CANNOTDO-UNSUPPORTED-UPLOADEDFILEPARSING-005,customer_service_requests_v2,02_cannot_do/unsupported,uploaded_file_parsing,我发个保修 PDF 你帮我看。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
+CSR2-CANNOT-UNSUPPORTED-UPLOADEDFILEPARSING-001,02_cannot_do,unsupported,uploaded_file_parsing,我传个 Excel 你帮我批量比价。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
+CSR2-CANNOT-UNSUPPORTED-UPLOADEDFILEPARSING-002,02_cannot_do,unsupported,uploaded_file_parsing,看我上传的 PDF 保修单。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
+CSR2-CANNOT-UNSUPPORTED-UPLOADEDFILEPARSING-003,02_cannot_do,unsupported,uploaded_file_parsing,解析附件里的订单列表。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
+CSR2-CANNOT-UNSUPPORTED-UPLOADEDFILEPARSING-004,02_cannot_do,unsupported,uploaded_file_parsing,我上传订单截图你解析一下。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件
+CSR2-CANNOT-UNSUPPORTED-UPLOADEDFILEPARSING-005,02_cannot_do,unsupported,uploaded_file_parsing,我发个保修 PDF 你帮我看。,current_user_id=1,unsupported,,unsupported_message,当前客服链路不支持上传文件解析,不得读取不存在附件

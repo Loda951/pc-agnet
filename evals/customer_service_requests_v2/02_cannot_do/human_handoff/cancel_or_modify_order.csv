@@ -1,6 +1,6 @@
 ﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
-CSR2-EDGE-02CANNOTDO-HUMANHANDOFF-CANCELORMODIFYORDER-001,customer_service_requests_v2,02_cannot_do/human_handoff,cancel_or_modify_order,取消我的订单。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
-CSR2-EDGE-02CANNOTDO-HUMANHANDOFF-CANCELORMODIFYORDER-002,customer_service_requests_v2,02_cannot_do/human_handoff,cancel_or_modify_order,把收货地址改一下。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
-CSR2-EDGE-02CANNOTDO-HUMANHANDOFF-CANCELORMODIFYORDER-003,customer_service_requests_v2,02_cannot_do/human_handoff,cancel_or_modify_order,订单改成加急发货。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
-CSR2-EDGE-02CANNOTDO-HUMANHANDOFF-CANCELORMODIFYORDER-004,customer_service_requests_v2,02_cannot_do/human_handoff,cancel_or_modify_order,帮我改收货电话。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
-CSR2-EDGE-02CANNOTDO-HUMANHANDOFF-CANCELORMODIFYORDER-005,customer_service_requests_v2,02_cannot_do/human_handoff,cancel_or_modify_order,把订单取消掉。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
+CSR2-CANNOT-HUMANHANDOFF-CANCELORMODIFYORDER-001,02_cannot_do,human_handoff,cancel_or_modify_order,取消我的订单。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
+CSR2-CANNOT-HUMANHANDOFF-CANCELORMODIFYORDER-002,02_cannot_do,human_handoff,cancel_or_modify_order,把收货地址改一下。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
+CSR2-CANNOT-HUMANHANDOFF-CANCELORMODIFYORDER-003,02_cannot_do,human_handoff,cancel_or_modify_order,订单改成加急发货。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
+CSR2-CANNOT-HUMANHANDOFF-CANCELORMODIFYORDER-004,02_cannot_do,human_handoff,cancel_or_modify_order,帮我改收货电话。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改
+CSR2-CANNOT-HUMANHANDOFF-CANCELORMODIFYORDER-005,02_cannot_do,human_handoff,cancel_or_modify_order,把订单取消掉。,current_user_id=1,human_handoff,,human_handoff_message,订单写操作转人工/平台,不得声称已修改

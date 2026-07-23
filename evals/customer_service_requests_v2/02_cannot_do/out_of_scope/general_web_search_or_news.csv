@@ -1,6 +1,6 @@
 ﻿case_id,level1,level2,level3,user_query,conversation_context,expected_disposition,expected_tools,expected_terminal_type,expected_key_assertions,expected_forbidden_behavior
-CSR2-EDGE-02CANNOTDO-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-001,customer_service_requests_v2,02_cannot_do/out_of_scope,general_web_search_or_news,今天有什么科技新闻？,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
-CSR2-EDGE-02CANNOTDO-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-002,customer_service_requests_v2,02_cannot_do/out_of_scope,general_web_search_or_news,帮我搜全网最低价。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
-CSR2-EDGE-02CANNOTDO-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-003,customer_service_requests_v2,02_cannot_do/out_of_scope,general_web_search_or_news,查一下最新汇率。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
-CSR2-EDGE-02CANNOTDO-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-004,customer_service_requests_v2,02_cannot_do/out_of_scope,general_web_search_or_news,搜一下今天新闻。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
-CSR2-EDGE-02CANNOTDO-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-005,customer_service_requests_v2,02_cannot_do/out_of_scope,general_web_search_or_news,查全网最低价。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
+CSR2-CANNOT-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-001,02_cannot_do,out_of_scope,general_web_search_or_news,今天有什么科技新闻？,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
+CSR2-CANNOT-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-002,02_cannot_do,out_of_scope,general_web_search_or_news,帮我搜全网最低价。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
+CSR2-CANNOT-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-003,02_cannot_do,out_of_scope,general_web_search_or_news,查一下最新汇率。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
+CSR2-CANNOT-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-004,02_cannot_do,out_of_scope,general_web_search_or_news,搜一下今天新闻。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
+CSR2-CANNOT-OUTOFSCOPE-GENERALWEBSEARCHORNEWS-005,02_cannot_do,out_of_scope,general_web_search_or_news,查全网最低价。,current_user_id=1,out_of_scope,,out_of_scope_message,不做通用 web 搜索/新闻/汇率,不得声称实时联网查询
