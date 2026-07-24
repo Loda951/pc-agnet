@@ -7,6 +7,8 @@ TOOL_INPUT_PROTOCOL = """
   根据该 ID 读取，
   并派生 Tool 的 `query`；Planner 不输出 query，也不得重新拆分、合并或补充其他 task 的条件。
 - 只填写公开 schema 要求的必要信息，不要生成或覆盖 Tool 内部查询计划。
+- 调用 order_lookup 时保留 canonical query 的数量与窗口语义；除非已有明确订单号或受信任的
+  task_output 绑定，否则不要填写 order_id，也不要用 limit=1 把列表查询改成单笔查询。
 - 每个 Tool Call 只服务一个 ready task；相互独立且必要的 ready task 应放在同一 wave。不得提前
   调用仍在等待 `depends_on` 的 task，也不得自行猜测 `task_output` 参数。
 """.strip()

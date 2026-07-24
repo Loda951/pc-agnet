@@ -1,7 +1,18 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+OrderQueryMode = Literal[
+    "explicit",
+    "latest",
+    "recent",
+    "all",
+    "count",
+    "page",
+    "analysis",
+]
 
 
 class OrderItemCard(BaseModel):
@@ -28,3 +39,25 @@ class OrderCard(BaseModel):
     created_at: datetime
     items: list[OrderItemCard]
     logistics: LogisticsCard | None
+    pay_at: datetime | None = None
+    delivery_at: datetime | None = None
+
+
+class OrderSummary(BaseModel):
+    id: int
+    status: int
+    status_label: str
+    pay_amount: Decimal
+    created_at: str
+    item_count: int
+    first_item_name: str | None = None
+    logistic_no: str | None = None
+
+
+class OrderQueryMeta(BaseModel):
+    query_mode: OrderQueryMode
+    total_match_count: int = Field(ge=0)
+    returned_count: int = Field(ge=0)
+    is_exhaustive: bool
+    offset: int = Field(default=0, ge=0)
+    next_offset: int | None = Field(default=None, ge=0)

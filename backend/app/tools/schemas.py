@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.catalog import ProductCard
-from app.schemas.order import OrderCard
+from app.schemas.order import OrderCard, OrderQueryMode, OrderSummary
 
 
 class ToolError(BaseModel):
@@ -40,6 +40,25 @@ class CatalogPreferenceDefaults(BaseModel):
     usage: str | None = Field(default=None, max_length=64)
 
 
+class CatalogTargetIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sku_id: int | None = Field(default=None, ge=1)
+    spu_id: int | None = Field(default=None, ge=1)
+    source: Literal[
+        "current_turn_artifact",
+        "working_memory_reference",
+        "comparison_context",
+        "explicit_argument",
+    ]
+
+    @model_validator(mode="after")
+    def require_identity(self) -> "CatalogTargetIdentity":
+        if self.sku_id is None and self.spu_id is None:
+            raise ValueError("catalog target requires sku_id or spu_id")
+        return self
+
+
 class CatalogSearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -55,6 +74,7 @@ class CatalogSearchInput(BaseModel):
     keywords: list[str] = Field(default_factory=list, max_length=12)
     usage: str | None = Field(default=None, max_length=64)
     sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
+    targets: list[CatalogTargetIdentity] = Field(default_factory=list, max_length=10)
     preference_defaults: CatalogPreferenceDefaults = Field(
         default_factory=CatalogPreferenceDefaults
     )
@@ -63,7 +83,12 @@ class CatalogSearchInput(BaseModel):
 
 class CatalogSearchOutput(BaseModel):
     result_type: Literal["products", "empty"]
+    result_purpose: Literal["recommendation", "search", "lookup", "ranking"] = "search"
+    selection_scope: Literal["sku", "spu"] = "spu"
     products: list[ProductCard] = Field(default_factory=list)
+    total_match_count: int = Field(default=0, ge=0)
+    returned_count: int = Field(default=0, ge=0)
+    is_exhaustive: bool = True
     ranking_strategy: str
     query_plan: dict = Field(default_factory=dict)
     diagnostics: list[ToolDiagnostic] = Field(default_factory=list)
@@ -73,13 +98,28 @@ class CatalogCompareInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1)
-    comparison_level: Literal["sku", "spu"] = "sku"
+    comparison_level: Literal["auto", "sku", "spu"] = "auto"
+    targets: list[CatalogTargetIdentity] = Field(default_factory=list, max_length=10)
     sku_ids: list[int] = Field(default_factory=list, max_length=10)
     spu_ids: list[int] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=5, ge=2, le=10)
 
     @model_validator(mode="after")
     def validate_identifier_scope(self) -> "CatalogCompareInput":
+        if (
+            self.comparison_level == "auto"
+            and not self.targets
+            and self.sku_ids
+            and not self.spu_ids
+        ):
+            self.comparison_level = "sku"
+        elif (
+            self.comparison_level == "auto"
+            and not self.targets
+            and self.spu_ids
+            and not self.sku_ids
+        ):
+            self.comparison_level = "spu"
         if self.comparison_level == "sku" and self.spu_ids:
             raise ValueError("spu_ids require comparison_level=spu")
         if self.comparison_level == "spu" and self.sku_ids:
@@ -185,6 +225,9 @@ class CatalogFacetInput(BaseModel):
 class CatalogFacetItem(BaseModel):
     value: str
     count: int
+    count_scope: Literal["sku", "spu"] = "spu"
+    sku_count: int = 0
+    spu_count: int = 0
 
 
 class CatalogFacetOutput(BaseModel):
@@ -205,23 +248,26 @@ class OrderLookupInput(BaseModel):
     order_id: int | None = None
     query: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=5, ge=1, le=20)
-
-
-class OrderSummary(BaseModel):
-    id: int
-    status: int
-    status_label: str
-    pay_amount: Decimal
-    created_at: str
-    item_count: int
-    first_item_name: str | None = None
-    logistic_no: str | None = None
+    offset: int = Field(default=0, ge=0, le=10000)
 
 
 class OrderLookupOutput(BaseModel):
-    result_type: Literal["single_order", "order_candidates", "not_found"]
+    result_type: Literal[
+        "single_order",
+        "order_candidates",
+        "order_count",
+        "order_analysis",
+        "not_found",
+    ]
     order: OrderCard | None = None
     candidates: list[OrderSummary] = Field(default_factory=list)
+    analysis_orders: list[OrderCard] = Field(default_factory=list)
+    query_mode: OrderQueryMode = "recent"
+    total_match_count: int = Field(default=0, ge=0)
+    returned_count: int = Field(default=0, ge=0)
+    is_exhaustive: bool = True
+    offset: int = Field(default=0, ge=0)
+    next_offset: int | None = Field(default=None, ge=0)
 
 
 class DocumentSearchInput(BaseModel):

@@ -26,7 +26,9 @@ def apply_tool_output(
             ProductCard.model_validate(product) for product in output.get("products", [])
         ]
         if call.name == "catalog_search":
-            state.setdefault("parsed", {})["product_search"] = output.get("query_plan", {})
+            state.setdefault("parsed", {})["product_search"] = _catalog_search_projection(
+                output
+            )
         else:
             state.setdefault("parsed", {})["catalog_comparison"] = {
                 "query": call.arguments.get("query"),
@@ -47,7 +49,9 @@ def apply_tool_output(
     elif call.name == "order_lookup":
         if output.get("order"):
             state["order"] = OrderCard.model_validate(output["order"])
-        state.setdefault("parsed", {})["order_candidates"] = output.get("candidates", [])
+        parsed = state.setdefault("parsed", {})
+        parsed["order_candidates"] = output.get("candidates", [])
+        parsed["order_query"] = _order_query_projection(output)
 
 
 def rebuild_tool_projections(state: AgentState) -> None:
@@ -68,10 +72,12 @@ def rebuild_tool_projections(state: AgentState) -> None:
     evidence: list[EvidenceItem] = []
     order: OrderCard | None = None
     order_candidates: list[dict[str, Any]] = []
+    order_query: dict[str, Any] | None = None
     parsed = state.setdefault("parsed", {})
     parsed.pop("product_search", None)
     parsed.pop("catalog_comparison", None)
     parsed.pop("order_candidates", None)
+    parsed.pop("order_query", None)
     saw_catalog_result = False
     catalog_completed = False
 
@@ -100,7 +106,7 @@ def rebuild_tool_projections(state: AgentState) -> None:
                 seen_sku_ids.add(product.sku_id)
                 products.append(product)
             if name == "catalog_search":
-                parsed["product_search"] = output.get("query_plan", {})
+                parsed["product_search"] = _catalog_search_projection(output)
             else:
                 parsed["catalog_comparison"] = {
                     "query": tool_call_arguments(state, call_id).get("query"),
@@ -124,11 +130,14 @@ def rebuild_tool_projections(state: AgentState) -> None:
             candidates = output.get("candidates")
             if isinstance(candidates, list):
                 order_candidates = candidates
+            order_query = _order_query_projection(output)
 
     state["products"] = products
     state["evidence"] = dedupe_evidence(evidence)
     state["order"] = order
     parsed["order_candidates"] = order_candidates
+    if order_query is not None:
+        parsed["order_query"] = order_query
     if saw_catalog_result:
         state["catalog_tool_succeeded"] = catalog_completed
 
@@ -140,10 +149,12 @@ def _rebuild_from_task_artifacts(state: AgentState) -> None:
     evidence: list[EvidenceItem] = []
     order: OrderCard | None = None
     order_candidates: list[dict[str, Any]] = []
+    order_query: dict[str, Any] | None = None
     parsed = state.setdefault("parsed", {})
     parsed.pop("product_search", None)
     parsed.pop("catalog_comparison", None)
     parsed.pop("order_candidates", None)
+    parsed.pop("order_query", None)
     saw_catalog = False
 
     for artifact in state.get("task_artifacts", {}).values():
@@ -163,7 +174,7 @@ def _rebuild_from_task_artifacts(state: AgentState) -> None:
                 seen_sku_ids.add(product.sku_id)
                 products.append(product)
             if tool_name == "catalog_search":
-                parsed["product_search"] = value.get("query_plan") or {}
+                parsed["product_search"] = _catalog_search_projection(value)
             else:
                 parsed["catalog_comparison"] = {
                     "query": tool_call_arguments(state, call_id).get("query"),
@@ -183,11 +194,14 @@ def _rebuild_from_task_artifacts(state: AgentState) -> None:
             candidates = value.get("candidates")
             if isinstance(candidates, list):
                 order_candidates = candidates
+            order_query = _order_query_projection(value)
 
     state["products"] = products
     state["evidence"] = dedupe_evidence(evidence)
     state["order"] = order
     parsed["order_candidates"] = order_candidates
+    if order_query is not None:
+        parsed["order_query"] = order_query
     if saw_catalog:
         state["catalog_tool_succeeded"] = True
 
@@ -205,6 +219,32 @@ def _catalog_execution_completed(execution: dict[str, Any]) -> bool:
         isinstance(item, dict) and item.get("severity") == "error"
         for item in diagnostics
     )
+
+
+def _order_query_projection(output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "query_mode": output.get("query_mode") or "recent",
+        "total_match_count": int(output.get("total_match_count") or 0),
+        "returned_count": int(output.get("returned_count") or 0),
+        "is_exhaustive": bool(output.get("is_exhaustive", True)),
+        "offset": int(output.get("offset") or 0),
+        "next_offset": output.get("next_offset"),
+    }
+
+
+def _catalog_search_projection(output: dict[str, Any]) -> dict[str, Any]:
+    projection = dict(output.get("query_plan") or {})
+    for key in (
+        "result_purpose",
+        "selection_scope",
+        "total_match_count",
+        "returned_count",
+        "is_exhaustive",
+        "ranking_strategy",
+    ):
+        if key in output:
+            projection[key] = output[key]
+    return projection
 
 
 def tool_call_arguments(state: AgentState, call_id: str) -> dict[str, Any]:

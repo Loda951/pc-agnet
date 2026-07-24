@@ -152,6 +152,10 @@ def _semantic_outcome(
     if artifact.get("usable"):
         return "answered_with_facts"
 
+    task_status = str(status.get("status") or "")
+    if task_status == "blocked" and status.get("user_can_supply") is True:
+        return "needs_clarification"
+
     outcome = str(ledger_entry.get("outcome") or "")
     if not outcome:
         status_reason = str(status.get("reason") or "")
@@ -169,10 +173,7 @@ def _semantic_outcome(
             return "temporarily_unavailable"
         return "insufficient_evidence"
 
-    task_status = str(status.get("status") or "")
     if task_status == "blocked":
-        if status.get("user_can_supply") is True:
-            return "needs_clarification"
         return "blocked_dependency"
     if task_status == "failed":
         return "insufficient_evidence"
@@ -222,26 +223,101 @@ def _response_contract(
             item for item in fact_mapping.get("items", []) if isinstance(item, Mapping)
         ]
         values = [str(item.get("value")) for item in items if item.get("value")]
+        count_scopes = {
+            str(item.get("count_scope") or "sku")
+            for item in items
+            if item.get("count") is not None
+        }
         return {
             "required": [
                 "直接回答用户询问的目录选项",
                 "列出 items 中的每个 value",
             ],
             "must_include_values": values,
-            "count_semantics": "每个 count 是该选项对应的 SKU 记录数，只能作为辅助信息",
+            "count_semantics": (
+                "每个 count 按该 item 的 count_scope 统计；spu 表示商品系列数，"
+                "sku 表示具体版本数。sku_count 和 spu_count 是两个可核对的明确口径。"
+            ),
+            "count_scopes": sorted(count_scopes),
             "forbidden": [
                 "只汇总 count 而省略 value",
                 "把 count 总和称为商品系列数或品牌数",
             ],
         }
     if artifact_type in {"products", "ranked_product"}:
-        return {
+        contract = {
             "required": [
                 "用返回商品的真实字段回答筛选、推荐或排名问题",
                 "推荐理由必须逐项能在商品事实中找到依据",
             ],
             "forbidden": ["补写未返回的规格、用途认证或适配保证"],
         }
+        products = [
+            item
+            for item in fact_mapping.get("products", [])
+            if isinstance(item, Mapping)
+        ]
+        result_purpose = str(fact_mapping.get("result_purpose") or "search")
+        selection_scope = str(fact_mapping.get("selection_scope") or "spu")
+        total_match_count = _non_negative_int(fact_mapping.get("total_match_count"))
+        returned_count = _non_negative_int(fact_mapping.get("returned_count"))
+        is_exhaustive = bool(fact_mapping.get("is_exhaustive", True))
+        contract["result_window"] = {
+            "result_purpose": result_purpose,
+            "selection_scope": selection_scope,
+            "total_match_count": total_match_count,
+            "returned_count": returned_count,
+            "is_exhaustive": is_exhaustive,
+        }
+        if not is_exhaustive:
+            scope_label = "具体版本/SKU" if selection_scope == "sku" else "商品系列/SPU"
+            if result_purpose != "ranking":
+                contract["required"].append(
+                    f"明确共匹配 {total_match_count} 个{scope_label}，本次返回 "
+                    f"{returned_count} 个候选，不得把候选数写成全部数量"
+                )
+            contract["forbidden"].append(
+                f"声称商城只有本次返回的 {returned_count} 个结果"
+            )
+        if result_purpose == "recommendation":
+            contract["required"].append(
+                "products 已按推荐顺序排列；直接把第一项作为首选，其余项只作为备选"
+            )
+        elif result_purpose == "search":
+            contract["required"].append(
+                "把 products 表达为搜索结果，不得把第一项自动称为最推荐"
+            )
+        elif result_purpose == "lookup":
+            contract["required"].append(
+                "围绕已识别商品回答事实或版本信息，不得把返回窗口误称为完整商品集合"
+            )
+        elif result_purpose == "ranking":
+            contract["required"].append(
+                "按 query_plan.ranking 与商品 ranking_value 回答确定性名次"
+            )
+        if any(
+            item.get("entity_scope") == "spu" or item.get("ranking_scope") == "spu"
+            for item in products
+        ):
+            contract["required"].extend(
+                [
+                    "把返回对象作为商品系列/SPU，使用 spu_title 作为系列名称",
+                    "价格使用 series_min_price/series_max_price，库存使用 series_total_stock",
+                    "规格只使用 series_common_specs、series_option_specs 和 series_variants",
+                ]
+            )
+            if any(item.get("ranking_scope") == "spu" for item in products):
+                contract["required"].append(
+                    "明确这是商品系列/SPU 排名，并使用 ranking_value 说明排名依据"
+                )
+            contract["forbidden"].extend(
+                [
+                    "把辅助 SKU 的 stock 当成系列总库存",
+                    "把辅助 SKU 的 specs 当成全系列共同规格",
+                    "把辅助 SKU 的 title 当成系列名称（有 spu_title 时使用 spu_title）",
+                ]
+            )
+        return contract
     if artifact_type == "comparison":
         if fact_mapping.get("comparison_level") == "spu":
             return {
@@ -261,6 +337,58 @@ def _response_contract(
             "forbidden": ["把缺失字段补写成确定事实"],
         }
     if artifact_type == "order":
+        facts = fact_mapping
+        query_mode = str(facts.get("query_mode") or "")
+        total = facts.get("total_match_count")
+        returned = facts.get("returned_count")
+        if query_mode == "count":
+            return {
+                "required": [f"明确回答用户共有 {total or 0} 个订单"],
+                "forbidden": [
+                    "把订单候选列表数量当成总订单数",
+                    "声称修改、取消、催促或办理了订单操作",
+                ],
+            }
+        if query_mode == "analysis":
+            exhaustive = bool(facts.get("is_exhaustive", False))
+            required = [
+                "把 analysis_orders 仅作为分析当前问题的证据，只回答用户实际询问的结论",
+                "只引用支撑结论所必需的订单、商品、状态、时间或物流字段",
+                "根据订单商品名称及规格识别用户提到的相关商品，不要求逐字完全相同",
+            ]
+            if not exhaustive:
+                required.append("明确说明当前订单事实不完整，不能给出覆盖全部订单的否定结论")
+            return {
+                "required": required,
+                "forbidden": [
+                    "把 analysis_orders 中的全部订单逐项复述给用户",
+                    "展示与用户问题无关的订单号、商品、金额、状态或物流",
+                    "在 is_exhaustive=false 时声称用户从未买过某商品或不存在某类订单",
+                    "声称修改、取消、催促或办理了订单操作",
+                ],
+            }
+        if query_mode == "page" and returned == 0 and total:
+            return {
+                "required": [f"明确说明已经列完全部 {total} 个订单，没有更多下一页"],
+                "forbidden": [
+                    "声称用户没有任何订单",
+                    "声称修改、取消、催促或办理了订单操作",
+                ],
+            }
+        if facts.get("candidates"):
+            required = [
+                f"明确说明用户共有 {total or 0} 个订单",
+                f"列出本次返回的 {returned or 0} 个订单摘要，不自动选择第一单",
+            ]
+            if not facts.get("is_exhaustive", True):
+                required.append("明确说明这只是部分结果，并提示用户可以继续查看")
+            return {
+                "required": required,
+                "forbidden": [
+                    "把本次返回数量说成总订单数",
+                    "声称修改、取消、催促或办理了订单操作",
+                ],
+            }
         return {
             "required": ["明确回答订单、状态、明细或物流问题"],
             "forbidden": ["声称修改、取消、催促或办理了订单操作"],
@@ -344,6 +472,13 @@ def _tool_error_code(state: Mapping[str, Any], call_id: str) -> str:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _route_rewritten_query(state: Mapping[str, Any]) -> str:

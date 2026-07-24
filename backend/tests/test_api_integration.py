@@ -2,6 +2,86 @@ import pytest
 from httpx import AsyncClient
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_count"),
+    [
+        ("推荐一个键盘", 1),
+        ("推荐一个版本的键盘", 1),
+        ("推荐两个键盘", 2),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chat_recommendation_returns_distinct_spu_series(
+    api_client: AsyncClient,
+    auth_headers: dict[str, str],
+    message: str,
+    expected_count: int,
+) -> None:
+    response = await api_client.post(
+        "/api/chat",
+        json={"message": message},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["boundary"]["classification"] == "in_scope_auto"
+    assert len(payload["products"]) == expected_count
+    assert len({product["spu_id"] for product in payload["products"]}) == expected_count
+    assert all(product["entity_scope"] == "spu" for product in payload["products"])
+    assert all(product["spu_title"] for product in payload["products"])
+    assert all(product["series_sku_count"] >= 1 for product in payload["products"])
+    assert "系列库存" in payload["answer"]
+
+
+@pytest.mark.asyncio
+async def test_chat_followup_switches_from_recommended_spu_to_its_sku_variants(
+    api_client: AsyncClient,
+    auth_headers: dict[str, str],
+) -> None:
+    recommendation = await api_client.post(
+        "/api/chat",
+        json={"message": "推荐一个键盘"},
+        headers=auth_headers,
+    )
+    assert recommendation.status_code == 200
+    first = recommendation.json()
+    assert len(first["products"]) == 1
+    selected_spu_id = first["products"][0]["spu_id"]
+    assert first["products"][0]["entity_scope"] == "spu"
+
+    variants = await api_client.post(
+        "/api/chat",
+        json={
+            "message": "查看这个键盘所有版本",
+            "conversation_id": first["conversation_id"],
+        },
+        headers=auth_headers,
+    )
+    assert variants.status_code == 200
+    second = variants.json()
+    assert second["products"], second
+    assert {product["spu_id"] for product in second["products"]} == {
+        selected_spu_id
+    }
+    assert all(product["entity_scope"] == "sku" for product in second["products"])
+
+    cheapest = await api_client.post(
+        "/api/chat",
+        json={
+            "message": "这个键盘哪个版本最便宜",
+            "conversation_id": first["conversation_id"],
+        },
+        headers=auth_headers,
+    )
+    assert cheapest.status_code == 200
+    third = cheapest.json()
+    assert len(third["products"]) == 1
+    assert third["products"][0]["spu_id"] == selected_spu_id
+    assert third["products"][0]["entity_scope"] == "sku"
+    assert third["products"][0]["ranking_scope"] == "sku"
+
+
 @pytest.mark.asyncio
 async def test_chat_recommends_real_dataset_wireless_mouse(
     api_client: AsyncClient,

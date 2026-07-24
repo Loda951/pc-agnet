@@ -17,6 +17,7 @@ SAFE_QUERY_PLAN_KEYS = {
     "min_price",
     "planner",
     "query",
+    "selection_scope",
     "sort",
     "supported",
     "unsupported_reason",
@@ -56,6 +57,7 @@ class CatalogDisplayIdentity(BaseModel):
     spu_id: int
     sku_id: int
     title: str
+    entity_scope: Literal["sku", "spu"] = "sku"
     brand: str | None = None
     category: str | None = None
     image_url: str | None = None
@@ -119,6 +121,18 @@ class OrderMemory(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     last_order_id: int | None = None
+    candidate_order_ids: list[int] = Field(default_factory=list)
+    total_match_count: int = Field(default=0, ge=0)
+    returned_count: int = Field(default=0, ge=0)
+    is_exhaustive: bool = True
+    next_offset: int | None = Field(default=None, ge=0)
+
+    @field_validator("candidate_order_ids", mode="before")
+    @classmethod
+    def unique_order_ids(cls, value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(int(item) for item in value if item is not None))[:20]
 
 
 class EvidenceReference(BaseModel):

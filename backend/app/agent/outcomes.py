@@ -138,9 +138,23 @@ def normalize_tool_result(result: Mapping[str, Any]) -> ToolOutcome:
     if name == "order_lookup":
         if result_type == "single_order" and isinstance(output.get("order"), Mapping):
             return _usable(call_id, name, result_type, "order_found")
+        if result_type == "order_count" and isinstance(output.get("total_match_count"), int):
+            return _usable(call_id, name, result_type, "order_count_available")
+        analysis_orders = output.get("analysis_orders")
+        if (
+            result_type == "order_analysis"
+            and isinstance(analysis_orders, list)
+            and analysis_orders
+        ):
+            return _usable(call_id, name, result_type, "order_analysis_available")
         candidates = output.get("candidates")
-        if result_type == "order_candidates" and isinstance(candidates, list) and candidates:
-            return _usable(call_id, name, result_type, "order_candidates_found")
+        if result_type == "order_candidates" and isinstance(candidates, list):
+            if candidates:
+                return _usable(call_id, name, result_type, "order_candidates_found")
+            if output.get("query_mode") == "page" and isinstance(
+                output.get("total_match_count"), int
+            ):
+                return _usable(call_id, name, result_type, "order_page_exhausted")
         return ToolOutcome(
             tool_call_id=call_id,
             tool_name=name,

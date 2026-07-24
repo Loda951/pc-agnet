@@ -3,19 +3,32 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
+from app.agent.answer_context import build_answer_context
 from app.agent.artifacts import (
+    bound_task_catalog_targets,
     extract_wave_artifacts,
     initialize_task_runtime,
     refresh_task_status,
 )
 from app.agent.capabilities import decision_from_route_capabilities
-from app.agent.decisions import OrchestratorDecision
+from app.agent.decisions import OrchestratorDecision, PlannedToolCall
+from app.agent.execution import _runtime_context_for_call
 from app.agent.graph import AgentRuntime, _followup_tool_call_allowed
 from app.agent.outcomes import build_subquery_ledger, validate_terminal_decision
 from app.agent.route_runtime import _reuse_comparison_context
-from app.agent.routing import RequestRoutePlan
+from app.agent.routing import RequestRoutePlan, tool_planning_subqueries
 from app.agent.state import AgentState
+from app.agent.tool_loop import _find_reusable_tool_result
 from app.core.config import Settings
+
+
+def _bound_targets(
+    state: AgentState,
+    plan: RequestRoutePlan,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    task = next(item for item in tool_planning_subqueries(plan) if item.id == task_id)
+    return bound_task_catalog_targets(state, task)
 
 
 def _plan() -> RequestRoutePlan:
@@ -270,9 +283,22 @@ def test_spu_compare_task_binds_series_ids_from_context_and_ranked_artifact() ->
     second_decision = decision_from_route_capabilities(plan, state)
     assert second_decision is not None
     compare_call, _ = runtime._prepare_tool_call(state, second_decision.tool_calls[0])
-    assert compare_call.arguments["comparison_level"] == "spu"
-    assert compare_call.arguments["spu_ids"] == [75, 71]
-    assert "sku_ids" not in compare_call.arguments
+    assert compare_call.arguments == {
+        "query": "比较两个键盘系列的全部在售版本",
+        "limit": 5,
+    }
+    assert _bound_targets(state, plan, "task_2") == [
+        {
+            "sku_id": 757,
+            "spu_id": 75,
+            "source": "working_memory_reference",
+        },
+        {
+            "sku_id": 711,
+            "spu_id": 71,
+            "source": "current_turn_artifact",
+        },
+    ]
 
 
 def test_task_graph_rejects_cycles() -> None:
@@ -288,7 +314,222 @@ def test_ready_scheduler_parallelizes_independent_root_tasks() -> None:
 
     assert decision is not None
     assert [call.subquery for call in decision.tool_calls] == ["sq_1", "sq_3"]
-    assert decision.tool_calls[0].arguments == {"limit": 2}
+    assert decision.tool_calls[0].arguments == {"limit": 3}
+
+
+def test_tool_result_reuse_is_scoped_to_the_routed_task() -> None:
+    previous_result = {
+        "tool_call_id": "search-a",
+        "name": "catalog_search",
+        "execution": {
+            "tool_name": "catalog_search",
+            "ok": True,
+            "output": {"result_type": "products", "products": [{"sku_id": 101}]},
+            "error": None,
+        },
+    }
+    state = cast(
+        AgentState,
+        {
+            "tool_waves": [
+                {
+                    "wave": 1,
+                    "calls": [
+                        {
+                            "id": "search-a",
+                            "name": "catalog_search",
+                            "arguments": {"query": "查询这个系列的版本", "limit": 3},
+                            "subquery": "task_a",
+                        }
+                    ],
+                    "results": [previous_result],
+                }
+            ]
+        },
+    )
+    same_arguments = {"query": "查询这个系列的版本", "limit": 3}
+
+    assert (
+        _find_reusable_tool_result(
+            state,
+            PlannedToolCall(
+                id="search-b",
+                name="catalog_search",
+                arguments=same_arguments,
+                subquery="task_b",
+            ),
+        )
+        is None
+    )
+    assert (
+        _find_reusable_tool_result(
+            state,
+            PlannedToolCall(
+                id="search-a-retry",
+                name="catalog_search",
+                arguments=same_arguments,
+                subquery="task_a",
+            ),
+        )
+        == previous_result
+    )
+
+
+def test_two_parallel_catalog_chains_keep_wave_two_targets_isolated() -> None:
+    plan = RequestRoutePlan.model_validate(
+        {
+            "rewritten_query": "分别比较两组键盘和鼠标",
+            "subqueries": [
+                {
+                    "id": "goal_30",
+                    "query": "分别比较两组键盘和鼠标",
+                    "disposition": "tool_planning",
+                    "reason_code": "compare_two_independent_pairs",
+                    "tasks": [
+                        {
+                            "id": "task_301",
+                            "goal_id": "goal_30",
+                            "canonical_query": "查询销量第一的键盘 SPU",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "ranked_product",
+                            "answer_role": "internal",
+                            "capability": "catalog_search",
+                        },
+                        {
+                            "id": "task_302",
+                            "goal_id": "goal_30",
+                            "canonical_query": "查询销量第二的键盘 SPU",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "ranked_product",
+                            "answer_role": "internal",
+                            "capability": "catalog_search",
+                        },
+                        {
+                            "id": "task_303",
+                            "goal_id": "goal_30",
+                            "canonical_query": "比较这两个键盘系列",
+                            "depends_on": ["task_301", "task_302"],
+                            "input_requirements": [
+                                {
+                                    "name": "left",
+                                    "source": "task_output",
+                                    "task_id": "task_301",
+                                },
+                                {
+                                    "name": "right",
+                                    "source": "task_output",
+                                    "task_id": "task_302",
+                                },
+                            ],
+                            "produces": "comparison",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_compare",
+                        },
+                        {
+                            "id": "task_304",
+                            "goal_id": "goal_30",
+                            "canonical_query": "查询销量第一的鼠标 SPU",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "ranked_product",
+                            "answer_role": "internal",
+                            "capability": "catalog_search",
+                        },
+                        {
+                            "id": "task_305",
+                            "goal_id": "goal_30",
+                            "canonical_query": "查询销量第二的鼠标 SPU",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "ranked_product",
+                            "answer_role": "internal",
+                            "capability": "catalog_search",
+                        },
+                        {
+                            "id": "task_306",
+                            "goal_id": "goal_30",
+                            "canonical_query": "比较这两个鼠标系列",
+                            "depends_on": ["task_304", "task_305"],
+                            "input_requirements": [
+                                {
+                                    "name": "left",
+                                    "source": "task_output",
+                                    "task_id": "task_304",
+                                },
+                                {
+                                    "name": "right",
+                                    "source": "task_output",
+                                    "task_id": "task_305",
+                                },
+                            ],
+                            "produces": "comparison",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_compare",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    state = _runtime_state(plan, "分别比较两组键盘和鼠标")
+    state["user_id"] = 7
+    first = decision_from_route_capabilities(plan, state)
+    assert first is not None
+    assert [call.subquery for call in first.tool_calls] == [
+        "task_301",
+        "task_302",
+        "task_304",
+        "task_305",
+    ]
+
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    prepared = [runtime._prepare_tool_call(state, call)[0] for call in first.tool_calls]
+    products = [
+        _product(101, 10, sales_count=4000, sku_sales_count=400),
+        _product(201, 20, sales_count=3000, sku_sales_count=300),
+        _product(301, 30, sales_count=2000, sku_sales_count=200),
+        _product(401, 40, sales_count=1000, sku_sales_count=100),
+    ]
+    _apply_wave(
+        state,
+        [call.model_dump(mode="json") for call in prepared],
+        [
+            _successful_result(call.id, "catalog_search", [product])
+            for call, product in zip(prepared, products, strict=True)
+        ],
+    )
+
+    second = decision_from_route_capabilities(plan, state)
+    assert second is not None
+    assert [call.subquery for call in second.tool_calls] == [
+        "task_303",
+        "task_306",
+    ]
+    prepared_second = [
+        runtime._prepare_tool_call(state, call)[0] for call in second.tool_calls
+    ]
+    assert [call.arguments for call in prepared_second] == [
+        {"query": "比较这两个键盘系列", "limit": 5},
+        {"query": "比较这两个鼠标系列", "limit": 5},
+    ]
+    assert [
+        context["targets"]
+        for context in (
+            _runtime_context_for_call(state, prepared_second[0]),
+            _runtime_context_for_call(state, prepared_second[1]),
+        )
+    ] == [
+        [
+            {"sku_id": 101, "spu_id": 10, "source": "current_turn_artifact"},
+            {"sku_id": 201, "spu_id": 20, "source": "current_turn_artifact"},
+        ],
+        [
+            {"sku_id": 301, "spu_id": 30, "source": "current_turn_artifact"},
+            {"sku_id": 401, "spu_id": 40, "source": "current_turn_artifact"},
+        ],
+    ]
 
 
 def test_ranked_search_preparation_stays_within_public_tool_contract() -> None:
@@ -315,7 +556,7 @@ def test_ranked_search_preparation_stays_within_public_tool_contract() -> None:
 
     assert effective.arguments == {
         "query": "查询键盘 SPU 销量排行第二的商品",
-        "limit": 2,
+        "limit": 3,
     }
 
 
@@ -331,7 +572,18 @@ def test_next_wave_uses_ready_compare_task_without_reclassifying_raw_message() -
     assert validated.type == "tool_calls"
 
     effective, _ = runtime._prepare_tool_call(state, validated.tool_calls[0])
-    assert effective.arguments["sku_ids"] == [757, 711]
+    assert effective.arguments == {
+        "query": "比较当前商品与键盘销量第二名的区别",
+        "limit": 5,
+    }
+    assert _bound_targets(state, _plan(), "sq_2") == [
+        {"sku_id": 757, "source": "working_memory_reference"},
+        {
+            "sku_id": 711,
+            "spu_id": 71,
+            "source": "current_turn_artifact",
+        },
+    ]
     assert effective.arguments["query"] == "比较当前商品与键盘销量第二名的区别"
     assert effective.canonical_query == "比较当前商品与键盘销量第二名的区别"
     assert _followup_tool_call_allowed(state, effective) is True
@@ -347,7 +599,14 @@ def test_structured_compare_binding_does_not_append_raw_message_candidates() -> 
     runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
     effective, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
 
-    assert effective.arguments["sku_ids"] == [757, 711]
+    assert effective.arguments == {
+        "query": "比较当前商品与键盘销量第二名的区别",
+        "limit": 5,
+    }
+    assert [item.get("sku_id") for item in _bound_targets(state, _plan(), "sq_2")] == [
+        757,
+        711,
+    ]
 
 
 def test_comparison_followup_binds_previous_pair_without_catalog_search() -> None:
@@ -417,8 +676,15 @@ def test_comparison_followup_binds_previous_pair_without_catalog_search() -> Non
     runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
     effective, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
 
-    assert effective.arguments["sku_ids"] == [757, 745]
-    assert effective.arguments["limit"] == 5
+    assert effective.arguments == {
+        "query": "比较 Wooting 曜石 K08 和 Wooting 青锋 K07 的价格",
+        "limit": 5,
+    }
+    compare_task_id = tool_planning_subqueries(plan)[0].id
+    assert _bound_targets(state, plan, compare_task_id) == [
+        {"sku_id": 757, "source": "comparison_context"},
+        {"sku_id": 745, "source": "comparison_context"},
+    ]
 
 
 def test_two_goals_execute_as_root_wave_then_dependent_wave() -> None:
@@ -550,8 +816,14 @@ def test_two_goals_execute_as_root_wave_then_dependent_wave() -> None:
     validated = runtime._validate_decision_budget(state, second_decision, call_count=1)
     assert validated.type == "tool_calls"
     compare_call, _ = runtime._prepare_tool_call(state, validated.tool_calls[0])
-    assert compare_call.arguments["sku_ids"] == [757, 711]
-    assert compare_call.arguments["query"] == "比较当前商品与键盘销量第二名的区别"
+    assert compare_call.arguments == {
+        "query": "比较当前商品与键盘销量第二名的区别",
+        "limit": 5,
+    }
+    assert [item.get("sku_id") for item in _bound_targets(state, plan, "task_2")] == [
+        757,
+        711,
+    ]
 
     compare_result = {
         "tool_call_id": compare_call.id,
@@ -656,6 +928,172 @@ def _apply_wave(
         for item in build_subquery_ledger(state["tool_waves"])
     ]
     refresh_task_status(state)
+
+
+def test_context_product_accepts_one_spu_with_multiple_sku_variants() -> None:
+    plan = RequestRoutePlan.model_validate(
+        {
+            "rewritten_query": "查询这个键盘哪个版本最便宜",
+            "subqueries": [
+                {
+                    "id": "goal_1",
+                    "query": "查询这个键盘哪个版本最便宜",
+                    "disposition": "tool_planning",
+                    "reason_code": "rank_variants_in_current_series",
+                    "tasks": [
+                        {
+                            "id": "task_1",
+                            "goal_id": "goal_1",
+                            "canonical_query": "查询这个键盘哪个版本最便宜",
+                            "depends_on": [],
+                            "input_requirements": [
+                                {"name": "current_keyboard", "source": "context_product"}
+                            ],
+                            "produces": "ranked_product",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_search",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    state = cast(
+        AgentState,
+        {
+            "user_id": 7,
+            "message": "哪个版本最便宜",
+            "route_plan": plan.model_dump(mode="json"),
+            "working_memory_snapshot": {
+                "catalog": {
+                    "candidate_sku_ids": [745, 746, 747],
+                    "candidate_spu_ids": [63],
+                }
+            },
+            "tool_waves": [],
+            "tool_results": [],
+            "subquery_ledger": [],
+            "tool_wave_count": 0,
+            "orchestrator_call_count": 0,
+        },
+    )
+    initialize_task_runtime(state)
+
+    assert state["task_status"]["task_1"]["status"] == "ready"
+    assert _bound_targets(state, plan, "task_1") == [
+        {"source": "working_memory_reference", "spu_id": 63}
+    ]
+
+    decision = decision_from_route_capabilities(plan, state)
+    assert decision is not None
+    assert decision.tool_calls[0].arguments == {"limit": 3}
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    prepared, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
+
+    assert prepared.arguments == {
+        "query": "查询这个键盘哪个版本最便宜",
+        "limit": 3,
+    }
+    assert _runtime_context_for_call(state, prepared)["targets"] == [
+        {"source": "working_memory_reference", "spu_id": 63}
+    ]
+
+    ambiguous_state = cast(
+        AgentState,
+        {
+            "user_id": 7,
+            "message": "哪个版本最便宜",
+            "route_plan": plan.model_dump(mode="json"),
+            "working_memory_snapshot": {
+                "catalog": {
+                    "candidate_sku_ids": [745, 801],
+                    "candidate_spu_ids": [63, 72],
+                }
+            },
+            "tool_waves": [],
+            "tool_results": [],
+            "subquery_ledger": [],
+            "tool_wave_count": 0,
+            "orchestrator_call_count": 0,
+        },
+    )
+    initialize_task_runtime(ambiguous_state)
+
+    assert ambiguous_state["task_status"]["task_1"]["status"] == "blocked"
+    assert ambiguous_state["task_status"]["task_1"]["user_can_supply"] is True
+    assert _bound_targets(ambiguous_state, plan, "task_1") == []
+
+
+def test_catalog_diagnostic_becomes_task_level_clarification() -> None:
+    plan = RequestRoutePlan.model_validate(
+        {
+            "rewritten_query": "比较 Keychron K01 键盘系列",
+            "subqueries": [
+                {
+                    "id": "goal_1",
+                    "query": "比较 Keychron K01 键盘系列",
+                    "disposition": "tool_planning",
+                    "reason_code": "compare_series",
+                    "tasks": [
+                        {
+                            "id": "task_1",
+                            "goal_id": "goal_1",
+                            "canonical_query": "比较 Keychron K01 键盘系列",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "comparison",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_compare",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    state = _runtime_state(plan, "比较 Keychron K01 键盘系列")
+    decision = decision_from_route_capabilities(plan, state)
+    assert decision is not None
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    call, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
+    result = {
+        "tool_call_id": call.id,
+        "name": "catalog_compare",
+        "execution": {
+            "tool_name": "catalog_compare",
+            "ok": True,
+            "output": {
+                "result_type": "comparison",
+                "comparison_level": "spu",
+                "products": [],
+                "series": [{"spu_id": 63}],
+                "diagnostics": [
+                    {
+                        "code": "insufficient_spu_ids",
+                        "severity": "error",
+                        "message": "SPU comparison requires at least two explicit SPU IDs.",
+                        "recommended_action": "resolve_at_least_two_spus",
+                    }
+                ],
+            },
+            "error": None,
+        },
+    }
+
+    _apply_wave(state, [call.model_dump(mode="json")], [result])
+    answer_context = build_answer_context(state)
+
+    assert state["task_status"]["task_1"] == {
+        "task_id": "task_1",
+        "goal_id": "goal_1",
+        "answer_role": "user_facing",
+        "status": "blocked",
+        "reason": "tool_requested_clarification:insufficient_spu_ids",
+        "missing_information": ["至少两个明确的商品系列"],
+        "user_can_supply": True,
+    }
+    assert answer_context["tasks"][0]["semantic_outcome"] == "needs_clarification"
+    assert answer_context["recommended_control_action"] == "ask_clarification"
+    assert "至少两个明确的商品系列" in answer_context["tasks"][0]["explanation"]
 
 
 def test_scheduler_is_not_dependent_on_task_order_or_rank_two() -> None:
@@ -763,7 +1201,71 @@ def test_scheduler_is_not_dependent_on_task_order_or_rank_two() -> None:
     validated = runtime._validate_decision_budget(state, second, call_count=1)
     compare, _ = runtime._prepare_tool_call(state, validated.tool_calls[0])
     assert compare.subquery == "task_8"
-    assert compare.arguments["sku_ids"] == [990, 301]
+    assert compare.arguments == {
+        "query": "比较当前显示器与销量第三的显示器",
+        "limit": 5,
+    }
+    assert [item.get("sku_id") for item in _bound_targets(state, plan, "task_8")] == [
+        990,
+        301,
+    ]
+
+
+def test_named_product_compare_can_call_catalog_tool_without_discovery_tasks() -> None:
+    plan = RequestRoutePlan.model_validate(
+        {
+            "rewritten_query": "比较 G502 和 Viper 两个鼠标型号",
+            "subqueries": [
+                {
+                    "id": "goal_9",
+                    "query": "比较 G502 和 Viper 两个鼠标型号",
+                    "disposition": "tool_planning",
+                    "reason_code": "compare_named_models",
+                    "tasks": [
+                        {
+                            "id": "task_10",
+                            "goal_id": "goal_9",
+                            "canonical_query": "比较 G502 和 Viper 两个鼠标型号",
+                            "depends_on": [],
+                            "input_requirements": [],
+                            "produces": "comparison",
+                            "answer_role": "user_facing",
+                            "capability": "catalog_compare",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    state = cast(
+        AgentState,
+        {
+            "user_id": 7,
+            "message": "比较 G502 和 Viper 两个鼠标型号",
+            "route_plan": plan.model_dump(mode="json"),
+            "working_memory_snapshot": {
+                "catalog": {
+                    "candidate_sku_ids": [901, 902],
+                    "candidate_spu_ids": [90, 91],
+                }
+            },
+        },
+    )
+    decision = decision_from_route_capabilities(plan, state)
+
+    assert decision is not None
+    assert [(call.name, call.subquery) for call in decision.tool_calls] == [
+        ("catalog_compare", "task_10")
+    ]
+    assert decision.tool_calls[0].arguments == {"limit": 5}
+    runtime = AgentRuntime(cast(Any, None), Settings(llm_api_key=""))
+    prepared, _ = runtime._prepare_tool_call(state, decision.tool_calls[0])
+    assert prepared.arguments == {
+        "query": "比较 G502 和 Viper 两个鼠标型号",
+        "limit": 5,
+    }
+    assert _runtime_context_for_call(state, prepared)["targets"] == []
 
 
 def test_sku_rank_and_policy_search_share_root_wave_without_cross_talk() -> None:
@@ -900,7 +1402,14 @@ def test_sku_rank_and_policy_search_share_root_wave_without_cross_talk() -> None
     assert second is not None
     validated = runtime._validate_decision_budget(state, second, call_count=1)
     compare, _ = runtime._prepare_tool_call(state, validated.tool_calls[0])
-    assert compare.arguments["sku_ids"] == [600, 502]
+    assert compare.arguments == {
+        "query": "比较当前键盘与 SKU 销量第二的版本",
+        "limit": 5,
+    }
+    assert [item.get("sku_id") for item in _bound_targets(state, plan, "task_5")] == [
+        600,
+        502,
+    ]
 
 
 def test_order_artifact_binds_unique_candidate_while_catalog_goal_stays_independent() -> None:

@@ -175,6 +175,35 @@ def test_v2_query_plan_keeps_only_supported_constraint_fields() -> None:
     }
 
 
+def test_order_window_is_persisted_without_order_details() -> None:
+    context = _context_module()
+    schemas = _context_schema_module()
+    memory = context._next_working_memory(
+        schemas.WorkingMemoryV2(),
+        {
+            "parsed": {
+                "order_candidates": [
+                    {"id": 202607020001},
+                    {"id": 202607020002},
+                ],
+                "order_query": {
+                    "query_mode": "recent",
+                    "total_match_count": 7,
+                    "returned_count": 2,
+                    "is_exhaustive": False,
+                    "next_offset": 2,
+                },
+            }
+        },
+    )
+
+    assert memory.order.candidate_order_ids == [202607020001, 202607020002]
+    assert memory.order.total_match_count == 7
+    assert memory.order.returned_count == 2
+    assert memory.order.is_exhaustive is False
+    assert memory.order.next_offset == 2
+
+
 def test_compact_audit_omits_context_payloads_and_keeps_metrics() -> None:
     context = _context_module()
     audit = context.serialize_compact_audit(
@@ -236,11 +265,19 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
             "intent": "product_recommendation",
             "boundary": {"classification": "in_scope_auto"},
             "applied_memory_ids": ["invalid", True, 7.9, "7", 999, 7],
+            "parsed": {
+                "product_search": {
+                    "query": "推荐一个鼠标",
+                    "selection_scope": "spu",
+                }
+            },
             "products": [
                 SimpleNamespace(
                     spu_id=10,
                     sku_id=101,
                     title="Test Mouse",
+                    spu_title="Test Mouse Series",
+                    entity_scope="spu",
                     brand="Razer",
                     category="mouse",
                     image_url="/mouse.png",
@@ -261,12 +298,16 @@ async def test_prepare_and_complete_turn_own_context_persistence_and_audit() -> 
         {
             "spu_id": 10,
             "sku_id": 101,
-            "title": "Test Mouse",
+            "title": "Test Mouse Series",
+            "entity_scope": "spu",
             "brand": "Razer",
             "category": "mouse",
             "image_url": "/mouse.png",
         }
     ]
+    assert repository.updated_working_memory["catalog"]["query_plan"][
+        "selection_scope"
+    ] == "spu"
     serialized = json.dumps(repository.updated_working_memory, ensure_ascii=False)
     assert "199" not in serialized
     assert "stock" not in serialized

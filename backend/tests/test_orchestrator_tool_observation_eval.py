@@ -194,7 +194,7 @@ CASES = [
     ObservationCase(
         "09-compare-two-products",
         "catalog_compare",
-        {"query": "比较这两款键盘", "sku_ids": [101, 102], "limit": 5},
+        {"query": "比较这两个具体 SKU 键盘版本", "limit": 5},
         _success(
             "catalog_compare",
             {"result_type": "comparison", "products": [PRODUCT, SECOND_PRODUCT]},
@@ -206,7 +206,7 @@ CASES = [
     ObservationCase(
         "10-compare-one-product",
         "catalog_compare",
-        {"query": "比较这两款键盘", "sku_ids": [101, 102], "limit": 5},
+        {"query": "比较这两个具体 SKU 键盘版本", "limit": 5},
         _success("catalog_compare", {"result_type": "comparison", "products": [PRODUCT]}),
         "insufficient",
         "needs_replan",
@@ -215,7 +215,7 @@ CASES = [
     ObservationCase(
         "11-compare-empty",
         "catalog_compare",
-        {"query": "比较这两款键盘", "sku_ids": [101, 102], "limit": 5},
+        {"query": "比较这两个具体 SKU 键盘版本", "limit": 5},
         _success("catalog_compare", {"result_type": "comparison", "products": []}),
         "empty",
         "unavailable",
@@ -387,7 +387,10 @@ async def test_20_scripted_tool_observations_through_orchestrator(
 
     assert len(executor.calls) == 1
     assert executor.calls[0][0] == case.tool_name
-    assert executor.calls[0][2] == {"user_id": 7}
+    expected_runtime = {"user_id": 7}
+    if case.tool_name in {"catalog_search", "catalog_compare"}:
+        expected_runtime["targets"] = []
+    assert executor.calls[0][2] == expected_runtime
     assert state["normalized_tool_results"][0]["outcome"] == case.expected_outcome
     assert state["subquery_ledger"][0]["status"] == case.expected_status
 

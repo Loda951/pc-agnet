@@ -14,8 +14,6 @@ from app.agent.answer_context import (
 )
 from app.agent.artifacts import (
     bound_task_order_id,
-    bound_task_sku_ids,
-    bound_task_spu_ids,
     extract_wave_artifacts,
     initialize_task_runtime,
     refresh_task_status,
@@ -76,7 +74,6 @@ from app.agent.route_runtime import (
     _fallback_rewritten_query,
     _fallback_route_disposition,
     _intent_from_route_plan,
-    _resolve_compare_sku_ids,
     _resolve_order_id,
     _reuse_comparison_context,
     _routed_query_for_call,
@@ -141,9 +138,6 @@ from app.tools.contracts import (
     RegistryToolExecutor,
     ToolContractProvider,
     ToolExecutor,
-)
-from app.tools.schemas import (
-    CatalogCompareInput,
 )
 
 
@@ -675,51 +669,7 @@ class AgentRuntime:
             arguments["query"] = routed_query
         effective_message = routed_query or state["message"]
 
-        if call.name == "catalog_search":
-            if task is not None and task.result_selector is not None:
-                selector = task.result_selector
-                arguments["limit"] = max(
-                    int(arguments.get("limit") or 0),
-                    selector.rank,
-                )
-
-        elif call.name == "catalog_compare":
-            comparison_level = (
-                task.comparison_level
-                if task is not None and task.comparison_level is not None
-                else str(arguments.get("comparison_level") or "sku")
-            )
-            arguments["comparison_level"] = comparison_level
-            arguments.pop("spu_ids" if comparison_level == "sku" else "sku_ids", None)
-            request = CatalogCompareInput.model_validate(arguments)
-            if comparison_level == "spu":
-                bound_spu_ids = bound_task_spu_ids(state, task) if task is not None else []
-                spu_ids = (
-                    bound_spu_ids
-                    if task is not None and task.input_requirements
-                    else list(dict.fromkeys([*bound_spu_ids, *request.spu_ids]))[:10]
-                )
-                if spu_ids:
-                    request = request.model_copy(update={"spu_ids": spu_ids})
-            else:
-                bound_sku_ids = bound_task_sku_ids(state, task) if task is not None else []
-                if task is not None and task.input_requirements:
-                    # The frozen Task DAG owns comparison binding.
-                    sku_ids = bound_sku_ids
-                else:
-                    resolved_sku_ids = _resolve_compare_sku_ids(
-                        state["message"], state.get("working_memory_snapshot", {})
-                    )
-                    sku_ids = list(
-                        dict.fromkeys(
-                            [*bound_sku_ids, *request.sku_ids, *resolved_sku_ids]
-                        )
-                    )[:10]
-                if sku_ids:
-                    request = request.model_copy(update={"sku_ids": sku_ids})
-            arguments = request.model_dump(mode="json", exclude_none=True)
-
-        elif call.name == "order_lookup":
+        if call.name == "order_lookup":
             arguments.setdefault("query", effective_message)
             bound_order_id = bound_task_order_id(state, task) if task is not None else None
             arguments["order_id"] = bound_order_id or _resolve_order_id(
@@ -728,6 +678,17 @@ class AgentRuntime:
                 state.get("working_memory_snapshot", {}),
                 self.memory_service,
             )
+            if arguments["order_id"] is None:
+                # Order window semantics belong to the query-aware tool. A planner-supplied
+                # limit must not silently turn "recent orders" into one order.
+                arguments.pop("limit", None)
+                arguments.pop("offset", None)
+            if any(marker in effective_message for marker in ("下一页", "继续列", "继续看")):
+                order_memory = state.get("working_memory_snapshot", {}).get("order", {})
+                if isinstance(order_memory, dict):
+                    next_offset = order_memory.get("next_offset")
+                    if isinstance(next_offset, int):
+                        arguments["offset"] = next_offset
 
         elif call.name in {"policy_search", "knowledge_search"}:
             arguments.setdefault("query", effective_message)
@@ -744,12 +705,6 @@ class AgentRuntime:
             ), []
         public_input = contract.public_input_model.model_validate(arguments)
         public_arguments = public_input.model_dump(mode="json", exclude_none=True)
-        if call.name == "catalog_compare":
-            spu_comparison = public_arguments.get("comparison_level") == "spu"
-            identifier_to_remove = "sku_ids" if spu_comparison else "spu_ids"
-            public_arguments.pop(identifier_to_remove, None)
-            if not spu_comparison:
-                public_arguments.pop("comparison_level", None)
         return (
             call.model_copy(
                 update={
@@ -891,6 +846,8 @@ class AgentRuntime:
             "evidence": _dump_evidence(state.get("evidence", [])),
             "products": [product.model_dump(mode="json") for product in state.get("products", [])],
             "order": (state["order"].model_dump(mode="json") if state.get("order") else None),
+            "orders": state.get("parsed", {}).get("order_candidates", []),
+            "order_query": state.get("parsed", {}).get("order_query"),
         }
         outcome = {
             key: value
@@ -966,6 +923,8 @@ class AgentRuntime:
             evidence=state.get("evidence", []),
             products=state.get("products", []),
             order=state.get("order"),
+            orders=state.get("parsed", {}).get("order_candidates", []),
+            order_query=state.get("parsed", {}).get("order_query"),
             suggested_actions=[
                 SuggestedAction(**item) for item in state.get("suggested_actions", [])
             ],

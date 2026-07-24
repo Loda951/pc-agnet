@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.artifacts import initialize_task_runtime
 from app.agent.decisions import OrchestratorDecision, PlannedToolCall
 from app.agent.graph import AgentRuntime, _orchestrator_messages
+from app.agent.intent import classify_intent
 from app.agent.routing import RequestRoutePlan
 from app.agent.state import AgentState
 from app.core.config import Settings
@@ -48,6 +49,19 @@ def _route_message(rewritten_query: str, subqueries: list[dict[str, Any]]) -> AI
             }
         ],
     )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "我买过雷蛇鼠标吗",
+        "以前有没有购买过 Razer 鼠标",
+        "我上次买键盘是什么时候",
+        "哪个订单里有这款耳机",
+    ],
+)
+def test_purchase_history_phrasings_are_order_intent(message: str) -> None:
+    assert classify_intent(message) == "order_status"
 
 
 class FakeBoundModel:
@@ -788,6 +802,57 @@ async def test_session_grounded_response_reuses_recent_answer_without_tool_call(
 
 
 @pytest.mark.asyncio
+async def test_session_grounded_response_selects_cheapest_variant_from_recent_answer() -> None:
+    message = "哪个版本最便宜"
+    previous_answer = (
+        "Wooting 曜石 K08 机械键盘有三个版本："
+        "黑色标准版 350 元，白色标准版 355 元，银色增强版 360 元，当前都有现货。"
+    )
+    history = [
+        ContextMessage(role="user", content="推荐我一个键盘吧"),
+        ContextMessage(role="assistant", content=previous_answer),
+    ]
+    router = FakeBoundModel(
+        [
+            _route_message(
+                "判断刚才推荐键盘的三个版本中哪个最便宜",
+                [
+                    {
+                        "id": "goal_1",
+                        "query": "判断刚才推荐键盘的三个版本中哪个最便宜",
+                        "disposition": "session_grounded_response",
+                        "reason_code": "recent_answer_contains_all_variant_prices",
+                    }
+                ],
+            )
+        ]
+    )
+    answer_model = FakeRouteAnswerModel(
+        "黑色标准版最便宜，价格是 350 元。"
+    )
+    executor = FakeToolExecutor()
+    context = FakeContextService(message, history=history)
+    runtime = AgentRuntime(
+        cast(AsyncSession, None),
+        Settings(llm_api_key=""),
+        chat_model=answer_model,
+        router_model=router,
+        context_service=context,
+        tool_executor=executor,
+    )
+
+    response = await runtime.run(ChatRequest(message=message), user_id=7)
+    outcome = context.outcomes[0]
+
+    assert response.answer == "黑色标准版最便宜，价格是 350 元。"
+    assert executor.calls == []
+    assert outcome["tool_wave_count"] == 0
+    assert outcome["route_answer_mode"] == "session_grounded"
+    assert outcome["route_plan"]["subqueries"][0]["tasks"] == []
+    assert any(str(item.content) == previous_answer for item in answer_model.messages[0])
+
+
+@pytest.mark.asyncio
 async def test_session_grounded_response_streams_delta_and_done() -> None:
     message = "那 M08 和 M06 的差价是多少？"
     history = [
@@ -1009,7 +1074,7 @@ async def test_fresh_comparison_request_uses_tool_path_instead_of_session_answer
     assert executor.calls == [
         (
             "catalog.compare",
-            {"query": message, "sku_ids": [801, 802, 803], "limit": 5},
+            {"query": message, "limit": 5},
         )
     ]
     assert context.outcomes[0]["tool_wave_count"] == 1

@@ -95,6 +95,7 @@ class FakeToolExecutor:
     def __init__(self, results: dict[str, ToolExecutionResult]):
         self.results = results
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.runtime_contexts: list[dict[str, Any]] = []
 
     async def execute(
         self,
@@ -103,10 +104,8 @@ class FakeToolExecutor:
         runtime_context: dict[str, Any],
     ) -> ToolExecutionResult:
         name = contract.registry_name
-        input_data = dict(arguments)
-        for field_name in contract.runtime_fields:
-            input_data[field_name] = runtime_context[field_name]
-        self.calls.append((name, input_data))
+        self.calls.append((name, dict(arguments)))
+        self.runtime_contexts.append(dict(runtime_context))
         return self.results[name]
 
 
@@ -134,6 +133,64 @@ def test_catalog_tool_call_preserves_query_only_public_input() -> None:
     assert prepared_call.arguments == {
         "query": "推荐 500 元以内无线鼠标",
         "limit": 5,
+    }
+
+
+def test_order_list_call_ignores_planner_limit_one() -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    state = cast(
+        AgentState,
+        {
+            "message": "列出我最近的订单",
+            "working_memory_snapshot": WorkingMemoryV2().model_dump(mode="json"),
+        },
+    )
+    call = PlannedToolCall(
+        id="order-list",
+        name="order_lookup",
+        arguments={"limit": 1},
+    )
+
+    prepared_call, _ = runtime._prepare_tool_call(state, call)
+
+    assert prepared_call.arguments == {
+        "query": "列出我最近的订单",
+        "limit": 5,
+        "offset": 0,
+    }
+
+
+def test_order_followups_bind_ordinal_and_next_page_from_memory() -> None:
+    runtime = AgentRuntime(cast(AsyncSession, None), Settings(llm_api_key=""))
+    memory = WorkingMemoryV2.model_validate(
+        {
+            "order": {
+                "candidate_order_ids": [202607020001, 202607020002],
+                "total_match_count": 7,
+                "returned_count": 2,
+                "is_exhaustive": False,
+                "next_offset": 2,
+            }
+        }
+    ).model_dump(mode="json")
+
+    ordinal_call, _ = runtime._prepare_tool_call(
+        cast(
+            AgentState,
+            {"message": "就看第二个订单", "working_memory_snapshot": memory},
+        ),
+        PlannedToolCall(id="order-detail", name="order_lookup", arguments={}),
+    )
+    page_call, _ = runtime._prepare_tool_call(
+        cast(AgentState, {"message": "继续看下一页", "working_memory_snapshot": memory}),
+        PlannedToolCall(id="order-page", name="order_lookup", arguments={}),
+    )
+
+    assert ordinal_call.arguments["order_id"] == 202607020002
+    assert page_call.arguments == {
+        "query": "继续看下一页",
+        "limit": 5,
+        "offset": 2,
     }
 
 
@@ -483,10 +540,18 @@ async def test_compare_followup_resolves_ordinals_to_working_memory_sku_ids(
             "catalog.compare",
             {
                 "query": "此前商品需求：mouse；当前补充要求：对比第一个和第二个",
-                "sku_ids": [101, 102],
                 "limit": 5,
             },
         )
+    ]
+    assert registry.runtime_contexts == [
+        {
+            "user_id": 7,
+            "targets": [
+                {"sku_id": 101, "spu_id": 10, "source": "comparison_context"},
+                {"sku_id": 102, "spu_id": 11, "source": "comparison_context"},
+            ],
+        }
     ]
     assert [product.sku_id for product in response.products] == [101, 102]
     assert response.products[1].title == "Logitech Fresh Mouse"
@@ -710,13 +775,17 @@ async def test_sync_runtime_uses_authenticated_order_lookup_and_preserves_order_
     response = await runtime.run(ChatRequest(message=prepared.message), user_id=7)
 
     assert executor.calls == [
-        ("order.lookup", {"query": "查询最近订单候选", "limit": 1, "user_id": 7}),
+        (
+            "order.lookup",
+            {"query": "查询最近订单候选", "limit": 5, "offset": 0, "user_id": 7},
+        ),
         (
             "order.lookup",
             {
                 "order_id": ORDER["id"],
                 "query": "查询选中订单详情",
-                "limit": 1,
+                "limit": 5,
+                "offset": 0,
                 "user_id": 7,
             },
         ),

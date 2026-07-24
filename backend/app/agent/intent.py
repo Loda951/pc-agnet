@@ -23,6 +23,16 @@ def classify_intent(message: str) -> str:
         for keyword in ["退货", "换货", "退款", "维修", "售后", "工单"]
     ):
         return "after_sales"
+    purchase_history = any(
+        marker in compact
+        for marker in ("买过", "购买过", "下单过", "订单里有", "哪个订单里", "哪些订单里")
+    ) or bool(
+        re.search(r"(?:以前|之前|曾经|上次|最近一次).{0,8}(?:买|购买|下单)", compact)
+        or re.search(r"(?:有没有|是否).{0,8}(?:买|购买|下单)", compact)
+        or re.search(r"(?:买|购买|下单).{0,5}(?:了吗|没有|记录|历史)", compact)
+    )
+    if purchase_history:
+        return "order_status"
     if any(keyword in message for keyword in ["订单", "物流", "快递", "发货"]) or re.search(
         r"\b\d{8,}\b", lowered
     ):

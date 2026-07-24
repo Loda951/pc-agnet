@@ -3,7 +3,7 @@ import json
 import re
 from decimal import Decimal
 from itertools import combinations
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.intent import build_product_search
 from app.models import Brand, Category, Sku, Spu
 from app.repositories.catalog import CATEGORY_ALIASES, CatalogRepository
-from app.schemas.catalog import ProductCard, ProductSearchRequest, ProductSpecCondition
+from app.schemas.catalog import (
+    ProductCard,
+    ProductSearchRequest,
+    ProductSpecCondition,
+    ProductVariantCard,
+)
 from app.tools.schemas import (
     CatalogCompareInput,
     CatalogCompareOutput,
@@ -282,12 +287,15 @@ class ProductQueryPlan(BaseModel):
     usage_scenario: str | None = None
     usage_mapping: dict = Field(default_factory=dict)
     sort: Literal["recommend", "sales", "price_asc", "price_desc", "stock"] = "recommend"
+    result_purpose: Literal["recommendation", "search", "lookup", "ranking"] = "search"
+    selection_scope: Literal["sku", "spu"] = "spu"
     limit: int = Field(default=3, ge=1, le=20)
     supported: bool = True
     unsupported_reason: str | None = None
     planner: str = "rule_based"
     fallback_reason: str | None = None
     normalization_debug: dict = Field(default_factory=dict)
+    ranking: "CatalogRankingPlan | None" = None
 
     @model_validator(mode="after")
     def validate_price_range(self) -> "ProductQueryPlan":
@@ -297,6 +305,20 @@ class ProductQueryPlan(BaseModel):
             and self.min_price > self.max_price
         ):
             raise ValueError("min_price cannot be greater than max_price")
+        return self
+
+
+class CatalogRankingPlan(BaseModel):
+    scope: Literal["sku", "spu"]
+    metric: Literal["price", "stock", "sales"]
+    direction: Literal["asc", "desc"]
+    rank: int = Field(default=1, ge=1, le=20)
+    count: int = Field(default=1, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "CatalogRankingPlan":
+        if self.rank + self.count - 1 > 20:
+            raise ValueError("catalog ranking window cannot exceed 20")
         return self
 
 
@@ -313,6 +335,7 @@ class CatalogComparePlan(BaseModel):
     planner: str = "rule_based"
     fallback_reason: str | None = None
     normalization_debug: dict = Field(default_factory=dict)
+    comparison_level: Literal["sku", "spu"] = "spu"
 
 
 class CatalogQueryPlanner(Protocol):
@@ -330,6 +353,7 @@ class FacetQueryPlan(BaseModel):
     min_price: Decimal | None = None
     max_price: Decimal | None = None
     filters: dict[str, str] = Field(default_factory=dict)
+    count_scope: Literal["sku", "spu"] = "spu"
     limit: int = Field(default=20, ge=1, le=50)
     supported: bool = True
     unsupported_reason: str | None = None
@@ -375,6 +399,24 @@ class RuleBasedCatalogQueryPlanner:
             usage = defaults.usage
         if request.usage:
             excluded_usage = [item for item in excluded_usage if item != usage]
+        ranking = _ranking_plan_from_query(
+            request.query,
+            request.limit,
+            has_context_target=bool(request.targets),
+        )
+        selection_scope = (
+            ranking.scope
+            if ranking is not None
+            else _catalog_selection_scope_from_query(
+                request.query,
+                has_context_target=bool(request.targets),
+            )
+        )
+        result_purpose = _catalog_result_purpose_from_query(
+            request.query,
+            has_context_target=bool(request.targets),
+            has_ranking=ranking is not None,
+        )
         return ProductQueryPlan(
             query=request.query,
             category=(
@@ -399,9 +441,12 @@ class RuleBasedCatalogQueryPlanner:
             keywords=_dedupe_keep_order([*request.keywords, *([usage] if usage else [])]),
             usage_scenario=usage,
             sort=_sort_from_query(request.query) or request.sort,
-            limit=request.limit,
+            result_purpose=result_purpose,
+            selection_scope=selection_scope,
+            limit=ranking.count if ranking is not None else request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
+            ranking=ranking,
         )
 
     async def plan_compare(self, request: CatalogCompareInput) -> CatalogComparePlan:
@@ -412,6 +457,10 @@ class RuleBasedCatalogQueryPlanner:
             category=parsed.category,
             items=_product_terms(request.query),
             comparison_fields=_comparison_fields_from_query(request.query),
+            comparison_level=_comparison_level_from_query(
+                request.query,
+                has_context_target=bool(request.targets),
+            ),
             limit=request.limit,
             supported=unsupported_reason is None,
             unsupported_reason=unsupported_reason,
@@ -535,6 +584,25 @@ class CatalogToolService:
         if requested_limit is not None:
             request = request.model_copy(update={"limit": requested_limit})
         plan = await self._safe_plan_search(request)
+        inferred_scope = _catalog_selection_scope_from_query(
+            request.query,
+            has_context_target=bool(request.targets),
+        )
+        result_purpose = _catalog_result_purpose_from_query(
+            request.query,
+            has_context_target=bool(request.targets),
+            has_ranking=plan.ranking is not None,
+            planned_purpose=plan.result_purpose,
+        )
+        update: dict[str, Any] = {
+            "selection_scope": inferred_scope,
+            "result_purpose": result_purpose,
+        }
+        if plan.ranking is not None:
+            update["ranking"] = plan.ranking.model_copy(
+                update={"scope": inferred_scope}
+            )
+        plan = plan.model_copy(update=update)
         if plan.supported and plan.usage_scenario and not plan.category:
             return await self._search_usage_across_categories(request, plan)
         plan = _apply_usage_scenario_mapping(plan)
@@ -542,6 +610,8 @@ class CatalogToolService:
             diagnostics = _catalog_plan_diagnostics(plan, result_type="empty", count=0)
             return CatalogSearchOutput(
                 result_type="empty",
+                result_purpose=plan.result_purpose,
+                selection_scope=plan.selection_scope,
                 products=[],
                 ranking_strategy="unsupported_query",
                 query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
@@ -549,22 +619,92 @@ class CatalogToolService:
             )
 
         product_request = _plan_to_product_search(plan)
+        context_spu_ids = (
+            await self._resolved_target_ids(request, "spu")
+            if request.targets
+            else []
+        )
+        if request.targets and not context_spu_ids:
+            diagnostics = [
+                ToolDiagnostic(
+                    code="invalid_context_target",
+                    severity="error",
+                    message="The referenced catalog product is unavailable.",
+                    recommended_action="ask_user_to_select_an_active_product",
+                )
+            ]
+            return CatalogSearchOutput(
+                result_type="empty",
+                result_purpose=plan.result_purpose,
+                selection_scope=plan.selection_scope,
+                products=[],
+                ranking_strategy="invalid_context_target",
+                query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
+                diagnostics=diagnostics,
+            )
+        if context_spu_ids:
+            product_request = product_request.model_copy(
+                update={
+                    "spu_ids": context_spu_ids,
+                    # The trusted identity already fixes the series. Deictic wording such
+                    # as "这个系列" is selection semantics, not a product-title keyword.
+                    "query": "",
+                }
+            )
         repository = CatalogRepository(self.session)
-        if _is_spu_sales_rank_query(plan.query):
-            products = await repository.search_product_series_by_sales(product_request)
-            ranking_strategy = "spu_sales_representative"
+        if plan.ranking is not None:
+            ranking = plan.ranking
+            if ranking.scope == "spu":
+                page = await repository.search_product_series_by_ranking_with_total(
+                    product_request,
+                    metric=ranking.metric,
+                    direction=ranking.direction,
+                    rank=ranking.rank,
+                    count=ranking.count,
+                )
+            else:
+                page = await repository.search_skus_by_ranking_with_total(
+                    product_request,
+                    metric=ranking.metric,
+                    direction=ranking.direction,
+                    rank=ranking.rank,
+                    count=ranking.count,
+                )
+                products = [
+                    _with_sku_ranking(product, ranking)
+                    for product in page.products
+                ]
+            ranking_strategy = (
+                f"{ranking.scope}_{ranking.metric}_{ranking.direction}"
+            )
+        elif plan.selection_scope == "spu":
+            page = await repository.search_product_series_with_total(product_request)
+            ranking_strategy = "spu_match_score_sales_stock_price"
         else:
-            products = await repository.search_products(product_request)
+            page = await repository.search_products_with_total(product_request)
             ranking_strategy = (
                 "match_score_sales_stock_price" if plan.sort == "recommend" else plan.sort
             )
+        if plan.ranking is None or plan.ranking.scope == "spu":
+            products = page.products
+        total_match_count = page.total_count
+        if plan.selection_scope == "spu" and products:
+            products = await self._enrich_series_products(products)
         products = _filter_brands(products, plan.brands)
         products = _filter_excluded_preferences(products, plan.excluded_brands, plan.excluded_usage)
         result_type = "products" if products else "empty"
         diagnostics = _catalog_plan_diagnostics(plan, result_type=result_type, count=len(products))
+        returned_products = products[
+            : plan.ranking.count if plan.ranking else request.limit
+        ]
         return CatalogSearchOutput(
             result_type=result_type,
-            products=products[: request.limit],
+            result_purpose=plan.result_purpose,
+            selection_scope=plan.selection_scope,
+            products=returned_products,
+            total_match_count=total_match_count,
+            returned_count=len(returned_products),
+            is_exhaustive=len(returned_products) >= total_match_count,
             ranking_strategy=ranking_strategy,
             query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
             diagnostics=diagnostics,
@@ -581,6 +721,8 @@ class CatalogToolService:
             diagnostics = _catalog_plan_diagnostics(plan, result_type="empty", count=0)
             return CatalogSearchOutput(
                 result_type="empty",
+                result_purpose=plan.result_purpose,
+                selection_scope=plan.selection_scope,
                 products=[],
                 ranking_strategy="unsupported_query",
                 query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
@@ -592,32 +734,41 @@ class CatalogToolService:
 
         async def search_category(
             category: str,
-        ) -> tuple[str, ProductQueryPlan, list[ProductCard]]:
+        ) -> tuple[str, ProductQueryPlan, list[ProductCard], int]:
             category_plan = plan.model_copy(
                 deep=True,
                 update={"category": category, "limit": per_category_limit, "usage_mapping": {}},
             )
             category_plan = _apply_usage_scenario_mapping(category_plan)
             if not category_plan.supported:
-                return category, category_plan, []
+                return category, category_plan, [], 0
 
             async with semaphore:
                 if self.session_factory is None:
-                    products = await CatalogRepository(self.session).search_products(
-                        _plan_to_product_search(category_plan)
+                    repository = CatalogRepository(self.session)
+                    search_request = _plan_to_product_search(category_plan)
+                    page = (
+                        await repository.search_product_series_with_total(search_request)
+                        if category_plan.selection_scope == "spu"
+                        else await repository.search_products_with_total(search_request)
                     )
                 else:
                     async with self.session_factory() as category_session:
-                        products = await CatalogRepository(category_session).search_products(
-                            _plan_to_product_search(category_plan)
+                        repository = CatalogRepository(category_session)
+                        search_request = _plan_to_product_search(category_plan)
+                        page = (
+                            await repository.search_product_series_with_total(search_request)
+                            if category_plan.selection_scope == "spu"
+                            else await repository.search_products_with_total(search_request)
                         )
+            products = page.products
             products = _filter_brands(products, category_plan.brands)
             products = _filter_excluded_preferences(
                 products,
                 category_plan.excluded_brands,
                 category_plan.excluded_usage,
             )
-            return category, category_plan, products[:per_category_limit]
+            return category, category_plan, products[:per_category_limit], page.total_count
 
         if self.session_factory is None:
             category_results = []
@@ -631,6 +782,9 @@ class CatalogToolService:
             execution = "parallel_independent_sessions"
 
         products = _round_robin_category_products(category_results, limit=request.limit)
+        total_match_count = sum(total_count for _, _, _, total_count in category_results)
+        if plan.selection_scope == "spu" and products:
+            products = await self._enrich_series_products(products)
         plan.usage_mapping = {
             "status": "expanded",
             "source": "deterministic_spec_mapping",
@@ -641,7 +795,7 @@ class CatalogToolService:
             "execution": execution,
             "category_rules": {
                 category: category_plan.usage_mapping
-                for category, category_plan, _products in category_results
+                for category, category_plan, _products, _total_count in category_results
             },
         }
         result_type = "products" if products else "empty"
@@ -652,7 +806,12 @@ class CatalogToolService:
         )
         return CatalogSearchOutput(
             result_type=result_type,
+            result_purpose=plan.result_purpose,
+            selection_scope=plan.selection_scope,
             products=products,
+            total_match_count=total_match_count,
+            returned_count=len(products),
+            is_exhaustive=len(products) >= total_match_count,
             ranking_strategy="scenario_category_diversified_mapping",
             query_plan=_plan_dump_with_diagnostics(plan, diagnostics),
             diagnostics=diagnostics,
@@ -688,7 +847,16 @@ class CatalogToolService:
         return CatalogFacetOutput(
             result_type=result_type,
             facet=plan.facet,
-            items=[CatalogFacetItem(value=value, count=count) for value, count in items],
+            items=[
+                CatalogFacetItem(
+                    value=value,
+                    count=spu_count if plan.count_scope == "spu" else sku_count,
+                    count_scope=plan.count_scope,
+                    sku_count=sku_count,
+                    spu_count=spu_count,
+                )
+                for value, sku_count, spu_count in items
+            ],
             category=plan.category,
             brand=plan.brand,
             spec_key=plan.spec_key,
@@ -697,21 +865,60 @@ class CatalogToolService:
         )
 
     async def compare(self, request: CatalogCompareInput) -> CatalogCompareOutput:
-        if request.comparison_level == "spu":
-            return await self._compare_spus(request)
+        compare_plan = (
+            await self._safe_plan_compare(request)
+            if request.comparison_level == "auto"
+            else None
+        )
+        if compare_plan is not None:
+            compare_plan = compare_plan.model_copy(
+                update={
+                    "comparison_level": _comparison_level_from_query(
+                        request.query,
+                        has_context_target=bool(request.targets),
+                    )
+                }
+            )
+        comparison_level = (
+            compare_plan.comparison_level
+            if compare_plan is not None
+            else request.comparison_level
+        )
+        if comparison_level == "spu":
+            spu_ids = await self._resolved_target_ids(request, "spu")
+            if len(spu_ids) < 2 and compare_plan is not None and not request.targets:
+                candidates = await self._compare_candidates_from_plan(compare_plan)
+                spu_ids = list(dict.fromkeys(product.spu_id for product in candidates))[
+                    : request.limit
+                ]
+            return await self._compare_spus(
+                request.model_copy(
+                    update={
+                        "comparison_level": "spu",
+                        "spu_ids": spu_ids,
+                        "sku_ids": [],
+                    }
+                ),
+                compare_plan=compare_plan,
+            )
 
-        compare_plan = None
+        sku_ids = await self._resolved_target_ids(request, "sku")
         if request.sku_ids:
-            products = await self._products_by_sku_ids(request.sku_ids)
+            products = await self._products_by_sku_ids(sku_ids)
+        elif sku_ids:
+            products = await self._products_by_sku_ids(sku_ids)
         else:
-            products, compare_plan = await self._products_from_compare_query(request)
+            products, compare_plan = await self._products_from_compare_query(
+                request,
+                compare_plan,
+            )
         products = products[: request.limit]
         fields = (
             compare_plan.comparison_fields
             if compare_plan and compare_plan.comparison_fields
             else _comparison_fields(products)
         )
-        result_type = "comparison" if products else "empty"
+        result_type = "comparison" if len(products) >= 2 else "empty"
         diagnostics = _compare_diagnostics(
             compare_plan, result_type=result_type, count=len(products)
         )
@@ -722,8 +929,9 @@ class CatalogToolService:
             comparison_fields=fields,
             missing_fields=_missing_fields(products, fields),
             query_plan={
-                "mode": "direct_sku_ids" if request.sku_ids else "natural_language",
-                "sku_ids": request.sku_ids,
+                "mode": "direct_sku_ids" if sku_ids else "natural_language",
+                "comparison_level": "sku",
+                "sku_ids": sku_ids,
                 "query": request.query,
                 "compare_plan": (
                     _plan_dump_with_diagnostics(compare_plan, diagnostics) if compare_plan else None
@@ -733,7 +941,50 @@ class CatalogToolService:
             diagnostics=diagnostics,
         )
 
-    async def _compare_spus(self, request: CatalogCompareInput) -> CatalogCompareOutput:
+    async def _resolved_target_ids(
+        self,
+        request: CatalogCompareInput | CatalogSearchInput,
+        level: Literal["sku", "spu"],
+    ) -> list[int]:
+        """Resolve trusted target identities without letting legacy fields choose auto scope."""
+        if not request.targets:
+            return (
+                _compare_target_ids(request, level)
+                if isinstance(request, CatalogCompareInput)
+                else []
+            )
+
+        target_sku_ids = [
+            target.sku_id for target in request.targets if target.sku_id is not None
+        ]
+        products_by_sku = {
+            product.sku_id: product
+            for product in await self._products_by_sku_ids(target_sku_ids)
+        }
+        resolved: list[int] = []
+        for target in request.targets:
+            product = products_by_sku.get(target.sku_id) if target.sku_id else None
+            if (
+                product is not None
+                and target.spu_id is not None
+                and product.spu_id != target.spu_id
+            ):
+                # A stale or mismatched memory pair is not a trusted identity.
+                continue
+            if level == "sku":
+                value = product.sku_id if product is not None else None
+            else:
+                value = product.spu_id if product is not None else target.spu_id
+            if value is not None and value not in resolved:
+                resolved.append(value)
+        return resolved[: request.limit]
+
+    async def _compare_spus(
+        self,
+        request: CatalogCompareInput,
+        *,
+        compare_plan: CatalogComparePlan | None = None,
+    ) -> CatalogCompareOutput:
         products, spu_titles = await self._products_by_spu_ids(
             request.spu_ids[: request.limit]
         )
@@ -760,15 +1011,22 @@ class CatalogToolService:
                 "comparison_level": "spu",
                 "spu_ids": request.spu_ids,
                 "query": request.query,
+                "compare_plan": (
+                    _plan_dump_with_diagnostics(compare_plan, diagnostics)
+                    if compare_plan
+                    else None
+                ),
                 "error_type": _diagnostic_error_type(diagnostics),
             },
             diagnostics=diagnostics,
         )
 
     async def _products_from_compare_query(
-        self, request: CatalogCompareInput
+        self,
+        request: CatalogCompareInput,
+        plan: CatalogComparePlan | None = None,
     ) -> tuple[list[ProductCard], CatalogComparePlan]:
-        plan = await self._safe_plan_compare(request)
+        plan = plan or await self._safe_plan_compare(request)
         if not plan.supported:
             return [], plan
         products = await self._compare_candidates_from_plan(plan)
@@ -848,6 +1106,7 @@ class CatalogToolService:
                 spu_id=spu.id,
                 sku_id=sku.id,
                 title=sku.title,
+                spu_title=spu.title,
                 brand=brand.name,
                 category=category.name,
                 price=sku.price,
@@ -881,6 +1140,7 @@ class CatalogToolService:
                     spu_id=spu.id,
                     sku_id=sku.id,
                     title=sku.title,
+                    spu_title=spu.title,
                     brand=brand.name,
                     category=category.name,
                     price=sku.price,
@@ -895,6 +1155,47 @@ class CatalogToolService:
                 )
             )
         return products, spu_titles
+
+    async def _enrich_series_products(
+        self,
+        representatives: list[ProductCard],
+    ) -> list[ProductCard]:
+        spu_ids = list(dict.fromkeys(product.spu_id for product in representatives))
+        variants, spu_titles = await self._products_by_spu_ids(spu_ids)
+        series_by_id = {
+            item.spu_id: item
+            for item in _aggregate_product_series(variants, spu_ids, spu_titles)
+        }
+        enriched: list[ProductCard] = []
+        for representative in representatives:
+            series = series_by_id.get(representative.spu_id)
+            if series is None:
+                enriched.append(representative)
+                continue
+            enriched.append(
+                representative.model_copy(
+                    update={
+                        "entity_scope": "spu",
+                        "spu_title": series.title,
+                        "series_min_price": series.min_price,
+                        "series_max_price": series.max_price,
+                        "series_total_stock": series.total_stock,
+                        "series_sku_count": series.sku_count,
+                        "series_common_specs": series.common_specs,
+                        "series_option_specs": {
+                            key: [value.value for value in summary.values]
+                            for key, summary in series.option_specs.items()
+                        },
+                        "series_variants": [
+                            ProductVariantCard.model_validate(
+                                variant.model_dump(mode="python")
+                            )
+                            for variant in series.variants
+                        ],
+                    }
+                )
+            )
+        return enriched
 
     async def _safe_plan_search(self, request: CatalogSearchInput) -> ProductQueryPlan:
         try:
@@ -1232,6 +1533,17 @@ def validate_product_query_plan(plan: ProductQueryPlan | dict) -> ProductQueryPl
     if normalized_category and normalized_category.lower() not in ALLOWED_CATEGORIES:
         raise ValueError(f"unsupported category: {plan.category}")
     plan.category = normalized_category
+    if plan.ranking is not None:
+        plan.sort = {
+            ("price", "asc"): "price_asc",
+            ("price", "desc"): "price_desc",
+            ("stock", "desc"): "stock",
+            ("sales", "desc"): "sales",
+        }.get(
+            (plan.ranking.metric, plan.ranking.direction),
+            plan.sort,
+        )
+        plan.limit = plan.ranking.count
 
     if plan.usage_scenario:
         normalized_usage = _canonical_usage_scenario(plan.usage_scenario)
@@ -1576,6 +1888,7 @@ def _plan_to_product_search(plan: ProductQueryPlan) -> ProductSearchRequest:
     return ProductSearchRequest(
         query=" ".join(part for part in query_parts if part),
         category=plan.category,
+        brands=plan.brands,
         usage_scenario=None if usage_mapping_applied else plan.usage_scenario,
         usage_required_conditions=[
             ProductSpecCondition.model_validate(item)
@@ -1709,15 +2022,18 @@ def _filter_brands(products: list[ProductCard], brands: list[str]) -> list[Produ
 
 
 def _round_robin_category_products(
-    category_results: list[tuple[str, ProductQueryPlan, list[ProductCard]]],
+    category_results: list[tuple[str, ProductQueryPlan, list[ProductCard], int]],
     *,
     limit: int,
 ) -> list[ProductCard]:
     selected: list[ProductCard] = []
     seen_sku_ids: set[int] = set()
-    max_bucket_size = max((len(products) for _, _, products in category_results), default=0)
+    max_bucket_size = max(
+        (len(products) for _, _, products, _ in category_results),
+        default=0,
+    )
     for product_index in range(max_bucket_size):
-        for _category, _plan, products in category_results:
+        for _category, _plan, products, _total_count in category_results:
             if product_index >= len(products):
                 continue
             product = products[product_index]
@@ -1960,6 +2276,17 @@ Allowed JSON fields:
 - keywords: array of short product intent keywords, max 12
 - usage_scenario: one of office, gaming, video_meeting, live_streaming, or null
 - sort: one of recommend, sales, price_asc, price_desc, stock
+- result_purpose: recommendation for selection advice or alternatives; search for open-ended
+  discovery and filtered listings; lookup for facts or variants of an identified product;
+  ranking for an explicit price, stock, or sales extremum/rank
+- selection_scope: spu by default for recommendation, discovery, filtered search, or model-level
+  facts; sku only for an explicit concrete variant or a request scoped inside one known model
+- ranking: null for ordinary recommendation/search, otherwise an object with:
+  - scope: spu for a product/model/series, sku only for an explicit SKU/version/color/variant
+  - metric: price, stock, or sales
+  - direction: asc or desc
+  - rank: one-based rank to select
+  - count: final number of results, not the number of candidates to inspect
 - supported: boolean
 - unsupported_reason: string or null
 
@@ -2000,6 +2327,16 @@ catalog tables, such as time-series growth, revenue, profit, or user purchase
 statistics. Otherwise set supported=true.
 Current cumulative sales sorting and selecting the Nth-ranked product/SPU are supported;
 do not mark requests such as "销量第二" or "sales rank 2" unsupported.
+Generic attributes such as color, switch, connection type, or the colloquial word "版本" are
+filters and do not by themselves change selection_scope to sku. "推荐一个版本的键盘" still
+selects one SPU. Use sku only when the parent model is already identified and the user asks
+among its variants, or explicitly asks for SKU/version-level sales, stock, or price.
+result_purpose and ordering are separate: "推荐销量高的键盘" is recommendation sorted by
+sales, while "销量第二的键盘" is ranking. "有哪些无线键盘" is search. "这个键盘多少钱"
+and "K08 有哪些版本" are lookup.
+For unqualified product superlatives, use scope=spu. "最/most/highest/lowest" means
+rank=1,count=1. "第 N/rank N" means rank=N,count=1. "前 N/top N/N 款" means
+rank=1,count=N.
 
 The current query and explicit_overrides always take precedence.
 preference_defaults only fill fields that the current request leaves unspecified.
@@ -2017,6 +2354,8 @@ Allowed JSON fields:
 - brands: array of brand names, max 8
 - comparison_fields: array of facts to compare
 - scenario: short usage scenario string or null
+- comparison_level: spu for product/model/series comparison; sku only when every target is a
+  concrete variant inside an identified parent model, or the user explicitly says SKU
 - supported: boolean
 - unsupported_reason: string or null
 
@@ -2035,6 +2374,9 @@ Red/Blue/Brown/Magnetic or 红轴/青轴/茶轴/磁轴.
 
 sku_sales_count is SKU-level sales volume. sales_count is SPU-level aggregate sales volume.
 Do not compare color/version popularity with sales_count; use sku_sales_count for SKU popularity.
+Color, switch, and connection words are filters unless they are attached to identified model
+targets. Do not choose sku merely because such words occur. When ambiguous between a whole
+product and a concrete variant, prefer comparison_level=spu.
 
 For FPS mouse comparisons, prefer fields: price, stock, sku_sales_count, sales_count,
 connection_type, max_dpi, weight_g, hand_orientation.
@@ -2181,6 +2523,7 @@ def _sort_from_query(
             "销量排行",
             "销量排名",
             "销量第",
+            "销量前",
             "按销量",
             "最畅销",
             "最热销",
@@ -2189,11 +2532,299 @@ def _sort_from_query(
         )
     ):
         return "sales"
+    if any(
+        marker in lowered
+        for marker in (
+            "库存最多",
+            "库存最高",
+            "库存最足",
+            "库存量最高",
+            "按库存",
+            "库存降序",
+            "moststock",
+            "higheststock",
+        )
+    ):
+        return "stock"
     return None
+
+
+def _ranking_plan_from_query(
+    query: str,
+    default_count: int,
+    *,
+    has_context_target: bool = False,
+) -> CatalogRankingPlan | None:
+    compact = re.sub(r"\s+", "", query.casefold())
+    if any(marker in compact for marker in ("库存最少", "库存最低", "leaststock")):
+        metric, direction = "stock", "asc"
+    elif any(
+        marker in compact
+        for marker in ("销量最低", "销量最少", "最不畅销", "leastsales", "lowestsales")
+    ):
+        metric, direction = "sales", "asc"
+    else:
+        sort = _sort_from_query(query)
+        metric_by_sort = {
+            "price_asc": ("price", "asc"),
+            "price_desc": ("price", "desc"),
+            "stock": ("stock", "desc"),
+            "sales": ("sales", "desc"),
+        }
+        if sort not in metric_by_sort:
+            return None
+        metric, direction = metric_by_sort[sort]
+    rank = _rank_position_from_query(query) or 1
+    explicit_count = _requested_product_count(query)
+    count = explicit_count or (1 if _is_extreme_query(query) or rank > 1 else default_count)
+    return CatalogRankingPlan(
+        scope=_catalog_selection_scope_from_query(
+            query,
+            has_context_target=has_context_target,
+        ),
+        metric=metric,
+        direction=direction,
+        rank=rank,
+        count=count,
+    )
+
+
+def _catalog_selection_scope_from_query(
+    query: str,
+    *,
+    has_context_target: bool = False,
+) -> Literal["sku", "spu"]:
+    compact = re.sub(r"\s+", "", query.casefold())
+    if "sku" in compact:
+        return "sku"
+    if "spu" in compact:
+        return "spu"
+    if any(
+        marker in compact
+        for marker in (
+            "系列的全部版本",
+            "系列的所有版本",
+            "系列全部版本",
+            "系列所有版本",
+            "整个系列",
+            "完整系列",
+        )
+    ) or re.search(r"(?:两个|两款|多个).{0,12}系列", compact):
+        return "spu"
+
+    explicit_variant_metric = (
+        r"(?:版本|变体).*(?:销量|库存|价格|售价|最便宜|最贵|排行|排名)",
+        r"(?:销量|库存|价格|售价).*(?:版本|变体)",
+        r"(?:单版本|单个版本|具体版本)",
+    )
+    if any(re.search(pattern, compact) for pattern in explicit_variant_metric):
+        return "sku"
+    if compact.count("版本") >= 2 or compact.count("sku") >= 2:
+        return "sku"
+
+    variant_selection_markers = (
+        "哪个版本",
+        "哪一个版本",
+        "哪款版本",
+        "各版本",
+        "各个版本",
+        "全部版本",
+        "所有版本",
+        "其他版本",
+        "其它版本",
+        "不同版本",
+        "版本之间",
+        "版本中",
+        "版本里",
+    )
+    if any(marker in compact for marker in variant_selection_markers):
+        return "sku"
+
+    parent_reference_markers = (
+        "这个",
+        "这款",
+        "该款",
+        "当前",
+        "上述",
+        "上面",
+        "刚才",
+        "它的",
+    )
+    has_parent_reference = has_context_target or any(
+        marker in compact for marker in parent_reference_markers
+    )
+    has_model_identifier = bool(
+        re.search(
+            r"(?<![a-z0-9])(?:[a-z]{1,12}[-_]?\d{1,6}|\d{1,6}[a-z]{1,8})(?![a-z0-9])",
+            query.casefold(),
+        )
+    )
+    concrete_variant_markers = (
+        "版本",
+        "版",
+        "颜色",
+        "配色",
+        "轴体",
+        "红轴",
+        "青轴",
+        "茶轴",
+        "磁轴",
+        "连接版本",
+        "有线",
+        "无线",
+        "蓝牙",
+        "2.4g",
+        "标准版",
+        "增强版",
+    )
+    has_concrete_variant = any(
+        marker in compact for marker in concrete_variant_markers
+    )
+    if has_concrete_variant and (has_parent_reference or has_model_identifier):
+        return "sku"
+    return "spu"
+
+
+def _catalog_result_purpose_from_query(
+    query: str,
+    *,
+    has_context_target: bool = False,
+    has_ranking: bool = False,
+    planned_purpose: Literal["recommendation", "search", "lookup", "ranking"] | None = None,
+) -> Literal["recommendation", "search", "lookup", "ranking"]:
+    if has_ranking:
+        return "ranking"
+
+    compact = re.sub(r"\s+", "", query.casefold())
+    recommendation_markers = (
+        "推荐",
+        "首选",
+        "值得买",
+        "值得推荐",
+        "怎么选",
+        "帮我选",
+        "适合我",
+        "替代款",
+        "recommend",
+        "suggest",
+        "alternative",
+    )
+    if any(marker in compact for marker in recommendation_markers):
+        return "recommendation"
+
+    lookup_markers = (
+        "多少钱",
+        "价格多少",
+        "售价多少",
+        "库存多少",
+        "有货吗",
+        "有现货吗",
+        "什么规格",
+        "规格是什么",
+        "参数是什么",
+        "详细信息",
+        "有哪些版本",
+        "所有版本",
+        "全部版本",
+        "各版本",
+    )
+    has_model_identifier = bool(
+        re.search(
+            r"(?<![a-z0-9])(?:[a-z]{1,12}[-_]?\d{1,6}|\d{1,6}[a-z]{1,8})(?![a-z0-9])",
+            query.casefold(),
+        )
+    )
+    has_parent_reference = any(
+        marker in compact
+        for marker in ("这个", "这款", "该款", "当前", "上述", "上面", "刚才", "它的")
+    )
+    if any(marker in compact for marker in lookup_markers) and (
+        has_context_target or has_parent_reference or has_model_identifier or "版本" in compact
+    ):
+        return "lookup"
+    if has_context_target and any(
+        marker in compact
+        for marker in ("这个", "这款", "该款", "当前", "它的", "看看", "查看")
+    ):
+        return "lookup"
+
+    search_markers = (
+        "有哪些",
+        "找一下",
+        "查一下",
+        "搜索",
+        "看看",
+        "筛选",
+        "列出",
+        "show",
+        "find",
+        "search",
+        "list",
+    )
+    if any(marker in compact for marker in search_markers):
+        return "search"
+    return planned_purpose or "search"
+
+
+def _comparison_level_from_query(
+    query: str,
+    *,
+    has_context_target: bool = False,
+) -> Literal["sku", "spu"]:
+    return _catalog_selection_scope_from_query(
+        query,
+        has_context_target=has_context_target,
+    )
+
+
+def _rank_position_from_query(query: str) -> int | None:
+    compact = re.sub(r"\s+", "", query.casefold())
+    if match := re.search(r"(?:第|rank)(\d{1,2})", compact):
+        rank = int(match.group(1))
+        return rank if 1 <= rank <= 20 else None
+    if match := re.search(r"第([一二两三四五六七八九十]+)", compact):
+        rank = _parse_small_chinese_number(match.group(1))
+        return rank if rank is not None and 1 <= rank <= 20 else None
+    return None
+
+
+def _is_extreme_query(query: str) -> bool:
+    compact = re.sub(r"\s+", "", query.casefold())
+    return any(
+        marker in compact
+        for marker in (
+            "最便宜",
+            "最贵",
+            "价格最低",
+            "价格最高",
+            "库存最多",
+            "库存最高",
+            "库存最足",
+            "库存最少",
+            "库存最低",
+            "销量最高",
+            "销量最好",
+            "销量最低",
+            "销量最少",
+            "最不畅销",
+            "最畅销",
+            "最热销",
+            "cheapest",
+            "mostexpensive",
+            "highestprice",
+            "moststock",
+            "higheststock",
+            "bestselling",
+            "topselling",
+        )
+    )
 
 
 def _requested_product_count(query: str) -> int | None:
     normalized = query.casefold().replace("，", " ").replace(",", " ")
+    if top_match := re.search(r"(?:前|top)\s*(\d{1,2})(?!\s*(?:名次|rank))", normalized):
+        value = int(top_match.group(1))
+        return value if 1 <= value <= 20 else None
     digit_match = re.search(
         r"(?:前\s*|top\s*)?(\d{1,2})\s*(?:款|个|台|种|件|名|products?|items?|models?)",
         normalized,
@@ -2254,6 +2885,19 @@ def _apply_query_inferred_defaults(plan: ProductQueryPlan, query: str) -> None:
     inferred_sort = _sort_from_query(query)
     if inferred_sort is not None:
         plan.sort = inferred_sort
+    inferred_ranking = _ranking_plan_from_query(query, plan.limit)
+    if inferred_ranking is not None:
+        plan.ranking = inferred_ranking
+    if plan.ranking is not None:
+        plan.limit = plan.ranking.count
+        plan.selection_scope = plan.ranking.scope
+    else:
+        plan.selection_scope = _catalog_selection_scope_from_query(query)
+    plan.result_purpose = _catalog_result_purpose_from_query(
+        query,
+        has_ranking=plan.ranking is not None,
+        planned_purpose=plan.result_purpose,
+    )
     if _is_supported_sales_rank_query(query):
         plan.supported = True
         plan.unsupported_reason = None
@@ -2464,6 +3108,44 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
 
 def _to_comparison_item(product: ProductCard) -> ProductComparisonItem:
     return ProductComparisonItem(**product.model_dump(mode="python"))
+
+
+def _compare_target_ids(
+    request: CatalogCompareInput,
+    level: Literal["sku", "spu"],
+) -> list[int]:
+    explicit = request.sku_ids if level == "sku" else request.spu_ids
+    target_values = [
+        target.sku_id if level == "sku" else target.spu_id
+        for target in request.targets
+    ]
+    return list(
+        dict.fromkeys(
+            [
+                value
+                for value in [*explicit, *target_values]
+                if isinstance(value, int) and value > 0
+            ]
+        )
+    )[: request.limit]
+
+
+def _with_sku_ranking(
+    product: ProductCard,
+    ranking: CatalogRankingPlan,
+) -> ProductCard:
+    values = {
+        "price": product.price,
+        "stock": Decimal(product.stock),
+        "sales": Decimal(product.sku_sales_count),
+    }
+    return product.model_copy(
+        update={
+            "ranking_scope": "sku",
+            "ranking_metric": ranking.metric,
+            "ranking_value": values[ranking.metric],
+        }
+    )
 
 
 def _aggregate_product_series(
@@ -2697,6 +3379,22 @@ def _brands_for_item(item: str, brands: list[str]) -> list[str]:
     return [brand for brand in brands if brand.lower() in item_lower]
 
 
+def _facet_count_scope_from_query(query: str) -> Literal["sku", "spu"]:
+    compact = re.sub(r"\s+", "", query.casefold())
+    if any(
+        marker in compact
+        for marker in (
+            "sku",
+            "多少个版本",
+            "几个版本",
+            "版本数",
+            "变体数",
+        )
+    ):
+        return "sku"
+    return "spu"
+
+
 def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
     normalized_request = _normalize_facet_request(request)
     filters, normalization_debug = _normalize_catalog_filters_with_debug(normalized_request.filters)
@@ -2713,6 +3411,7 @@ def _facet_query_plan(request: CatalogFacetInput) -> FacetQueryPlan:
         min_price=normalized_request.min_price,
         max_price=normalized_request.max_price,
         filters={key.lower(): str(value) for key, value in filters.items()},
+        count_scope=_facet_count_scope_from_query(normalized_request.query),
         limit=normalized_request.limit,
         normalization_debug=normalization_debug,
     )

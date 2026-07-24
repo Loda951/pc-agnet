@@ -41,6 +41,8 @@ def _contextual_intent(
         return "product_recommendation"
     if intent == "general" and _is_v2_policy_followup(message, working_memory):
         return "after_sales"
+    if intent == "general" and _is_v2_order_followup(message, working_memory):
+        return "order_status"
     return intent
 
 
@@ -59,8 +61,16 @@ def _reuse_comparison_context(
     for comparison_task in tasks.values():
         if comparison_task.capability != "catalog_compare" or not comparison_task.depends_on:
             continue
-        comparison_level = comparison_task.comparison_level or "sku"
-        comparison_ids = _context_comparison_ids(working_memory, comparison_level)
+        comparison_level = comparison_task.comparison_level
+        if comparison_level is None:
+            spu_ids = _context_comparison_ids(working_memory, "spu")
+            sku_ids = _context_comparison_ids(working_memory, "sku")
+            comparison_ids = spu_ids if len(spu_ids) >= 2 else sku_ids
+        else:
+            comparison_ids = _context_comparison_ids(
+                working_memory,
+                comparison_level,
+            )
         if len(comparison_ids) < 2:
             continue
         dependency_ids = set(comparison_task.depends_on)
@@ -178,6 +188,33 @@ def _is_v2_product_followup(message: str, working_memory: dict[str, Any]) -> boo
     )
 
 
+def _is_v2_order_followup(message: str, working_memory: dict[str, Any]) -> bool:
+    order = working_memory.get("order")
+    if not isinstance(order, dict):
+        return False
+    has_order_context = bool(
+        order.get("last_order_id")
+        or order.get("candidate_order_ids")
+        or order.get("next_offset") is not None
+    )
+    return has_order_context and (
+        _order_ordinal_index(message) is not None
+        or any(
+            marker in message
+            for marker in (
+                "下一页",
+                "继续列",
+                "继续看",
+                "这个订单",
+                "这笔订单",
+                "刚才的订单",
+                "上一单",
+                "这单",
+            )
+        )
+    )
+
+
 def _fallback_catalog_query(state: AgentState) -> str:
     """Build query-only context when the runtime has no orchestrator LLM."""
     message = state["message"].strip()
@@ -236,13 +273,58 @@ def _resolve_order_id(
     if explicit_order_id is not None:
         return explicit_order_id
     order = working_memory.get("order")
-    if isinstance(order, dict) and any(
-        term in message for term in ("这个订单", "这笔订单", "刚才的订单", "上一单", "这单")
-    ):
-        value = order.get("last_order_id")
-        if isinstance(value, int):
-            return value
+    if isinstance(order, dict):
+        candidate_ids = order.get("candidate_order_ids")
+        if isinstance(candidate_ids, list):
+            ordinal = _order_ordinal_index(message)
+            if ordinal is not None and ordinal < len(candidate_ids):
+                value = candidate_ids[ordinal]
+                if isinstance(value, int):
+                    return value
+        if any(
+            term in message for term in ("这个订单", "这笔订单", "刚才的订单", "上一单", "这单")
+        ):
+            value = order.get("last_order_id")
+            if isinstance(value, int):
+                return value
     return memory_service.resolve_order_id(message, explicit_order_id, working_memory)
+
+
+def _order_ordinal_index(message: str) -> int | None:
+    digit_match = re.search(r"第\s*(\d{1,2})\s*(?:个|笔|条)?(?:订单)?", message)
+    if digit_match:
+        value = int(digit_match.group(1))
+        return value - 1 if 1 <= value <= 20 else None
+    chinese_numbers = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+        "十一": 11,
+        "十二": 12,
+        "十三": 13,
+        "十四": 14,
+        "十五": 15,
+        "十六": 16,
+        "十七": 17,
+        "十八": 18,
+        "十九": 19,
+        "二十": 20,
+    }
+    chinese_match = re.search(
+        r"第([一二两三四五六七八九十]{1,3})(?:个|笔|条)?(?:订单)?",
+        message,
+    )
+    if chinese_match:
+        return chinese_numbers[chinese_match.group(1)] - 1
+    return None
 
 
 def _knowledge_memory_view(working_memory: dict[str, Any]) -> dict[str, Any]:
@@ -309,6 +391,7 @@ def _fallback_rewritten_query(
         )
         if order_id is not None:
             return f"{message}，订单号 {order_id}"
+        return f"{message}，订单查询"
     return message
 
 

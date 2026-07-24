@@ -104,9 +104,21 @@ class _ArtifactAnswerModel:
                 parts.append(f"对比结果：{rendered}")
             elif tool_name == "catalog_search":
                 product = value["products"][0]
-                parts.append(
-                    f"推荐：{product['title']}（SKU {product['sku_id']}，¥{product['price']}）"
-                )
+                window = task["response_contract"].get("result_window", {})
+                if (
+                    window.get("result_purpose") == "recommendation"
+                    and not window.get("is_exhaustive", True)
+                ):
+                    parts.append(
+                        f"共匹配 {window['total_match_count']} 个版本，本次返回 "
+                        f"{window['returned_count']} 个候选；首推：{product['title']}"
+                        f"（SKU {product['sku_id']}，¥{product['price']}）"
+                    )
+                else:
+                    parts.append(
+                        f"推荐：{product['title']}（SKU {product['sku_id']}，"
+                        f"¥{product['price']}）"
+                    )
             elif tool_name in {"policy_search", "knowledge_search"}:
                 snippets = "；".join(item["snippet"] for item in value["documents"])
                 parts.append(f"政策：{snippets}")
@@ -379,15 +391,17 @@ _PRODUCTS = {
 class _ScenarioToolExecutor:
     def __init__(self):
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.runtime_contexts: list[dict[str, Any]] = []
 
     async def execute(
         self,
         contract: ToolContract,
         arguments: dict[str, Any],
-        _: dict[str, Any],
+        runtime_context: dict[str, Any],
     ) -> ToolExecutionResult:
         name = contract.name
         self.calls.append((name, dict(arguments)))
+        self.runtime_contexts.append(dict(runtime_context))
         query = str(arguments.get("query") or "")
 
         if name == "catalog_search":
@@ -395,6 +409,8 @@ class _ScenarioToolExecutor:
                 products = [_PRODUCTS[101], _PRODUCTS[201], _PRODUCTS[301]]
             elif "推荐一个键盘" in query:
                 products = [_PRODUCTS[401]]
+            elif "推荐当前键盘最合适的版本" in query:
+                products = [_PRODUCTS[501], _PRODUCTS[502], _PRODUCTS[503]]
             elif "键盘 SKU 销量排行第二" in query:
                 products = [_PRODUCTS[501], _PRODUCTS[502], _PRODUCTS[503]]
             elif "键盘 SPU 销量排行第一" in query:
@@ -404,7 +420,7 @@ class _ScenarioToolExecutor:
             elif "鼠标 SPU 销量排行第二" in query:
                 products = [_PRODUCTS[710], _PRODUCTS[720]]
             elif "耳机 SPU 销量排行第二" in query:
-                products = [_PRODUCTS[801], _PRODUCTS[802]]
+                products = [_PRODUCTS[802]]
             elif "推荐一个无线鼠标" in query:
                 products = [_PRODUCTS[901]]
             elif "推荐一个显示器" in query:
@@ -417,11 +433,40 @@ class _ScenarioToolExecutor:
                 "result_type": "products",
                 "products": products,
                 "ranking_strategy": "fixture",
-                "query_plan": {"query": query},
+                "query_plan": {
+                    "query": query,
+                    **(
+                        {
+                            "ranking": {
+                                "scope": "spu",
+                                "metric": "sales",
+                                "direction": "desc",
+                                "rank": 2,
+                                "count": 1,
+                            }
+                        }
+                        if "耳机 SPU 销量排行第二" in query
+                        else {}
+                    ),
+                },
                 "diagnostics": [],
             }
+            if "推荐当前键盘最合适的版本" in query:
+                output.update(
+                    {
+                        "result_purpose": "recommendation",
+                        "selection_scope": "sku",
+                        "total_match_count": 12,
+                        "returned_count": 3,
+                        "is_exhaustive": False,
+                    }
+                )
         elif name == "catalog_compare":
-            sku_ids = arguments["sku_ids"]
+            sku_ids = [
+                target["sku_id"]
+                for target in runtime_context.get("targets", [])
+                if isinstance(target.get("sku_id"), int)
+            ]
             output = {
                 "result_type": "comparison",
                 "products": [_PRODUCTS[sku_id] for sku_id in sku_ids],
@@ -567,6 +612,70 @@ def _runtime(
 
 
 @pytest.mark.asyncio
+async def test_e2e_recommendation_window_reaches_answer_as_total_and_primary_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = "这个键盘你最推荐哪个版本"
+    goals = [
+        {
+            "id": "goal_99",
+            "query": message,
+            "disposition": "tool_planning",
+            "reason_code": "recommend_variant",
+            "tasks": [
+                {
+                    "id": "task_99",
+                    "goal_id": "goal_99",
+                    "canonical_query": "推荐当前键盘最合适的版本",
+                    "depends_on": [],
+                    "input_requirements": [
+                        {"name": "current", "source": "context_product"}
+                    ],
+                    "produces": "products",
+                    "answer_role": "user_facing",
+                    "capability": "catalog_search",
+                }
+            ],
+        }
+    ]
+    runtime, router, answer, executor, context = _runtime(
+        monkeypatch,
+        message=message,
+        rewritten_query=message,
+        goals=goals,
+        referenced_sku_id=600,
+    )
+
+    response = await runtime.run(ChatRequest(message=message), user_id=7)
+    state = context.outcomes[0]
+    artifact = state["task_artifacts"]["task_99"]["value"]
+
+    assert artifact["result_purpose"] == "recommendation"
+    assert artifact["selection_scope"] == "sku"
+    assert artifact["total_match_count"] == 12
+    assert artifact["returned_count"] == 3
+    assert artifact["is_exhaustive"] is False
+    assert state["parsed"]["product_search"]["total_match_count"] == 12
+    assert state["parsed"]["product_search"]["result_purpose"] == "recommendation"
+    assert "共匹配 12 个版本，本次返回 3 个候选" in response.answer
+    assert "首推：Rank-1 Keyboard SKU" in response.answer
+    assert "只有三个版本" not in response.answer
+    assert executor.runtime_contexts[0]["targets"] == [
+        {
+            "sku_id": 600,
+            "source": "working_memory_reference",
+        }
+    ]
+    _assert_successful_e2e(
+        state,
+        router,
+        answer,
+        context,
+        expected_tool_waves=1,
+    )
+
+
+@pytest.mark.asyncio
 async def test_e2e_out_of_order_spu_rank_compare_and_independent_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -638,7 +747,13 @@ async def test_e2e_out_of_order_spu_rank_compare_and_independent_catalog(
         ["task_7", "task_9"],
         ["task_8"],
     ]
-    assert executor.calls[-1][1]["sku_ids"] == [990, 301]
+    assert executor.calls[-1][1] == {
+        "query": "比较当前显示器与销量第三的显示器",
+        "limit": 5,
+    }
+    assert [
+        target["sku_id"] for target in executor.runtime_contexts[-1]["targets"]
+    ] == [990, 301]
     assert "Rank-3 Monitor（SKU 301，¥1599.00）" in response.answer
     assert "Keyboard Choice（SKU 401，¥499.00）" in response.answer
     assert answer.last_used_tool_call_ids == [
@@ -720,7 +835,13 @@ async def test_e2e_sku_rank_compare_and_policy_share_first_wave(
         ["task_4", "task_6"],
         ["task_5"],
     ]
-    assert executor.calls[-1][1]["sku_ids"] == [600, 502]
+    assert executor.calls[-1][1] == {
+        "query": "比较当前键盘与 SKU 销量第二的版本",
+        "limit": 5,
+    }
+    assert [
+        target["sku_id"] for target in executor.runtime_contexts[-1]["targets"]
+    ] == [600, 502]
     assert "Rank-2 Keyboard SKU（SKU 502，¥699.00）" in response.answer
     assert "符合条件的商品可在七天内申请退货" in response.answer
     assert response.evidence[0].source_id == 88
@@ -1037,7 +1158,14 @@ async def test_e2e_chained_goal_completes_while_unsupported_goal_is_rejected(
     ] == expected_waves
     assert len(executor.calls) == 2
     key, expected_value = expected_bound_argument
-    assert executor.calls[-1][1][key] == expected_value
+    if key == "sku_ids":
+        actual_value = [
+            target["sku_id"]
+            for target in executor.runtime_contexts[-1]["targets"]
+        ]
+    else:
+        actual_value = executor.calls[-1][1][key]
+    assert actual_value == expected_value
     assert expected_answer in response.answer
     assert "当前客服能力还不能可靠完成" in response.answer
     assert "另外：" in response.answer
@@ -1332,7 +1460,6 @@ def _single_goal_multitask_cases() -> list[Any]:
                 "produces": "ranked_product",
                 "answer_role": "internal",
                 "capability": "catalog_search",
-                "result_selector": {"type": "sales_rank", "rank": 2, "scope": "spu"},
             },
             {
                 "id": "task_121",
@@ -1550,6 +1677,7 @@ class _RecordingRegistryExecutor:
     def __init__(self, session: AsyncSession, settings: Settings):
         self.delegate = RegistryToolExecutor(session, settings)
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.runtime_contexts: list[dict[str, Any]] = []
 
     async def execute(
         self,
@@ -1558,6 +1686,7 @@ class _RecordingRegistryExecutor:
         runtime_context: dict[str, Any],
     ) -> ToolExecutionResult:
         self.calls.append((contract.registry_name, dict(arguments)))
+        self.runtime_contexts.append(dict(runtime_context))
         return await self.delegate.execute(contract, arguments, runtime_context)
 
 
@@ -1625,13 +1754,17 @@ def _ranked_spu_compare_goal() -> dict[str, Any]:
                 "produces": "comparison",
                 "answer_role": "user_facing",
                 "capability": "catalog_compare",
-                "comparison_level": "spu",
             },
         ],
     }
 
 
 def _comparison_context_goal(*, level: str) -> dict[str, Any]:
+    canonical_query = (
+        "重新比较刚才两个具体 SKU 版本的当前目录事实"
+        if level == "sku"
+        else "重新比较刚才两个商品系列的当前目录事实"
+    )
     return {
         "id": "goal_203",
         "query": "继续比较刚才两个商品",
@@ -1641,7 +1774,7 @@ def _comparison_context_goal(*, level: str) -> dict[str, Any]:
             {
                 "id": "task_203",
                 "goal_id": "goal_203",
-                "canonical_query": "重新比较刚才两个商品的当前目录事实",
+                "canonical_query": canonical_query,
                 "depends_on": [],
                 "input_requirements": [
                     {
@@ -1652,7 +1785,6 @@ def _comparison_context_goal(*, level: str) -> dict[str, Any]:
                 "produces": "comparison",
                 "answer_role": "user_facing",
                 "capability": "catalog_compare",
-                "comparison_level": level,
             }
         ],
     }
@@ -1748,9 +1880,7 @@ async def test_e2e_ranked_spu_compare_aggregates_active_variants_with_real_catal
         working_memory = WorkingMemoryV2.model_validate(
             {
                 "catalog": {
-                    "referenced_spu_id": current_spu.id,
                     "referenced_sku_id": current_sku.id,
-                    "candidate_spu_ids": [current_spu.id],
                     "candidate_sku_ids": [current_sku.id],
                 }
             }
@@ -1773,15 +1903,25 @@ async def test_e2e_ranked_spu_compare_aggregates_active_variants_with_real_catal
         [("task_201", "catalog_search")],
         [("task_202", "catalog_compare")],
     ]
-    assert executor.calls[-1] == (
-        "catalog.compare",
-        {
-            "query": "比较当前鼠标系列与销量第二的鼠标系列",
-            "comparison_level": "spu",
-            "spu_ids": [current_spu.id, ranked_spu.id],
-            "limit": 5,
-        },
-    )
+    compare_name, compare_arguments = executor.calls[-1]
+    assert compare_name == "catalog.compare"
+    assert compare_arguments == {
+        "query": "比较当前鼠标系列与销量第二的鼠标系列",
+        "limit": 5,
+    }
+    compare_targets = executor.runtime_contexts[-1]["targets"]
+    assert compare_targets[0] == {
+        "sku_id": current_sku.id,
+        "source": "working_memory_reference",
+    }
+    assert compare_targets[1]["spu_id"] == ranked_spu.id
+    assert compare_targets[1]["source"] == "current_turn_artifact"
+    ranked_artifact = state["task_artifacts"]["task_201"]["value"]
+    assert ranked_artifact["selected_spu_ids"] == [ranked_spu.id]
+    assert ranked_artifact["selected_sku_ids"] == [
+        compare_targets[1]["sku_id"]
+    ]
+    assert ranked_spu.id not in working_memory.catalog.candidate_spu_ids
     comparison_output = state["tool_results"][-1]["execution"]["output"]
     assert comparison_output["comparison_level"] == "spu"
     assert comparison_output["products"] == []
@@ -1836,12 +1976,19 @@ async def test_e2e_spu_comparison_context_refresh_uses_one_real_tool_wave(
         (
             "catalog.compare",
             {
-                "query": "重新比较刚才两个商品的当前目录事实",
-                "comparison_level": "spu",
-                "spu_ids": [left.id, right.id],
+                "query": "重新比较刚才两个商品系列的当前目录事实",
                 "limit": 5,
             },
         )
+    ]
+    assert executor.runtime_contexts == [
+        {
+            "user_id": 7,
+            "targets": [
+                {"spu_id": left.id, "source": "comparison_context"},
+                {"spu_id": right.id, "source": "comparison_context"},
+            ],
+        }
     ]
     comparison = state["task_artifacts"]["task_203"]["value"]
     assert comparison["comparison_level"] == "spu"
@@ -1893,11 +2040,19 @@ async def test_e2e_explicit_sku_comparison_keeps_legacy_contract_with_real_catal
         (
             "catalog.compare",
             {
-                "query": "重新比较刚才两个商品的当前目录事实",
-                "sku_ids": [left_sku.id, right_sku.id],
+                "query": "重新比较刚才两个具体 SKU 版本的当前目录事实",
                 "limit": 5,
             },
         )
+    ]
+    assert executor.runtime_contexts == [
+        {
+            "user_id": 7,
+            "targets": [
+                {"sku_id": left_sku.id, "source": "comparison_context"},
+                {"sku_id": right_sku.id, "source": "comparison_context"},
+            ],
+        }
     ]
     comparison_output = state["tool_results"][0]["execution"]["output"]
     assert comparison_output["comparison_level"] == "sku"

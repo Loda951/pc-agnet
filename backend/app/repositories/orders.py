@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from dataclasses import dataclass
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -12,6 +14,13 @@ ORDER_STATUS_LABELS = {
     4: "已完成",
     5: "已关闭",
 }
+
+
+@dataclass(frozen=True)
+class OrderSearchPage:
+    orders: list[OrderCard]
+    total_count: int
+    offset: int
 
 
 class OrderRepository:
@@ -33,7 +42,7 @@ class OrderRepository:
         stmt = (
             select(OrderInfo)
             .where(OrderInfo.user_id == user_id)
-            .order_by(OrderInfo.created_at.desc())
+            .order_by(OrderInfo.created_at.desc(), OrderInfo.id.desc())
             .options(selectinload(OrderInfo.items), selectinload(OrderInfo.logistics))
             .limit(1)
         )
@@ -43,15 +52,35 @@ class OrderRepository:
         return _to_order_card(order)
 
     async def list_recent_orders(self, user_id: int, limit: int = 5) -> list[OrderCard]:
+        page = await self.list_recent_orders_page(user_id, limit=limit)
+        return page.orders
+
+    async def count_orders(self, user_id: int) -> int:
+        stmt = select(func.count(OrderInfo.id)).where(OrderInfo.user_id == user_id)
+        return int((await self.session.execute(stmt)).scalar_one())
+
+    async def list_recent_orders_page(
+        self,
+        user_id: int,
+        *,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> OrderSearchPage:
+        total_count = await self.count_orders(user_id)
         stmt = (
             select(OrderInfo)
             .where(OrderInfo.user_id == user_id)
             .order_by(OrderInfo.created_at.desc(), OrderInfo.id.desc())
             .options(selectinload(OrderInfo.items), selectinload(OrderInfo.logistics))
+            .offset(offset)
             .limit(limit)
         )
         orders = (await self.session.execute(stmt)).scalars().all()
-        return [_to_order_card(order) for order in orders]
+        return OrderSearchPage(
+            orders=[_to_order_card(order) for order in orders],
+            total_count=total_count,
+            offset=offset,
+        )
 
     async def item_belongs_to_user(self, user_id: int, order_id: int, order_item_id: int) -> bool:
         stmt = (
@@ -99,4 +128,6 @@ def _to_order_card(order: OrderInfo) -> OrderCard:
             if logistics
             else None
         ),
+        pay_at=order.pay_at,
+        delivery_at=order.delivery_at,
     )

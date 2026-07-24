@@ -899,4 +899,4 @@ async def test_order_user_id_is_injected_by_runtime() -> None:
     result = await executor.execute(contract, {"order_id": 42}, {"user_id": 7})
 
     assert result.ok is True
-    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5}
+    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5, "offset": 0}

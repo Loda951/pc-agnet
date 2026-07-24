@@ -76,6 +76,130 @@ async def test_spu_sales_search_returns_one_representative_per_series() -> None:
     assert [product.sku_id for product in result] == [101, 201]
 
 
+@pytest.mark.parametrize(
+    ("metric", "direction", "rank", "expected_spu_id", "expected_value"),
+    [
+        ("price", "asc", 1, 20, Decimal("80.00")),
+        ("stock", "desc", 1, 10, Decimal("12")),
+        ("stock", "asc", 1, 20, Decimal("3")),
+        ("sales", "desc", 2, 20, Decimal("90")),
+        ("sales", "asc", 1, 20, Decimal("90")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_spu_ranking_aggregates_all_skus_before_selecting_rank(
+    metric: str,
+    direction: str,
+    rank: int,
+    expected_spu_id: int,
+    expected_value: Decimal,
+) -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=10,
+            sku_id=101,
+            title="Series A standard",
+            brand="Test",
+            category="keyboard",
+            price="100.00",
+            stock=5,
+            sku_sales_count=20,
+            sales_count=100,
+        ),
+        ProductCard(
+            spu_id=10,
+            sku_id=102,
+            title="Series A alternate",
+            brand="Test",
+            category="keyboard",
+            price="90.00",
+            stock=7,
+            sku_sales_count=10,
+            sales_count=100,
+        ),
+        ProductCard(
+            spu_id=20,
+            sku_id=201,
+            title="Series B standard",
+            brand="Test",
+            category="keyboard",
+            price="80.00",
+            stock=3,
+            sku_sales_count=15,
+            sales_count=90,
+        ),
+    ]
+
+    class SeriesRepository(catalog_repository.CatalogRepository):
+        async def _fetch_candidate_page(self, request, *, offset: int, limit: int):
+            return products, True
+
+    result = await SeriesRepository(None).search_product_series_by_ranking(
+        ProductSearchRequest(query="keyboard rank", limit=1),
+        metric=metric,
+        direction=direction,
+        rank=rank,
+        count=1,
+    )
+
+    assert len(result) == 1
+    assert result[0].spu_id == expected_spu_id
+    assert result[0].ranking_scope == "spu"
+    assert result[0].ranking_metric == metric
+    assert result[0].ranking_value == expected_value
+    if expected_spu_id == 10:
+        assert result[0].series_min_price == Decimal("90.00")
+        assert result[0].series_max_price == Decimal("100.00")
+        assert result[0].series_total_stock == 12
+        assert result[0].series_sku_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sku_ranking_supports_lowest_stock_window() -> None:
+    from app.repositories import catalog as catalog_repository
+    from app.schemas.catalog import ProductCard
+
+    products = [
+        ProductCard(
+            spu_id=10,
+            sku_id=101,
+            title="High stock",
+            brand="Test",
+            category="mouse",
+            price="100.00",
+            stock=12,
+            sku_sales_count=5,
+        ),
+        ProductCard(
+            spu_id=20,
+            sku_id=201,
+            title="Low stock",
+            brand="Test",
+            category="mouse",
+            price="200.00",
+            stock=1,
+            sku_sales_count=10,
+        ),
+    ]
+
+    class RankingRepository(catalog_repository.CatalogRepository):
+        async def _fetch_candidate_page(self, request, *, offset: int, limit: int):
+            return products, True
+
+    result = await RankingRepository(None).search_skus_by_ranking(
+        ProductSearchRequest(query="lowest stock SKU", limit=1),
+        metric="stock",
+        direction="asc",
+        rank=1,
+        count=1,
+    )
+
+    assert [product.sku_id for product in result] == [201]
+
+
 def test_search_statement_pushes_excluded_brands_into_sql() -> None:
     from app.repositories import catalog as catalog_repository
 

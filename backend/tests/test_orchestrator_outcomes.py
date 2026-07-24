@@ -422,6 +422,79 @@ def test_catalog_fallback_distinguishes_sku_and_spu_sales_counts() -> None:
     assert "SPU" not in answer
 
 
+def test_order_fallback_distinguishes_exact_total_from_returned_window() -> None:
+    state = cast(
+        AgentState,
+        {
+            "parsed": {
+                "order_candidates": [
+                    {
+                        "id": 202607020001 + index,
+                        "status_label": "已发货",
+                        "pay_amount": "99.00",
+                    }
+                    for index in range(5)
+                ],
+                "order_query": {
+                    "query_mode": "recent",
+                    "total_match_count": 8,
+                    "returned_count": 5,
+                    "is_exhaustive": False,
+                    "offset": 0,
+                    "next_offset": 5,
+                },
+            }
+        },
+    )
+
+    answer = _fallback_answer(state)
+
+    assert "一共有 8 个订单" in answer
+    assert "最近的 5 个" in answer
+    assert "只是部分结果" in answer
+    assert "只有 5 个订单" not in answer
+
+
+def test_order_count_fallback_answers_zero_as_reliable_fact() -> None:
+    state = cast(
+        AgentState,
+        {
+            "parsed": {
+                "order_candidates": [],
+                "order_query": {
+                    "query_mode": "count",
+                    "total_match_count": 0,
+                    "returned_count": 0,
+                    "is_exhaustive": True,
+                    "offset": 0,
+                },
+            }
+        },
+    )
+
+    assert _fallback_answer(state) == "你当前一共有 0 个订单。"
+
+
+def test_order_page_fallback_reports_exhaustion_without_erasing_total() -> None:
+    state = cast(
+        AgentState,
+        {
+            "parsed": {
+                "order_candidates": [],
+                "order_query": {
+                    "query_mode": "page",
+                    "total_match_count": 7,
+                    "returned_count": 0,
+                    "is_exhaustive": True,
+                    "offset": 7,
+                },
+            }
+        },
+    )
+
+    assert _fallback_answer(state) == "已经列完全部 7 个订单，没有更多下一页了。"
+
+
 def test_catalog_fallback_uses_customer_language_for_applied_usage_mapping() -> None:
     state = cast(
         AgentState,
@@ -458,6 +531,60 @@ def test_catalog_fallback_uses_customer_language_for_applied_usage_mapping() -> 
     assert "告诉我主要用途" not in answer
     assert "usage_mapping" not in answer
     assert "deterministic_spec_mapping" not in answer
+
+
+def test_catalog_fallback_marks_primary_recommendation_and_partial_window() -> None:
+    state = cast(
+        AgentState,
+        {
+            "message": "你最推荐哪个版本",
+            "parsed": {
+                "product_search": {
+                    "result_purpose": "recommendation",
+                    "selection_scope": "sku",
+                    "total_match_count": 12,
+                    "returned_count": 3,
+                    "is_exhaustive": False,
+                }
+            },
+            "products": [
+                ProductCard(
+                    spu_id=10,
+                    sku_id=101,
+                    title="首选版本",
+                    brand="Test",
+                    category="keyboard",
+                    price="350.00",
+                    stock=8,
+                ),
+                ProductCard(
+                    spu_id=10,
+                    sku_id=102,
+                    title="备选版本 A",
+                    brand="Test",
+                    category="keyboard",
+                    price="355.00",
+                    stock=7,
+                ),
+                ProductCard(
+                    spu_id=10,
+                    sku_id=103,
+                    title="备选版本 B",
+                    brand="Test",
+                    category="keyboard",
+                    price="360.00",
+                    stock=6,
+                ),
+            ],
+        },
+    )
+
+    answer = _fallback_answer(state)
+
+    assert "共匹配 12 个具体版本，本次返回 3 个候选" in answer
+    assert "首选 · 首选版本" in answer
+    assert "备选 · 备选版本 A" in answer
+    assert "只有 3 个版本" not in answer
 
 
 def test_usage_mapping_unavailable_fallback_is_not_empty_or_system_error() -> None:

@@ -53,6 +53,20 @@ def _direct_capability_is_safe(subquery: RoutedTask) -> bool:
         requirements = subquery.input_requirements
         sources = {item.source for item in requirements}
         if not subquery.depends_on:
+            if not requirements:
+                unresolved_reference_markers = (
+                    "这两",
+                    "这几个",
+                    "这些",
+                    "它们",
+                    "刚才",
+                    "上面",
+                    "前面",
+                )
+                return not any(
+                    marker in subquery.query
+                    for marker in unresolved_reference_markers
+                )
             return len(requirements) == 1 and sources == {"comparison_context"}
         if len(requirements) < 2 or not sources <= {"context_product", "task_output"}:
             return False
@@ -62,6 +76,13 @@ def _direct_capability_is_safe(subquery: RoutedTask) -> bool:
             if item.source == "task_output" and item.task_id is not None
         }
         return bound_dependencies == set(subquery.depends_on)
+
+    if capability == "catalog_search" and subquery.input_requirements:
+        return (
+            not subquery.depends_on
+            and len(subquery.input_requirements) == 1
+            and subquery.input_requirements[0].source == "context_product"
+        )
 
     if capability == "order_lookup" and subquery.depends_on:
         requirements = subquery.input_requirements
@@ -81,19 +102,13 @@ def _direct_capability_is_safe(subquery: RoutedTask) -> bool:
 def _default_arguments(subquery: RoutedTask) -> dict[str, int | str]:
     capability = str(subquery.capability)
     if capability == "catalog_search":
-        selector = subquery.result_selector
-        if selector is not None and selector.type == "sales_rank":
-            return {"limit": selector.rank}
         return {"limit": 3}
     if capability == "catalog_compare":
-        return {
-            "limit": 5,
-            "comparison_level": subquery.comparison_level or "sku",
-        }
+        return {"limit": 5}
     if capability == "catalog_facets":
         return {"limit": 20}
     if capability == "order_lookup":
-        return {"limit": 1}
+        return {}
     if capability == "policy_search":
         return {"limit": 3}
     return {}

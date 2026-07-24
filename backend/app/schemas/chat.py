@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.catalog import ProductCard
 from app.schemas.memory import MemoryChange
-from app.schemas.order import OrderCard
+from app.schemas.order import OrderCard, OrderQueryMeta, OrderSummary
 
 BoundaryClassificationValue = Literal[
     "in_scope_auto",
@@ -51,5 +51,7 @@ class ChatResponse(BaseModel):
     evidence: list[EvidenceItem] = Field(default_factory=list)
     products: list[ProductCard] = Field(default_factory=list)
     order: OrderCard | None = None
+    orders: list[OrderSummary] = Field(default_factory=list)
+    order_query: OrderQueryMeta | None = None
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
     memory_changes: list[MemoryChange] | None = None

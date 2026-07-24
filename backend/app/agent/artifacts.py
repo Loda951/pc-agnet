@@ -117,6 +117,15 @@ def refresh_task_status(state: dict[str, Any]) -> None:
         if isinstance(artifact, Mapping) and artifact.get("usable"):
             existing.update(status="succeeded", reason="artifact_usable")
             continue
+        clarification = _tool_clarification_request(state, task.id)
+        if clarification is not None:
+            existing.update(
+                status="blocked",
+                reason=f"tool_requested_clarification:{clarification['code']}",
+                missing_information=[clarification["missing_information"]],
+                user_can_supply=True,
+            )
+            continue
         outcome = attempted.get(task.id)
         if outcome in {"empty", "not_found", "unsupported"}:
             existing.update(status="unavailable", reason=f"tool_outcome:{outcome}")
@@ -262,6 +271,124 @@ def bound_task_spu_ids(state: Mapping[str, Any], task: RoutedTask) -> list[int]:
     return resolved[:10]
 
 
+def bound_task_catalog_targets(
+    state: Mapping[str, Any],
+    task: RoutedTask,
+) -> list[dict[str, Any]]:
+    """Bind trusted SKU+SPU identities without deciding the catalog comparison scope."""
+    targets: list[dict[str, Any]] = []
+    for requirement in task.input_requirements:
+        if requirement.source == "comparison_context":
+            snapshot = _mapping(
+                state.get("working_memory_snapshot") or state.get("working_memory")
+            )
+            comparison = _mapping(_mapping(snapshot.get("catalog")).get("comparison"))
+            _append_identity_lists(
+                targets,
+                comparison.get("sku_ids"),
+                comparison.get("spu_ids"),
+                source="comparison_context",
+            )
+        elif requirement.source == "context_product":
+            snapshot = _mapping(
+                state.get("working_memory_snapshot") or state.get("working_memory")
+            )
+            catalog = _mapping(snapshot.get("catalog"))
+            sku_id = _positive_int(catalog.get("referenced_sku_id"))
+            spu_id = _positive_int(catalog.get("referenced_spu_id"))
+            if sku_id is None and spu_id is None:
+                candidate_skus = _unique_positive_int_list(
+                    catalog.get("candidate_sku_ids")
+                )
+                candidate_spus = _unique_positive_int_list(
+                    catalog.get("candidate_spu_ids")
+                )
+                if len(candidate_spus) == 1:
+                    spu_id = candidate_spus[0]
+                    sku_id = candidate_skus[0] if len(candidate_skus) == 1 else None
+                elif len(candidate_skus) == 1:
+                    sku_id = candidate_skus[0]
+            _append_catalog_target(
+                targets,
+                sku_id=sku_id,
+                spu_id=spu_id,
+                source="working_memory_reference",
+            )
+        elif requirement.task_id is not None:
+            artifacts = _mapping(state.get("task_artifacts"))
+            artifact = _mapping(artifacts.get(requirement.task_id))
+            value = _mapping(artifact.get("value"))
+            products = value.get("products")
+            if isinstance(products, list):
+                for product in products:
+                    item = _mapping(product)
+                    _append_catalog_target(
+                        targets,
+                        sku_id=_positive_int(item.get("sku_id")),
+                        spu_id=_positive_int(item.get("spu_id")),
+                        source="current_turn_artifact",
+                    )
+            _append_identity_lists(
+                targets,
+                value.get("selected_sku_ids"),
+                value.get("selected_spu_ids"),
+                source="current_turn_artifact",
+            )
+    return targets[:10]
+
+
+def _append_identity_lists(
+    targets: list[dict[str, Any]],
+    raw_sku_ids: Any,
+    raw_spu_ids: Any,
+    *,
+    source: str,
+) -> None:
+    sku_ids = _positive_int_list(raw_sku_ids)
+    spu_ids = _positive_int_list(raw_spu_ids)
+    for index in range(max(len(sku_ids), len(spu_ids))):
+        _append_catalog_target(
+            targets,
+            sku_id=sku_ids[index] if index < len(sku_ids) else None,
+            spu_id=spu_ids[index] if index < len(spu_ids) else None,
+            source=source,
+        )
+
+
+def _append_catalog_target(
+    targets: list[dict[str, Any]],
+    *,
+    sku_id: int | None,
+    spu_id: int | None,
+    source: str,
+) -> None:
+    if sku_id is None and spu_id is None:
+        return
+    identity = (sku_id, spu_id)
+    if any((item.get("sku_id"), item.get("spu_id")) == identity for item in targets):
+        return
+    target: dict[str, Any] = {"source": source}
+    if sku_id is not None:
+        target["sku_id"] = sku_id
+    if spu_id is not None:
+        target["spu_id"] = spu_id
+    targets.append(target)
+
+
+def _positive_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [
+        normalized
+        for item in value
+        if (normalized := _positive_int(item)) is not None
+    ]
+
+
+def _unique_positive_int_list(value: Any) -> list[int]:
+    return list(dict.fromkeys(_positive_int_list(value)))
+
+
 def bound_task_order_id(state: Mapping[str, Any], task: RoutedTask) -> int | None:
     """Bind an unambiguous order id from a declared upstream order artifact."""
     candidates: list[int] = []
@@ -300,13 +427,19 @@ def _extract_task_artifact(
     if usable and name == "catalog_search":
         products = [dict(item) for item in output.get("products", []) if isinstance(item, Mapping)]
         if task.produces == "ranked_product":
-            selected = _select_ranked_product(products, task)
+            query_plan = _mapping(output.get("query_plan"))
+            selected = (
+                products[0]
+                if _mapping(query_plan.get("ranking")) and products
+                else _select_ranked_product(products, task)
+            )
             usable = selected is not None
             value = {
                 "products": [selected] if selected is not None else [],
                 "selected_sku_ids": [selected["sku_id"]] if selected is not None else [],
                 "selected_spu_ids": [selected["spu_id"]] if selected is not None else [],
                 "query_plan": output.get("query_plan") or {},
+                **_catalog_search_window(output),
             }
             if not usable:
                 reason = "deterministic_selector_did_not_produce_product"
@@ -324,6 +457,7 @@ def _extract_task_artifact(
                     )
                 ),
                 "query_plan": output.get("query_plan") or {},
+                **_catalog_search_window(output),
             }
     elif usable and name == "catalog_compare":
         products = [dict(item) for item in output.get("products", []) if isinstance(item, Mapping)]
@@ -359,7 +493,14 @@ def _extract_task_artifact(
         value = {
             "order": output.get("order"),
             "candidates": output.get("candidates") or [],
+            "analysis_orders": output.get("analysis_orders") or [],
             "result_type": output.get("result_type"),
+            "query_mode": output.get("query_mode"),
+            "total_match_count": output.get("total_match_count", 0),
+            "returned_count": output.get("returned_count", 0),
+            "is_exhaustive": output.get("is_exhaustive", True),
+            "offset": output.get("offset", 0),
+            "next_offset": output.get("next_offset"),
         }
     elif usable and name in {"policy_search", "knowledge_search"}:
         documents = [
@@ -392,6 +533,17 @@ def _extract_task_artifact(
         source_tool_name=name,
         reason=reason,
     )
+
+
+def _catalog_search_window(output: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "result_purpose": output.get("result_purpose") or "search",
+        "selection_scope": output.get("selection_scope") or "spu",
+        "total_match_count": max(0, int(output.get("total_match_count") or 0)),
+        "returned_count": max(0, int(output.get("returned_count") or 0)),
+        "is_exhaustive": bool(output.get("is_exhaustive", True)),
+        "ranking_strategy": str(output.get("ranking_strategy") or ""),
+    }
 
 
 def _select_ranked_product(
@@ -447,6 +599,46 @@ def _attempted_task_outcomes(state: Mapping[str, Any]) -> dict[str, str]:
     return outcomes
 
 
+def _tool_clarification_request(
+    state: Mapping[str, Any],
+    task_id: str,
+) -> dict[str, str] | None:
+    missing_by_code = {
+        "invalid_context_target": "可用的具体商品或型号",
+        "insufficient_spu_ids": "至少两个明确的商品系列",
+        "insufficient_active_series": "至少两个当前在售的商品系列",
+    }
+    for wave in reversed(state.get("tool_waves", [])):
+        if not isinstance(wave, Mapping):
+            continue
+        calls = {
+            str(call.get("id") or ""): call
+            for call in wave.get("calls", [])
+            if isinstance(call, Mapping)
+        }
+        for result in reversed(wave.get("results", [])):
+            if not isinstance(result, Mapping):
+                continue
+            call = _mapping(calls.get(str(result.get("tool_call_id") or "")))
+            if str(call.get("subquery") or "").strip() != task_id:
+                continue
+            output = _mapping(_mapping(result.get("execution")).get("output"))
+            diagnostics = output.get("diagnostics")
+            if not isinstance(diagnostics, list):
+                return None
+            for diagnostic in diagnostics:
+                item = _mapping(diagnostic)
+                code = str(item.get("code") or "")
+                missing_information = missing_by_code.get(code)
+                if missing_information is not None:
+                    return {
+                        "code": code,
+                        "missing_information": missing_information,
+                    }
+            return None
+    return None
+
+
 def _missing_input_requirements(
     state: Mapping[str, Any], task: RoutedTask
 ) -> tuple[list[str], bool]:
@@ -466,20 +658,14 @@ def _missing_input_requirements(
                 state.get("working_memory_snapshot") or state.get("working_memory")
             )
             catalog = _mapping(snapshot.get("catalog"))
-            id_key = (
-                "referenced_spu_id"
-                if task.capability == "catalog_compare" and task.comparison_level == "spu"
-                else "referenced_sku_id"
-            )
-            candidates_key = (
-                "candidate_spu_ids"
-                if task.capability == "catalog_compare" and task.comparison_level == "spu"
-                else "candidate_sku_ids"
-            )
-            candidates = catalog.get(candidates_key)
-            has_product = _positive_int(catalog.get(id_key)) is not None or (
-                isinstance(candidates, list)
-                and any(_positive_int(item) is not None for item in candidates)
+            referenced = [
+                _positive_int(catalog.get("referenced_sku_id")),
+                _positive_int(catalog.get("referenced_spu_id")),
+            ]
+            candidate_skus = _positive_int_list(catalog.get("candidate_sku_ids"))
+            candidate_spus = _positive_int_list(catalog.get("candidate_spu_ids"))
+            has_product = any(item is not None for item in referenced) or (
+                len(set(candidate_skus)) == 1 or len(set(candidate_spus)) == 1
             )
             if not has_product:
                 missing.append(requirement.name)
@@ -489,19 +675,16 @@ def _missing_input_requirements(
                 state.get("working_memory_snapshot") or state.get("working_memory")
             )
             comparison = _mapping(_mapping(snapshot.get("catalog")).get("comparison"))
-            id_key = "spu_ids" if task.comparison_level == "spu" else "sku_ids"
-            ids = comparison.get(id_key)
-            if not isinstance(ids, list) or len(
-                [item for item in ids if _positive_int(item) is not None]
-            ) < 2:
+            sku_ids = _positive_int_list(comparison.get("sku_ids"))
+            spu_ids = _positive_int_list(comparison.get("spu_ids"))
+            if max(len(sku_ids), len(spu_ids)) < 2:
                 missing.append(requirement.name)
                 user_can_supply = True
-    bound_compare_ids = (
-        bound_task_spu_ids(state, task)
-        if task.comparison_level == "spu"
-        else bound_task_sku_ids(state, task)
-    )
-    if task.capability == "catalog_compare" and len(bound_compare_ids) < 2:
+    if (
+        task.capability == "catalog_compare"
+        and task.input_requirements
+        and len(bound_task_catalog_targets(state, task)) < 2
+    ):
         missing.append("至少两个可比较商品")
         user_can_supply = True
     return list(dict.fromkeys(missing)), user_can_supply
@@ -534,6 +717,7 @@ def _int(value: Any) -> int:
 
 __all__ = [
     "TaskArtifactRecord",
+    "bound_task_catalog_targets",
     "bound_task_order_id",
     "bound_task_spu_ids",
     "bound_task_sku_ids",

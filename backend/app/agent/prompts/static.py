@@ -14,6 +14,8 @@ TOOL_SELECTION_RULES = [
     "商品推荐 subquery，只调用一次 catalog_search；跨品类展开由 Tool 内部完成。",
     "当前登录用户的具体订单、订单内容、状态或物流使用 order_lookup；一般性的配送、退款、"
     "退换货、保修、价保和发票规则使用 policy_search。",
+    "用户询问自己是否买过某商品、商品出现在哪个订单、购买次数或最近一次购买时间，也使用 "
+    "order_lookup；这是购买历史查询，不是新的商品推荐。",
     "具体 SKU 的价格、库存和规格使用商品结构化工具；规格含义、使用场景、品牌介绍和一般"
     "选购方法使用 knowledge_search。",
     "当前 SKU 或 SPU 销量、热销排序使用 catalog_search；指定商品或版本之间的销量对比使用 "
@@ -98,14 +100,42 @@ ORCHESTRATOR_OBSERVATION_PROMPT = f"""
    不得因为追求整轮完整而补写任何 Task 没有提供的事实。
 5. `answered_with_facts` 与 `answered_no_match` 都属于已解决。正常查无结果是可靠的否定答案，不是
    unavailable。不得用统计汇总、泛化描述或建议替代 Task `question` 的核心答案。
+6. `needs_clarification` 表示 Runtime 已把 Tool 的结构化诊断提升为整个 Task 的缺失信息。围绕该
+   Task 的 `question` 与 `explanation` 只问一个用户可回答的具体问题；不得复述 Tool 诊断码、让
+   Catalog Tool 直接面向用户说话，或把同一 Task 拆成多轮零散追问。
 </answer_process>
 
 <fact_semantics>
 - catalog_search、catalog_compare、catalog_facets、order_lookup 是商品、目录、订单和物流事实来源；
   policy_search、knowledge_search 是政策、FAQ、品牌和外设知识来源；文档不能覆盖结构化价格、
   库存、销量、订单或物流事实。
-- catalog_facets.count 是 SKU 记录数，不是库存或销量。
+- catalog_facets.count 按 item.count_scope 统计：spu 是商品系列数，sku 是具体版本数；
+  sku_count 与 spu_count 提供两个明确口径。它们都不是库存或销量。
 - sku_sales_count 是当前版本销量；sales_count 是整个商品系列累计销量，不得混用。
+- catalog_search 的 entity_scope=spu 时，返回的 ProductCard 是系列结果加一个辅助 SKU：
+  spu_title 是系列名称；price、stock、specs 和 sku_id 只属于辅助 SKU，不能代表整个系列；
+  series_common_specs 是共同规格，series_option_specs 与 series_variants 是真实可选版本。
+  selection_scope=spu 的 limit 表示 SPU 数量，不是 SKU 数量。
+- catalog_search.total_match_count 是应用目标和筛选条件后、limit 截断前的真实匹配数；
+  returned_count 是本次实际返回的候选数，口径由 selection_scope 决定。只有
+  is_exhaustive=true 才能把返回列表称为全部结果；否则不得把“返回了 N 个”写成“商城只有
+  N 个”。
+- order_lookup.total_match_count 是当前登录用户的精确订单总数，returned_count 是本次有界窗口
+  实际返回数。只有 is_exhaustive=true 才能把当前列表称为全部订单；否则必须说明本次展示了
+  多少笔、仍有更多结果。query_mode=count 时即使总数为 0 也是可靠的计数答案；订单候选按时间
+  从近到远排列，但不得替用户自动选择第一笔。
+- order_lookup.query_mode=analysis 时，analysis_orders 是回答复杂订单问题的完整安全事实集合，
+  不是要求展示给用户的订单列表。必须围绕用户当前问题筛选相关事实，只给结论和必要依据；
+  不得逐项复述无关订单。只有 is_exhaustive=true 时，才能根据完整集合回答“从未买过”或
+  “不存在某类订单”等全局否定结论。
+- catalog_search.result_purpose=recommendation 时 products 已按推荐顺序排列，第一项是首选，
+  后续项是备选；用户问“最推荐哪个”时必须直接回答第一项。result_purpose=search 时只是有序
+  搜索结果，不得把第一项自动称为最推荐。result_purpose=lookup 时围绕已识别商品回答事实或
+  版本信息。result_purpose=ranking 时按 query_plan.ranking 和 ranking_value 回答确定性名次。
+- ranking_scope=spu 表示上述系列结果同时是 SPU 排名结果。
+  ranking_metric=price 时按全部在售 SKU 的最低价（series_min_price/起售价）排名；
+  ranking_metric=stock 时按 series_total_stock 排名；ranking_metric=sales 时按系列 sales_count
+  排名。回答排名依据必须优先使用 ranking_value 和这些系列聚合字段。
 - catalog_compare.comparison_level=spu 时，series 是主要证据：common_specs 表示全部在售 SKU
   都相同，option_specs 表示系列可选项及覆盖数量，variants 只表示真实存在的 SKU 组合。不得拿
   单个变体代替整个系列，不得把多个 option_specs 笛卡尔组合成数据库中不存在的版本。

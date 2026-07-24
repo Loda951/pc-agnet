@@ -178,6 +178,164 @@ def test_spu_comparison_answer_contract_uses_series_as_primary_evidence() -> Non
     assert "把不同可选规格自由组合成不存在的 SKU" in contract["forbidden"]
 
 
+def test_spu_ranking_answer_contract_rejects_representative_sku_semantics() -> None:
+    task = _task(
+        "task_1",
+        "查询库存最多的键盘",
+        produces="ranked_product",
+        capability="catalog_search",
+    )
+    state = {
+        "route_plan": _goal(task),
+        "task_status": {"task_1": {"status": "succeeded"}},
+        "task_artifacts": {
+            "task_1": _artifact(
+                "task_1",
+                "search-1",
+                "catalog_search",
+                "ranked_product",
+                usable=True,
+                value={
+                    "products": [
+                        {
+                            "spu_id": 10,
+                            "sku_id": 101,
+                            "title": "辅助 SKU",
+                            "spu_title": "测试键盘系列",
+                            "ranking_scope": "spu",
+                            "ranking_metric": "stock",
+                            "ranking_value": "42",
+                            "stock": 7,
+                            "series_total_stock": 42,
+                        }
+                    ]
+                },
+                reason="ranked_product_selected",
+            )
+        },
+        "subquery_ledger": [
+            _ledger("task_1", "search-1", "catalog_search", "usable", usable=True)
+        ],
+    }
+
+    contract = build_answer_context(state)["tasks"][0]["response_contract"]
+
+    assert "明确这是商品系列/SPU 排名，并使用 ranking_value 说明排名依据" in contract[
+        "required"
+    ]
+    assert "把辅助 SKU 的 stock 当成系列总库存" in contract["forbidden"]
+    assert "把辅助 SKU 的 title 当成系列名称（有 spu_title 时使用 spu_title）" in contract[
+        "forbidden"
+    ]
+
+
+def test_spu_recommendation_answer_contract_uses_series_options_not_auxiliary_sku() -> None:
+    task = _task(
+        "task_1",
+        "推荐一个键盘",
+        produces="products",
+        capability="catalog_search",
+    )
+    state = {
+        "route_plan": _goal(task),
+        "task_status": {"task_1": {"status": "succeeded"}},
+        "task_artifacts": {
+            "task_1": _artifact(
+                "task_1",
+                "search-1",
+                "catalog_search",
+                "products",
+                usable=True,
+                value={
+                    "products": [
+                        {
+                            "spu_id": 10,
+                            "sku_id": 101,
+                            "title": "黑色辅助 SKU",
+                            "spu_title": "测试键盘系列",
+                            "entity_scope": "spu",
+                            "series_min_price": "300",
+                            "series_max_price": "320",
+                            "series_total_stock": 42,
+                            "series_common_specs": {},
+                            "series_option_specs": {
+                                "connection_type": ["有线", "蓝牙"]
+                            },
+                            "series_variants": [{"sku_id": 101}, {"sku_id": 102}],
+                        }
+                    ]
+                },
+                reason="products_found",
+            )
+        },
+        "subquery_ledger": [
+            _ledger("task_1", "search-1", "catalog_search", "usable", usable=True)
+        ],
+    }
+
+    contract = build_answer_context(state)["tasks"][0]["response_contract"]
+
+    assert "把返回对象作为商品系列/SPU，使用 spu_title 作为系列名称" in contract[
+        "required"
+    ]
+    assert "规格只使用 series_common_specs、series_option_specs 和 series_variants" in contract[
+        "required"
+    ]
+    assert not any("SPU 排名" in item for item in contract["required"])
+    assert "把辅助 SKU 的 specs 当成全系列共同规格" in contract["forbidden"]
+
+
+def test_recommendation_answer_contract_distinguishes_total_from_candidate_window() -> None:
+    task = _task(
+        "task_1",
+        "你最推荐哪个版本",
+        produces="products",
+        capability="catalog_search",
+    )
+    state = {
+        "route_plan": _goal(task),
+        "task_status": {"task_1": {"status": "succeeded"}},
+        "task_artifacts": {
+            "task_1": _artifact(
+                "task_1",
+                "search-1",
+                "catalog_search",
+                "products",
+                usable=True,
+                value={
+                    "result_purpose": "recommendation",
+                    "selection_scope": "sku",
+                    "total_match_count": 12,
+                    "returned_count": 3,
+                    "is_exhaustive": False,
+                    "products": [
+                        {"spu_id": 10, "sku_id": 101, "title": "首选版本"},
+                        {"spu_id": 10, "sku_id": 102, "title": "备选版本 A"},
+                        {"spu_id": 10, "sku_id": 103, "title": "备选版本 B"},
+                    ],
+                },
+                reason="products_found",
+            )
+        },
+        "subquery_ledger": [
+            _ledger("task_1", "search-1", "catalog_search", "usable", usable=True)
+        ],
+    }
+
+    contract = build_answer_context(state)["tasks"][0]["response_contract"]
+
+    assert contract["result_window"] == {
+        "result_purpose": "recommendation",
+        "selection_scope": "sku",
+        "total_match_count": 12,
+        "returned_count": 3,
+        "is_exhaustive": False,
+    }
+    assert any("共匹配 12 个具体版本/SKU" in item for item in contract["required"])
+    assert any("第一项作为首选" in item for item in contract["required"])
+    assert any("只有本次返回的 3 个结果" in item for item in contract["forbidden"])
+
+
 def test_no_match_is_a_fully_answered_negative_result() -> None:
     task = _task(
         "task_1",
@@ -287,6 +445,51 @@ def test_answer_context_aggregates_partial_results_per_task() -> None:
         "unsupported_capability",
     ]
     assert context["unavailable_parts"] == ["分析过去一年的销量增长率"]
+
+
+def test_order_analysis_contract_requires_question_focused_minimal_disclosure() -> None:
+    task = _task(
+        "task_1",
+        "我买过雷蛇鼠标吗",
+        produces="order",
+        capability="order_lookup",
+    )
+    state = {
+        "route_plan": _goal(task),
+        "task_status": {"task_1": {"status": "succeeded"}},
+        "task_artifacts": {
+            "task_1": _artifact(
+                "task_1",
+                "order-1",
+                "order_lookup",
+                "order",
+                usable=True,
+                value={
+                    "result_type": "order_analysis",
+                    "query_mode": "analysis",
+                    "analysis_orders": [
+                        {"id": 1, "items": [{"sku_name": "Razer Viper 鼠标"}]},
+                        {"id": 2, "items": [{"sku_name": "其他无关键盘"}]},
+                    ],
+                    "total_match_count": 2,
+                    "returned_count": 2,
+                    "is_exhaustive": True,
+                },
+                reason="order_analysis_available",
+            )
+        },
+        "subquery_ledger": [
+            _ledger("task_1", "order-1", "order_lookup", "usable", usable=True)
+        ],
+    }
+
+    context = build_answer_context(state)
+    contract = context["tasks"][0]["response_contract"]
+
+    assert context["completion"] == "full"
+    assert any("只回答用户实际询问" in item for item in contract["required"])
+    assert any("全部订单逐项复述" in item for item in contract["forbidden"])
+    assert any("与用户问题无关" in item for item in contract["forbidden"])
 
 
 @pytest.mark.asyncio

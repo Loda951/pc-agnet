@@ -18,7 +18,6 @@ from app.schemas.context import (
     HandoffMemory,
     HistorySelection,
     MemoryChanges,
-    OrderMemory,
     PolicyMemory,
     PreparedTurn,
     StructuredMemory,
@@ -258,7 +257,17 @@ def _next_working_memory(previous: WorkingMemoryV2, state: dict[str, Any]) -> Wo
     order_memory = previous.order.model_copy(deep=True)
     order = state.get("order")
     if order is not None:
-        order_memory = OrderMemory(last_order_id=_optional_object_int(order, "id"))
+        order_memory.last_order_id = _optional_object_int(order, "id")
+    order_candidates = parsed.get("order_candidates")
+    order_query = parsed.get("order_query")
+    if isinstance(order_candidates, list):
+        order_memory.candidate_order_ids = _object_ids(order_candidates, "id")
+    if isinstance(order_query, dict):
+        order_memory.total_match_count = int(order_query.get("total_match_count") or 0)
+        order_memory.returned_count = int(order_query.get("returned_count") or 0)
+        order_memory.is_exhaustive = bool(order_query.get("is_exhaustive", True))
+        next_offset = order_query.get("next_offset")
+        order_memory.next_offset = next_offset if isinstance(next_offset, int) else None
 
     policy = previous.policy.model_copy(deep=True)
     evidence = state.get("evidence") if isinstance(state.get("evidence"), list) else []
@@ -330,7 +339,12 @@ def _catalog_display_identities(items: list[Any]) -> list[CatalogDisplayIdentity
     for item in items:
         spu_id = _optional_object_int(item, "spu_id")
         sku_id = _optional_object_int(item, "sku_id")
-        title = _message_value(item, "title")
+        entity_scope = _message_value(item, "entity_scope")
+        title = (
+            _message_value(item, "spu_title")
+            if entity_scope == "spu"
+            else _message_value(item, "title")
+        )
         if spu_id is None or sku_id is None or not title:
             continue
         identities.append(
@@ -338,6 +352,9 @@ def _catalog_display_identities(items: list[Any]) -> list[CatalogDisplayIdentity
                 spu_id=spu_id,
                 sku_id=sku_id,
                 title=str(title),
+                entity_scope=(
+                    entity_scope if entity_scope in {"sku", "spu"} else "sku"
+                ),
                 brand=_optional_string(_message_value(item, "brand")),
                 category=_optional_string(_message_value(item, "category")),
                 image_url=_optional_string(_message_value(item, "image_url")),

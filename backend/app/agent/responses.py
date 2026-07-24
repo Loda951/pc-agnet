@@ -41,40 +41,113 @@ CUSTOMER_SPEC_LABELS = {
 }
 
 
+def _safe_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _fallback_answer(state: AgentState) -> str:
     products = state.get("products", [])
     if products:
         product_search = state.get("parsed", {}).get("product_search", {})
+        product_search = product_search if isinstance(product_search, dict) else {}
         usage_mapping = (
-            product_search.get("usage_mapping", {}) if isinstance(product_search, dict) else {}
+            product_search.get("usage_mapping", {})
         )
         usage_status = (
             str(usage_mapping.get("status") or "") if isinstance(usage_mapping, dict) else ""
         )
-        if usage_status == "applied":
+        result_purpose = str(product_search.get("result_purpose") or "search")
+        selection_scope = str(product_search.get("selection_scope") or "spu")
+        total_match_count = _safe_non_negative_int(
+            product_search.get("total_match_count")
+        )
+        returned_count = _safe_non_negative_int(product_search.get("returned_count"))
+        is_exhaustive = bool(product_search.get("is_exhaustive", True))
+        scope_label = "具体版本" if selection_scope == "sku" else "商品系列"
+        if result_purpose == "recommendation":
+            intro = "我按当前目录的综合推荐顺序整理了这些候选，第一项是首选："
+        elif result_purpose == "lookup":
+            intro = "我查到了这个商品的以下目录信息："
+        elif result_purpose == "ranking":
+            intro = "我按用户指定的目录指标查到了以下排名结果："
+        elif usage_status == "applied":
             intro = "我根据这个使用场景相关的规格要求和偏好，找到了这些候选："
         elif usage_status == "expanded":
             intro = "我根据这个使用场景，从多个相关外设品类中找到了这些候选："
         else:
             intro = "我根据商品目录找到了这些候选："
         lines = [intro]
+        if (
+            result_purpose != "ranking"
+            and not is_exhaustive
+            and total_match_count > 0
+        ):
+            lines.append(
+                f"共匹配 {total_match_count} 个{scope_label}，"
+                f"本次返回 {returned_count or len(products)} 个候选。"
+            )
         asks_sales = any(
             term in state.get("message", "").lower() for term in ("销量", "热销", "畅销", "sales")
         )
-        for product in products[:3]:
+        for index, product in enumerate(products[:3]):
+            is_series = product.entity_scope == "spu" or product.ranking_scope == "spu"
+            source_specs = (
+                product.series_common_specs if is_series else product.specs
+            )
             customer_specs = [
                 (CUSTOMER_SPEC_LABELS[key.casefold()], value)
-                for key, value in product.specs.items()
+                for key, value in source_specs.items()
                 if key.casefold() in CUSTOMER_SPEC_LABELS
             ][:4]
+            if is_series:
+                for key, values in product.series_option_specs.items():
+                    label = CUSTOMER_SPEC_LABELS.get(key.casefold())
+                    if label and values and len(customer_specs) < 4:
+                        customer_specs.append((f"可选{label}", "/".join(values)))
             specs = "，".join(f"{label}: {value}" for label, value in customer_specs)
             suffix = f"，{specs}" if specs else ""
             if asks_sales:
                 suffix += (
-                    f"，当前版本销量 {product.sku_sales_count}，"
-                    f"整个商品系列累计销量 {product.sales_count}"
+                    f"，商品系列累计销量 {product.sales_count}"
+                    if is_series
+                    else (
+                        f"，当前版本销量 {product.sku_sales_count}，"
+                        f"整个商品系列累计销量 {product.sales_count}"
+                    )
                 )
-            lines.append(f"- {product.title}：¥{product.price}，库存 {product.stock}{suffix}。")
+            if is_series:
+                title = product.spu_title or product.title
+                minimum = product.series_min_price or product.price
+                maximum = product.series_max_price or minimum
+                price = f"¥{minimum}" if minimum == maximum else f"¥{minimum}–¥{maximum}"
+                stock = product.series_total_stock
+                version_count = product.series_sku_count
+                role = (
+                    "首选 · "
+                    if result_purpose == "recommendation" and index == 0
+                    else "备选 · "
+                    if result_purpose == "recommendation"
+                    else ""
+                )
+                lines.append(
+                    f"- {role}{title}：{price}，系列库存 {stock or 0}，"
+                    f"共 {version_count or 1} 个在售版本{suffix}。"
+                )
+            else:
+                role = (
+                    "首选 · "
+                    if result_purpose == "recommendation" and index == 0
+                    else "备选 · "
+                    if result_purpose == "recommendation"
+                    else ""
+                )
+                lines.append(
+                    f"- {role}{product.title}：¥{product.price}，库存 "
+                    f"{product.stock}{suffix}。"
+                )
         if usage_status in {"applied", "expanded"}:
             lines.append(
                 "如果你想继续缩小范围，可以补充预算或最在意的具体规格；实际价格和库存以下单页为准。"
@@ -97,12 +170,34 @@ def _fallback_answer(state: AgentState) -> str:
         )
 
     candidates = state.get("parsed", {}).get("order_candidates", [])
+    order_query = state.get("parsed", {}).get("order_query", {})
+    if isinstance(order_query, dict) and order_query.get("query_mode") == "count":
+        total = int(order_query.get("total_match_count") or 0)
+        return f"你当前一共有 {total} 个订单。"
+    if (
+        isinstance(order_query, dict)
+        and order_query.get("query_mode") == "page"
+        and int(order_query.get("returned_count") or 0) == 0
+        and int(order_query.get("total_match_count") or 0) > 0
+    ):
+        total = int(order_query["total_match_count"])
+        return f"已经列完全部 {total} 个订单，没有更多下一页了。"
     if candidates:
-        lines = ["我查到这些最近订单，请告诉我你要查看哪一单："]
+        total = int(order_query.get("total_match_count") or len(candidates))
+        returned = int(order_query.get("returned_count") or len(candidates))
+        offset = int(order_query.get("offset") or 0)
+        is_exhaustive = bool(order_query.get("is_exhaustive", True))
+        if offset:
+            lines = [f"你一共有 {total} 个订单，下面是第 {offset + 1} 条起的 {returned} 个："]
+        else:
+            lines = [f"你一共有 {total} 个订单，下面列出最近的 {returned} 个："]
         lines.extend(
             f"- 订单 {item['id']}：{item['status_label']}，实付 ¥{item['pay_amount']}。"
-            for item in candidates[:5]
+            for item in candidates
         )
+        if not is_exhaustive:
+            lines.append("这只是部分结果；如果需要，我可以继续列出下一页。")
+        lines.append("告诉我订单号或“第几个”，我可以继续查看该订单明细。")
         return "\n".join(lines)
 
     evidence = state.get("evidence", [])

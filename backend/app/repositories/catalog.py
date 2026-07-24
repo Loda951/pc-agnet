@@ -1,5 +1,7 @@
 import re
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import Select, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +15,12 @@ from app.models import (
     Sku,
     Spu,
 )
-from app.schemas.catalog import ProductCard, ProductSearchRequest, ProductSpecCondition
+from app.schemas.catalog import (
+    ProductCard,
+    ProductSearchRequest,
+    ProductSpecCondition,
+    ProductVariantCard,
+)
 
 CATEGORY_ALIASES = {
     "mouse": "鼠标",
@@ -148,6 +155,12 @@ DB_VALUE_ALIASES = {
 MAX_CANDIDATE_PAGES = 50
 
 
+@dataclass(frozen=True)
+class CatalogSearchPage:
+    products: list[ProductCard]
+    total_count: int
+
+
 class CatalogRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -181,64 +194,248 @@ class CatalogRepository:
                 break
             offset += page_size
 
-        if request.sort == "price_desc":
-            eligible_products.sort(
-                key=lambda product: (
-                    -product.price,
-                    0 if product.stock > 0 else 1,
-                    -product.sku_sales_count,
-                    product.sku_id,
-                )
-            )
-        elif request.sort == "price_asc":
-            eligible_products.sort(
-                key=lambda product: (
-                    product.price,
-                    0 if product.stock > 0 else 1,
-                    -product.sku_sales_count,
-                    product.sku_id,
-                )
-            )
-        elif request.sort == "sales":
-            eligible_products.sort(
-                key=lambda product: (
-                    -product.sku_sales_count,
-                    0 if product.stock > 0 else 1,
-                    product.price,
-                    product.sku_id,
-                )
-            )
-        elif request.sort == "stock":
-            eligible_products.sort(
-                key=lambda product: (
-                    -product.stock,
-                    -product.sku_sales_count,
-                    product.price,
-                    product.sku_id,
-                )
-            )
-        else:
-            ranked_products = [
+        eligible_products = _sort_catalog_products(
+            eligible_products,
+            request=request,
+            query_tokens=query_tokens,
+        )
+        return eligible_products[: request.limit]
+
+    async def search_products_with_total(
+        self,
+        request: ProductSearchRequest,
+    ) -> CatalogSearchPage:
+        """Return an ordered SKU window plus the exact eligible count before truncation."""
+        eligible_products = await self._eligible_products_for_ranking(request)
+        ordered = _sort_catalog_products(
+            eligible_products,
+            request=request,
+            query_tokens=_query_tokens(request.query),
+        )
+        return CatalogSearchPage(
+            products=ordered[: request.limit],
+            total_count=len(ordered),
+        )
+
+    async def search_product_series(
+        self,
+        request: ProductSearchRequest,
+    ) -> list[ProductCard]:
+        """Return one series-level card per matching SPU for ordinary catalog discovery."""
+        return (await self.search_product_series_with_total(request)).products
+
+    async def search_product_series_with_total(
+        self,
+        request: ProductSearchRequest,
+    ) -> CatalogSearchPage:
+        """Return an ordered SPU window plus the exact distinct-series count."""
+        eligible_products = await self._eligible_products_for_ranking(request)
+        query_tokens = _query_tokens(request.query)
+        grouped: dict[int, list[ProductCard]] = {}
+        for product in eligible_products:
+            grouped.setdefault(product.spu_id, []).append(product)
+
+        ranked_series: list[tuple[int, ProductCard]] = []
+        for products in grouped.values():
+            scored = [
                 (_score_product(product, request, query_tokens), product)
-                for product in eligible_products
+                for product in products
             ]
-            ranked_products.sort(
+            scored.sort(
                 key=lambda item: (
                     -item[0],
                     -item[1].sku_sales_count,
                     0 if item[1].stock > 0 else 1,
                     item[1].price,
-                    item[1].title,
+                    item[1].sku_id,
                 )
             )
-            eligible_products = [product for _, product in ranked_products]
-        return eligible_products[: request.limit]
+            score, representative = scored[0]
+            ranked_series.append(
+                (
+                    score,
+                    _series_product_card(
+                        representative,
+                        products,
+                        ranking_scope=None,
+                        ranking_metric=None,
+                        ranking_value=None,
+                    ),
+                )
+            )
+
+        ranked_series.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1].sales_count,
+                0 if (item[1].series_total_stock or 0) > 0 else 1,
+                item[1].series_min_price or item[1].price,
+                item[1].spu_id,
+            )
+        )
+        return CatalogSearchPage(
+            products=[product for _, product in ranked_series[: request.limit]],
+            total_count=len(ranked_series),
+        )
 
     async def search_product_series_by_sales(
         self,
         request: ProductSearchRequest,
     ) -> list[ProductCard]:
         """Return one representative SKU per SPU, ordered by aggregate SPU sales."""
+        return await self.search_product_series_by_ranking(
+            request,
+            metric="sales",
+            direction="desc",
+            rank=1,
+            count=request.limit,
+        )
+
+    async def search_product_series_by_ranking(
+        self,
+        request: ProductSearchRequest,
+        *,
+        metric: str,
+        direction: str,
+        rank: int,
+        count: int,
+    ) -> list[ProductCard]:
+        """Rank distinct SPUs by an aggregate metric and return an auxiliary SKU card."""
+        return (
+            await self.search_product_series_by_ranking_with_total(
+                request,
+                metric=metric,
+                direction=direction,
+                rank=rank,
+                count=count,
+            )
+        ).products
+
+    async def search_product_series_by_ranking_with_total(
+        self,
+        request: ProductSearchRequest,
+        *,
+        metric: str,
+        direction: str,
+        rank: int,
+        count: int,
+    ) -> CatalogSearchPage:
+        """Return an SPU ranking window plus the full eligible series count."""
+        eligible_products = await self._eligible_products_for_ranking(request)
+
+        grouped: dict[int, list[ProductCard]] = {}
+        for product in eligible_products:
+            grouped.setdefault(product.spu_id, []).append(product)
+
+        ranked_series: list[tuple[Decimal, ProductCard]] = []
+        for _spu_id, products in grouped.items():
+            min_price = min(product.price for product in products)
+            total_stock = sum(max(0, product.stock) for product in products)
+            if metric == "price":
+                ranking_value = min_price
+                representative = min(
+                    products,
+                    key=lambda product: (
+                        product.price,
+                        0 if product.stock > 0 else 1,
+                        -product.sku_sales_count,
+                        product.sku_id,
+                    ),
+                )
+            elif metric == "stock":
+                ranking_value = Decimal(total_stock)
+                representative = min(
+                    products,
+                    key=lambda product: (
+                        -product.stock,
+                        -product.sku_sales_count,
+                        product.price,
+                        product.sku_id,
+                    ),
+                )
+            else:
+                ranking_value = Decimal(products[0].sales_count)
+                representative = min(products, key=_series_representative_key)
+            ranked_series.append(
+                (
+                    ranking_value,
+                    _series_product_card(
+                        representative,
+                        products,
+                        ranking_scope="spu",
+                        ranking_metric=metric,
+                        ranking_value=ranking_value,
+                    ),
+                )
+            )
+
+        ranked_series.sort(
+            key=lambda item: (
+                item[0] if direction == "asc" else -item[0],
+                item[1].spu_id,
+            )
+        )
+        start = rank - 1
+        return CatalogSearchPage(
+            products=[product for _, product in ranked_series[start : start + count]],
+            total_count=len(ranked_series),
+        )
+
+    async def search_skus_by_ranking(
+        self,
+        request: ProductSearchRequest,
+        *,
+        metric: str,
+        direction: str,
+        rank: int,
+        count: int,
+    ) -> list[ProductCard]:
+        """Rank all eligible active SKUs, including ascending stock/sales windows."""
+        return (
+            await self.search_skus_by_ranking_with_total(
+                request,
+                metric=metric,
+                direction=direction,
+                rank=rank,
+                count=count,
+            )
+        ).products
+
+    async def search_skus_by_ranking_with_total(
+        self,
+        request: ProductSearchRequest,
+        *,
+        metric: str,
+        direction: str,
+        rank: int,
+        count: int,
+    ) -> CatalogSearchPage:
+        """Return an SKU ranking window plus the full eligible SKU count."""
+        products = await self._eligible_products_for_ranking(request)
+        values = {
+            "price": lambda product: product.price,
+            "stock": lambda product: Decimal(product.stock),
+            "sales": lambda product: Decimal(product.sku_sales_count),
+        }
+        metric_value = values[metric]
+        products.sort(
+            key=lambda product: (
+                metric_value(product)
+                if direction == "asc"
+                else -metric_value(product),
+                product.sku_id,
+            )
+        )
+        start = rank - 1
+        return CatalogSearchPage(
+            products=products[start : start + count],
+            total_count=len(products),
+        )
+
+    async def _eligible_products_for_ranking(
+        self,
+        request: ProductSearchRequest,
+    ) -> list[ProductCard]:
         page_size = _candidate_page_size(request.limit)
         eligible_products: list[ProductCard] = []
         offset = 0
@@ -260,22 +457,7 @@ class CatalogRepository:
             if exhausted:
                 break
             offset += page_size
-
-        representatives: dict[int, ProductCard] = {}
-        for product in eligible_products:
-            current = representatives.get(product.spu_id)
-            if current is None or _series_representative_key(product) < (
-                _series_representative_key(current)
-            ):
-                representatives[product.spu_id] = product
-        ranked = sorted(
-            representatives.values(),
-            key=lambda product: (
-                -product.sales_count,
-                product.spu_id,
-            ),
-        )
-        return ranked[: request.limit]
+        return eligible_products
 
     async def list_facets(
         self,
@@ -288,12 +470,13 @@ class CatalogRepository:
         max_price: Decimal | None = None,
         filters: dict[str, str] | None = None,
         limit: int = 20,
-    ) -> list[tuple[str, int]]:
+    ) -> list[tuple[str, int, int]]:
         rows = await self._facet_candidate_rows(category, brand, min_price, max_price)
         attributes_by_sku = await self._load_attributes([sku.id for sku, *_ in rows])
-        counts: dict[str, int] = {}
+        sku_ids_by_value: dict[str, set[int]] = {}
+        spu_ids_by_value: dict[str, set[int]] = {}
         normalized_spec_key = spec_key.lower() if spec_key else None
-        for sku, _spu, row_brand, row_category in rows:
+        for sku, spu, row_brand, row_category in rows:
             specs = _merge_specs(sku.specs_json or {}, attributes_by_sku.get(sku.id, {}))
             if filters and not _matches_filters(specs, filters):
                 continue
@@ -316,8 +499,13 @@ class CatalogRepository:
                 value = str(value).strip()
                 if not value:
                     continue
-                counts[value] = counts.get(value, 0) + 1
-        return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+                sku_ids_by_value.setdefault(value, set()).add(sku.id)
+                spu_ids_by_value.setdefault(value, set()).add(spu.id)
+        counts = [
+            (value, len(sku_ids), len(spu_ids_by_value.get(value, set())))
+            for value, sku_ids in sku_ids_by_value.items()
+        ]
+        return sorted(counts, key=lambda item: (-item[2], -item[1], item[0]))[:limit]
 
     async def _facet_candidate_rows(
         self,
@@ -363,6 +551,7 @@ class CatalogRepository:
                     spu_id=spu.id,
                     sku_id=sku.id,
                     title=sku.title,
+                    spu_title=spu.title,
                     brand=brand.name,
                     category=category.name,
                     price=Decimal(sku.price),
@@ -428,6 +617,8 @@ def _catalog_search_statement(
         .limit(page_limit)
         .offset(offset)
     )
+    if request.spu_ids:
+        stmt = stmt.where(Sku.spu_id.in_(request.spu_ids))
     query_tokens = _query_tokens(request.query)
     if query_tokens:
         conditions = []
@@ -444,6 +635,10 @@ def _catalog_search_statement(
         stmt = stmt.where(or_(*conditions))
     if category_terms := _category_terms(request.category):
         stmt = stmt.where(or_(*(Category.name.ilike(f"%{term}%") for term in category_terms)))
+    if request.brands:
+        stmt = stmt.where(
+            or_(*(Brand.name.ilike(f"%{brand}%") for brand in request.brands))
+        )
     if request.min_price is not None:
         stmt = stmt.where(Sku.price >= request.min_price)
     if request.max_price is not None:
@@ -554,6 +749,119 @@ def _score_product(
     if product.stock > 0:
         score += 1
     return score
+
+
+def _sort_catalog_products(
+    products: list[ProductCard],
+    *,
+    request: ProductSearchRequest,
+    query_tokens: list[str],
+) -> list[ProductCard]:
+    if request.sort == "price_desc":
+        products.sort(
+            key=lambda product: (
+                -product.price,
+                0 if product.stock > 0 else 1,
+                -product.sku_sales_count,
+                product.sku_id,
+            )
+        )
+    elif request.sort == "price_asc":
+        products.sort(
+            key=lambda product: (
+                product.price,
+                0 if product.stock > 0 else 1,
+                -product.sku_sales_count,
+                product.sku_id,
+            )
+        )
+    elif request.sort == "sales":
+        products.sort(
+            key=lambda product: (
+                -product.sku_sales_count,
+                0 if product.stock > 0 else 1,
+                product.price,
+                product.sku_id,
+            )
+        )
+    elif request.sort == "stock":
+        products.sort(
+            key=lambda product: (
+                -product.stock,
+                -product.sku_sales_count,
+                product.price,
+                product.sku_id,
+            )
+        )
+    else:
+        ranked_products = [
+            (_score_product(product, request, query_tokens), product)
+            for product in products
+        ]
+        ranked_products.sort(
+            key=lambda item: (
+                -item[0],
+                -item[1].sku_sales_count,
+                0 if item[1].stock > 0 else 1,
+                item[1].price,
+                item[1].title,
+            )
+        )
+        return [product for _, product in ranked_products]
+    return products
+
+
+def _series_product_card(
+    representative: ProductCard,
+    products: list[ProductCard],
+    *,
+    ranking_scope: Literal["sku", "spu"] | None,
+    ranking_metric: Literal["price", "stock", "sales"] | None,
+    ranking_value: Decimal | None,
+) -> ProductCard:
+    all_keys = sorted({key for product in products for key in product.specs})
+    common_specs: dict[str, str] = {}
+    option_specs: dict[str, list[str]] = {}
+    for key in all_keys:
+        values = list(
+            dict.fromkeys(
+                product.specs[key]
+                for product in products
+                if key in product.specs and product.specs[key]
+            )
+        )
+        present_count = sum(key in product.specs for product in products)
+        if present_count == len(products) and len(values) == 1:
+            common_specs[key] = values[0]
+        elif values:
+            option_specs[key] = values
+
+    return representative.model_copy(
+        update={
+            "entity_scope": "spu",
+            "ranking_scope": ranking_scope,
+            "ranking_metric": ranking_metric,
+            "ranking_value": ranking_value,
+            "series_min_price": min(product.price for product in products),
+            "series_max_price": max(product.price for product in products),
+            "series_total_stock": sum(max(0, product.stock) for product in products),
+            "series_sku_count": len(products),
+            "series_common_specs": common_specs,
+            "series_option_specs": option_specs,
+            "series_variants": [
+                ProductVariantCard(
+                    sku_id=product.sku_id,
+                    title=product.title,
+                    price=product.price,
+                    stock=product.stock,
+                    sku_sales_count=product.sku_sales_count,
+                    specs=product.specs,
+                    image_url=product.image_url,
+                )
+                for product in products
+            ],
+        }
+    )
 
 
 def _matches_filters(specs: dict[str, str], filters: dict[str, str]) -> bool:

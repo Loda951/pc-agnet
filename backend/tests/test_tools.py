@@ -2,26 +2,31 @@ import asyncio
 import json
 import re
 from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.tools.catalog as catalog_tools
 import app.tools.knowledge as knowledge_tools
+import app.tools.orders as order_tools
 from app.core.config import Settings
 from app.models import Sku, Spu
+from app.repositories.orders import OrderSearchPage
 from app.schemas.catalog import ProductCard
+from app.schemas.order import OrderCard
 from app.tools.catalog import (
     CatalogComparePlan,
     CatalogToolService,
     LLMCatalogQueryPlanner,
     ProductQueryPlan,
+    RuleBasedCatalogQueryPlanner,
     validate_catalog_sql,
     validate_product_query_plan,
 )
@@ -31,6 +36,7 @@ from app.tools.contracts import (
     RegistryToolExecutor,
     ToolCatalog,
     build_catalog_planner,
+    execute_bound_tool,
 )
 from app.tools.knowledge import (
     KnowledgeRetrievalToolService,
@@ -40,9 +46,12 @@ from app.tools.knowledge import (
 from app.tools.registry import build_tool_registry
 from app.tools.schemas import (
     CatalogCompareInput,
+    CatalogFacetInput,
     CatalogSearchInput,
     CatalogSearchOutput,
+    CatalogTargetIdentity,
     DocumentSearchInput,
+    OrderLookupInput,
 )
 
 TOOL_TEST_SETTINGS = Settings(llm_api_key="", catalog_llm_planner_enabled=False)
@@ -195,7 +204,26 @@ async def test_negative_brand_search_recalls_alternatives_before_filtering(
                 return []
             return products
 
+        async def search_product_series(self, request):
+            return await self.search_products(request)
+
+        async def search_products_with_total(self, request):
+            items = await self.search_products(request)
+            return SimpleNamespace(products=items, total_count=len(items))
+
+        async def search_product_series_with_total(self, request):
+            items = await self.search_product_series(request)
+            return SimpleNamespace(products=items, total_count=len(items))
+
     monkeypatch.setattr(catalog_tools, "CatalogRepository", FakeCatalogRepository)
+    async def keep_fake_series(_service, items):
+        return items
+
+    monkeypatch.setattr(
+        CatalogToolService,
+        "_enrich_series_products",
+        keep_fake_series,
+    )
     service = CatalogToolService(SimpleNamespace())
 
     result = await service.search(
@@ -320,6 +348,29 @@ class BrokenCatalogPlanner:
         raise ValueError("planner unavailable")
 
 
+@pytest.mark.parametrize(
+    ("query", "expected_purpose"),
+    [
+        ("推荐一个键盘", "recommendation"),
+        ("有哪些无线键盘", "search"),
+        ("这个键盘多少钱", "lookup"),
+        ("K08 有哪些版本", "lookup"),
+        ("销量第二的键盘", "ranking"),
+        ("你最推荐哪个版本", "recommendation"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rule_catalog_planner_classifies_search_result_purpose(
+    query: str,
+    expected_purpose: str,
+) -> None:
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query=query)
+    )
+
+    assert plan.result_purpose == expected_purpose
+
+
 class FakeChatResponse:
     def __init__(self, content: str):
         self.content = content
@@ -424,16 +475,76 @@ def test_all_public_input_models_forbid_unknown_fields() -> None:
 def test_catalog_public_schemas_are_query_first() -> None:
     provider = DefaultToolContractProvider()
     search = provider.get_contract("catalog_search")
+    compare = provider.get_contract("catalog_compare")
     facets = provider.get_contract("catalog_facets")
     assert search is not None
+    assert compare is not None
     assert facets is not None
 
     search_fields = set(search.public_input_model.model_json_schema()["properties"])
+    compare_fields = set(compare.public_input_model.model_json_schema()["properties"])
     facet_fields = set(facets.public_input_model.model_json_schema()["properties"])
 
     assert search_fields == {"query", "limit"}
+    assert compare_fields == {"query", "limit"}
     assert facet_fields == {"query", "limit"}
     assert search.internal_input_model is CatalogSearchInput
+    assert compare.internal_input_model is CatalogCompareInput
+    assert search.runtime_fields == ("targets",)
+    assert compare.runtime_fields == ("targets",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["catalog_search", "catalog_compare"])
+async def test_catalog_contract_injects_targets_only_after_public_validation(
+    tool_name: str,
+) -> None:
+    contract = DefaultToolContractProvider().get_contract(tool_name)
+    assert contract is not None
+    captured_input: BaseModel | None = None
+
+    async def handler(request):
+        nonlocal captured_input
+        captured_input = request
+        if tool_name == "catalog_search":
+            return CatalogSearchOutput(result_type="empty", ranking_strategy="fixture")
+        from app.tools.schemas import CatalogCompareOutput
+
+        return CatalogCompareOutput(result_type="empty")
+
+    target = CatalogTargetIdentity(
+        sku_id=101,
+        spu_id=10,
+        source="current_turn_artifact",
+    )
+    result = await execute_bound_tool(
+        BoundTool(contract, handler),
+        {"query": "测试目录查询", "limit": 3 if tool_name == "catalog_search" else 5},
+        {"user_id": 7, "targets": [target]},
+    )
+
+    assert result.ok is True
+    assert captured_input is not None
+    assert captured_input.model_dump(mode="json")["targets"] == [
+        {
+            "sku_id": 101,
+            "spu_id": 10,
+            "source": "current_turn_artifact",
+        }
+    ]
+
+    forged = await execute_bound_tool(
+        BoundTool(contract, handler),
+        {
+            "query": "测试目录查询",
+            "limit": 3 if tool_name == "catalog_search" else 5,
+            "targets": [target.model_dump(mode="json")],
+        },
+        {"user_id": 7, "targets": []},
+    )
+    assert forged.ok is False
+    assert forged.error is not None
+    assert forged.error.code == "invalid_input"
 
 
 def test_document_search_public_schema_fixes_hybrid_retrieval() -> None:
@@ -531,7 +642,7 @@ async def test_registry_tool_executor_injects_runtime_and_rewrites_tool_name() -
 
     assert result.ok
     assert result.tool_name == "order_lookup"
-    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5}
+    assert captured_input == {"user_id": 7, "order_id": 42, "limit": 5, "offset": 0}
 
 
 @pytest.mark.asyncio
@@ -667,9 +778,150 @@ async def test_catalog_search_returns_ranked_wireless_mouse_top_results(
     assert result.ok
     assert result.output is not None
     assert result.output["result_type"] == "products"
-    assert result.output["ranking_strategy"] == "match_score_sales_stock_price"
+    assert result.output["selection_scope"] == "spu"
+    assert result.output["ranking_strategy"] == "spu_match_score_sales_stock_price"
     assert result.output["products"][0]["title"] == "Razer Codex Viper V3 Pro White"
+    assert result.output["products"][0]["entity_scope"] == "spu"
     assert "Wireless" in result.output["products"][0]["specs"]["connection_type"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "推荐一个键盘",
+        "推荐一个版本的键盘",
+        "推荐一个黑色红轴键盘",
+    ],
+)
+@pytest.mark.asyncio
+async def test_catalog_recommendation_selects_one_spu_not_one_sku(
+    db_session_factory: Callable[[], AsyncSession],
+    query: str,
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(query=query, limit=3)
+        )
+        assert result.products
+        active_variants = (
+            (
+                await session.execute(
+                    select(Sku).where(
+                        Sku.spu_id == result.products[0].spu_id,
+                        Sku.status == 1,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert result.result_type == "products"
+    assert result.result_purpose == "recommendation"
+    assert result.selection_scope == "spu"
+    assert result.query_plan["selection_scope"] == "spu"
+    assert result.query_plan["result_purpose"] == "recommendation"
+    assert len(result.products) == 1
+    assert result.returned_count == 1
+    assert result.total_match_count >= result.returned_count
+    assert result.is_exhaustive is (
+        result.total_match_count == result.returned_count
+    )
+    product = result.products[0]
+    assert product.entity_scope == "spu"
+    assert product.spu_title
+    assert product.series_min_price is not None
+    assert product.series_max_price is not None
+    assert product.series_total_stock is not None
+    assert product.series_sku_count == len(product.series_variants)
+    assert product.series_sku_count == len(active_variants)
+    assert product.series_total_stock == sum(max(0, sku.stock) for sku in active_variants)
+
+
+@pytest.mark.asyncio
+async def test_catalog_context_variant_listing_selects_skus_inside_one_spu(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        spu_id = (
+            await session.execute(
+                select(Sku.spu_id)
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(Sku.status == 1, Spu.status == 1)
+                .group_by(Sku.spu_id)
+                .having(func.count(Sku.id) >= 2)
+                .order_by(Sku.spu_id)
+                .limit(1)
+            )
+        ).scalar_one()
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(
+                query="查看这个商品所有版本",
+                targets=[
+                    {
+                        "spu_id": spu_id,
+                        "source": "working_memory_reference",
+                    }
+                ],
+                limit=5,
+            )
+        )
+
+    assert result.selection_scope == "sku"
+    assert result.result_purpose == "lookup"
+    assert result.query_plan["selection_scope"] == "sku"
+    assert result.returned_count == len(result.products)
+    assert result.total_match_count >= result.returned_count
+    assert result.is_exhaustive is (
+        result.total_match_count == result.returned_count
+    )
+    assert len(result.products) >= 2
+    assert {product.spu_id for product in result.products} == {spu_id}
+    assert all(product.entity_scope == "sku" for product in result.products)
+
+
+@pytest.mark.asyncio
+async def test_catalog_context_recommendation_returns_ordered_sku_window_with_exact_total(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        row = (
+            await session.execute(
+                select(Sku.spu_id, func.count(Sku.id))
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(Sku.status == 1, Spu.status == 1)
+                .group_by(Sku.spu_id)
+                .having(func.count(Sku.id) >= 4)
+                .order_by(func.count(Sku.id).desc(), Sku.spu_id)
+                .limit(1)
+            )
+        ).one()
+        spu_id, active_variant_count = row
+        result = await CatalogToolService(session).search(
+            CatalogSearchInput(
+                query="你最推荐哪个版本",
+                targets=[
+                    {
+                        "spu_id": spu_id,
+                        "source": "working_memory_reference",
+                    }
+                ],
+                limit=3,
+            )
+        )
+
+    assert result.result_purpose == "recommendation"
+    assert result.selection_scope == "sku"
+    assert result.ranking_strategy == "match_score_sales_stock_price"
+    assert result.total_match_count == active_variant_count
+    assert result.returned_count == 3
+    assert result.is_exhaustive is False
+    assert len(result.products) == 3
+    assert {product.spu_id for product in result.products} == {spu_id}
+    assert all(product.entity_scope == "sku" for product in result.products)
+    assert result.products[0].sku_sales_count == max(
+        product.sku_sales_count for product in result.products
+    )
 
 
 @pytest.mark.parametrize(
@@ -690,8 +942,86 @@ async def test_catalog_search_returns_price_extrema(
         result = await CatalogToolService(session).search(CatalogSearchInput(query=query, limit=1))
 
     assert result.query_plan["sort"] == expected_sort
-    assert result.ranking_strategy == expected_sort
+    assert result.result_purpose == "ranking"
+    assert result.returned_count == 1
+    assert result.total_match_count >= 1
+    assert result.ranking_strategy == f"spu_{expected_sort}"
+    assert len(result.products) == 1
+    assert result.products[0].ranking_scope == "spu"
+    assert result.products[0].ranking_metric == "price"
     assert result.products[0].title == expected_title
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_uses_hidden_identity_to_rank_variants_inside_one_spu(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        spu_id = (
+            await session.execute(
+                select(Sku.spu_id)
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(Sku.status == 1, Spu.status == 1)
+                .group_by(Sku.spu_id)
+                .having(
+                    func.count(Sku.id) >= 2,
+                    func.min(Sku.price) < func.max(Sku.price),
+                )
+                .order_by(Sku.spu_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        assert spu_id is not None
+        variants = (
+            (
+                await session.execute(
+                    select(Sku)
+                    .where(Sku.spu_id == spu_id, Sku.status == 1)
+                    .order_by(Sku.price.asc(), Sku.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(variants) >= 2
+        expected = variants[0]
+        referenced = variants[-1]
+        contract = DefaultToolContractProvider().get_contract("catalog_search")
+        assert contract is not None
+
+        execution = await RegistryToolExecutor(session, TOOL_TEST_SETTINGS).execute(
+            contract,
+            {
+                "query": "这个商品系列中最便宜的 SKU 版本",
+                "limit": 3,
+            },
+            {
+                "user_id": 7,
+                "targets": [
+                    {
+                        "sku_id": referenced.id,
+                        "source": "working_memory_reference",
+                    }
+                ],
+            },
+        )
+
+    assert execution.ok is True
+    assert execution.output is not None
+    assert execution.output["ranking_strategy"] == "sku_price_asc"
+    assert execution.output["query_plan"]["ranking"] == {
+        "scope": "sku",
+        "metric": "price",
+        "direction": "asc",
+        "rank": 1,
+        "count": 1,
+    }
+    assert [product["sku_id"] for product in execution.output["products"]] == [
+        expected.id
+    ]
+    assert {product["spu_id"] for product in execution.output["products"]} == {
+        spu_id
+    }
 
 
 @pytest.mark.asyncio
@@ -818,7 +1148,102 @@ async def test_rule_catalog_planner_recognizes_sales_rank_wording() -> None:
     )
 
     assert plan.sort == "sales"
-    assert plan.limit == 6
+    assert plan.limit == 1
+    assert plan.ranking is not None
+    assert plan.ranking.model_dump() == {
+        "scope": "spu",
+        "metric": "sales",
+        "direction": "desc",
+        "rank": 2,
+        "count": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_scope", "expected_metric", "expected_rank", "expected_count"),
+    [
+        ("最便宜的键盘", "spu", "price", 1, 1),
+        ("最便宜的键盘 SKU 版本", "sku", "price", 1, 1),
+        ("最便宜的红轴键盘", "spu", "price", 1, 1),
+        ("红轴版本销量最高的键盘", "sku", "sales", 1, 1),
+        ("库存最多的三个鼠标", "spu", "stock", 1, 3),
+        ("库存最少的鼠标", "spu", "stock", 1, 1),
+        ("销量排名第二的键盘", "spu", "sales", 2, 1),
+        ("销量最低的键盘 SKU", "sku", "sales", 1, 1),
+        ("SKU 销量前 5 名", "sku", "sales", 1, 5),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rule_catalog_planner_infers_ranking_scope_and_window(
+    query: str,
+    expected_scope: str,
+    expected_metric: str,
+    expected_rank: int,
+    expected_count: int,
+) -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query=query, limit=3)
+    )
+
+    assert plan.ranking is not None
+    assert plan.ranking.scope == expected_scope
+    assert plan.ranking.metric == expected_metric
+    assert plan.ranking.rank == expected_rank
+    assert plan.ranking.count == expected_count
+    assert plan.limit == expected_count
+    if ("最少" in query or "最低" in query) and expected_metric != "price":
+        assert plan.ranking.direction == "asc"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_scope"),
+    [
+        ("推荐一个键盘", "spu"),
+        ("推荐一个版本的键盘", "spu"),
+        ("推荐一个黑色红轴键盘", "spu"),
+        ("K08 多少钱", "spu"),
+        ("K08 黑色版本多少钱", "sku"),
+        ("查看这个键盘所有版本", "sku"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rule_catalog_planner_infers_ordinary_selection_scope(
+    query: str,
+    expected_scope: str,
+) -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_search(
+        CatalogSearchInput(query=query)
+    )
+
+    assert plan.selection_scope == expected_scope
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_level"),
+    [
+        ("比较 G502 和 Viper 两个鼠标型号", "spu"),
+        ("比较这两个 SKU 版本", "sku"),
+        ("比较黑色红轴版本和白色蓝牙版本", "sku"),
+        ("比较红轴键盘和茶轴键盘", "spu"),
+        ("比较这两个鼠标系列的全部版本", "spu"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rule_catalog_compare_planner_infers_scope_from_query(
+    query: str,
+    expected_level: str,
+) -> None:
+    from app.tools.catalog import RuleBasedCatalogQueryPlanner
+
+    plan = await RuleBasedCatalogQueryPlanner().plan_compare(
+        CatalogCompareInput(query=query)
+    )
+
+    assert plan.comparison_level == expected_level
 
 
 @pytest.mark.parametrize(
@@ -1447,6 +1872,33 @@ async def test_categoryless_usage_search_runs_category_rules_in_parallel_and_div
         "search_products",
         fake_search_products,
     )
+    monkeypatch.setattr(
+        catalog_tools.CatalogRepository,
+        "search_product_series",
+        fake_search_products,
+    )
+    async def fake_search_products_with_total(repository, request):
+        items = await fake_search_products(repository, request)
+        return SimpleNamespace(products=items, total_count=len(items))
+
+    monkeypatch.setattr(
+        catalog_tools.CatalogRepository,
+        "search_products_with_total",
+        fake_search_products_with_total,
+    )
+    monkeypatch.setattr(
+        catalog_tools.CatalogRepository,
+        "search_product_series_with_total",
+        fake_search_products_with_total,
+    )
+    async def keep_fake_series(_service, items):
+        return items
+
+    monkeypatch.setattr(
+        CatalogToolService,
+        "_enrich_series_products",
+        keep_fake_series,
+    )
     service = CatalogToolService(
         SimpleNamespace(),
         session_factory=lambda: FakeSessionContext(),  # type: ignore[arg-type]
@@ -1481,8 +1933,31 @@ async def test_catalog_facets_returns_mouse_brands(
     assert result.output is not None
     assert result.output["result_type"] == "facets"
     assert result.output["facet"] == "brand"
+    assert all(item["count_scope"] == "spu" for item in result.output["items"])
+    assert all(item["count"] == item["spu_count"] for item in result.output["items"])
     values = {item["value"] for item in result.output["items"]}
     assert {"Logitech", "Razer"} <= values
+
+
+@pytest.mark.asyncio
+async def test_catalog_facets_can_count_concrete_versions(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        result = await CatalogToolService(session).facets(
+            CatalogFacetInput(
+                query="键盘每种轴体有多少个版本",
+                facet="spec_value",
+                category="keyboard",
+                spec_key="switches",
+            )
+        )
+
+    assert result.result_type == "facets"
+    assert result.query_plan["count_scope"] == "sku"
+    assert result.items
+    assert all(item.count_scope == "sku" for item in result.items)
+    assert all(item.count == item.sku_count for item in result.items)
 
 
 @pytest.mark.asyncio
@@ -1581,9 +2056,10 @@ async def test_catalog_compare_resolves_natural_language_candidates(
 
     assert result.ok
     assert result.output is not None
-    titles = [product["title"] for product in result.output["products"]]
-    assert "Logitech Codex G502 Hero Black" in titles
-    assert "Razer Codex Viper V3 Pro White" in titles
+    assert result.output["comparison_level"] == "spu"
+    titles = [series["title"] for series in result.output["series"]]
+    assert "Logitech Codex G502 Hero" in titles
+    assert "Razer Codex Viper V3 Pro" in titles
     assert result.output["comparison_fields"]
 
 
@@ -1598,18 +2074,15 @@ async def test_catalog_compare_uses_compare_plan_fields(
 
     assert result.result_type == "comparison"
     assert result.query_plan["compare_plan"]["planner"] == "fake"
-    assert result.comparison_fields == [
-        "price",
-        "stock",
-        "max_dpi",
-        "weight_g",
-        "connection_type",
-    ]
-    assert result.products
-    brands = {product.brand for product in result.products}
+    assert result.comparison_level == "spu"
+    assert {"price_range", "availability", "max_dpi", "connection_type"} <= set(
+        result.comparison_fields
+    )
+    assert result.series
+    brands = {series.brand for series in result.series}
     assert {"Logitech", "Razer"} <= brands
-    assert sum(1 for product in result.products if product.brand == "Logitech") >= 1
-    assert sum(1 for product in result.products if product.brand == "Razer") >= 1
+    assert sum(1 for series in result.series if series.brand == "Logitech") == 1
+    assert sum(1 for series in result.series if series.brand == "Razer") == 1
 
 
 @pytest.mark.asyncio
@@ -1708,6 +2181,52 @@ async def test_spu_compare_aggregates_all_active_skus_without_inventing_variants
     assert connection_difference.shared_values == ["Bluetooth"]
     assert connection_difference.left_only_values == ["Wired"]
     assert connection_difference.right_only_values == ["Wired, Wireless"]
+
+
+@pytest.mark.asyncio
+async def test_auto_spu_compare_resolves_missing_spu_id_from_trusted_sku_target(
+    db_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Sku.id, Spu.id)
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(
+                    Sku.title.in_(
+                        [
+                            "Logitech Codex G502 Hero Black",
+                            "Razer Codex Viper V3 Pro White",
+                        ]
+                    )
+                )
+                .order_by(Sku.id)
+            )
+        ).all()
+        assert len(rows) == 2
+        (left_sku_id, left_spu_id), (right_sku_id, right_spu_id) = rows
+
+        result = await CatalogToolService(session).compare(
+            CatalogCompareInput(
+                query="比较这两个鼠标系列的全部版本",
+                targets=[
+                    {
+                        "sku_id": left_sku_id,
+                        "source": "working_memory_reference",
+                    },
+                    {
+                        "sku_id": right_sku_id,
+                        "spu_id": right_spu_id,
+                        "source": "current_turn_artifact",
+                    },
+                ],
+            )
+        )
+
+    assert result.result_type == "comparison"
+    assert result.comparison_level == "spu"
+    assert [item.spu_id for item in result.series] == [left_spu_id, right_spu_id]
+    assert result.query_plan["spu_ids"] == [left_spu_id, right_spu_id]
 
 
 def test_catalog_compare_rejects_ids_from_the_other_comparison_level() -> None:
@@ -1862,6 +2381,115 @@ async def test_order_lookup_query_without_order_id_returns_candidates(
     assert result.ok
     assert result.output is not None
     assert result.output["result_type"] == "order_candidates"
+    assert result.output["total_match_count"] == 1
+    assert result.output["returned_count"] == 1
+    assert result.output["is_exhaustive"] is True
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_mode", "expected_limit"),
+    [
+        ("我一共有几个订单", "count", 1),
+        ("我有几个订单？最近的列出来让我选", "recent", 5),
+        ("帮我看最近 7 个订单摘要", "recent", 7),
+        ("我最近一笔订单是什么", "latest", 1),
+        ("列出全部订单", "all", 20),
+        ("我买过雷蛇鼠标吗", "analysis", 20),
+        ("哪些订单已经发货", "analysis", 20),
+        ("去年买过什么外设", "analysis", 20),
+    ],
+)
+def test_order_query_plan_preserves_count_and_window_semantics(
+    query: str,
+    expected_mode: str,
+    expected_limit: int,
+) -> None:
+    plan = order_tools._plan_query(OrderLookupInput(user_id=1, query=query))
+
+    assert plan.mode == expected_mode
+    assert plan.limit == expected_limit
+
+
+@pytest.mark.asyncio
+async def test_order_lookup_returns_exact_total_for_bounded_recent_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_user_ids: list[int] = []
+    cards = [
+        OrderCard(
+            id=202607020100 + index,
+            status=3,
+            status_label="已发货",
+            pay_amount=Decimal("99.00"),
+            created_at=datetime(2026, 7, 20 - index, 12, 0),
+            items=[],
+            logistics=None,
+        )
+        for index in range(7)
+    ]
+
+    class FakeOrderRepository:
+        def __init__(self, session: AsyncSession):
+            self.session = session
+
+        async def count_orders(self, user_id: int) -> int:
+            requested_user_ids.append(user_id)
+            return len(cards)
+
+        async def list_recent_orders_page(
+            self,
+            user_id: int,
+            *,
+            limit: int,
+            offset: int,
+        ) -> OrderSearchPage:
+            requested_user_ids.append(user_id)
+            return OrderSearchPage(
+                orders=cards[offset : offset + limit],
+                total_count=len(cards),
+                offset=offset,
+            )
+
+    monkeypatch.setattr(order_tools, "OrderRepository", FakeOrderRepository)
+    service = order_tools.OrderToolService(None)  # type: ignore[arg-type]
+
+    recent = await service.lookup(
+        OrderLookupInput(user_id=1, query="我有几个订单？最近的列出来让我选")
+    )
+    count = await service.lookup(OrderLookupInput(user_id=1, query="我一共有几个订单"))
+    exhausted = await service.lookup(
+        OrderLookupInput(user_id=1, query="继续看下一页", offset=7)
+    )
+    analysis = await service.lookup(
+        OrderLookupInput(user_id=17, query="我买过雷蛇鼠标吗")
+    )
+
+    assert recent.result_type == "order_candidates"
+    assert recent.total_match_count == 7
+    assert recent.returned_count == 5
+    assert recent.is_exhaustive is False
+    assert recent.next_offset == 5
+    assert [item.id for item in recent.candidates] == [card.id for card in cards[:5]]
+    assert count.result_type == "order_count"
+    assert count.total_match_count == 7
+    assert count.returned_count == 0
+    assert exhausted.result_type == "order_candidates"
+    assert exhausted.query_mode == "page"
+    assert exhausted.total_match_count == 7
+    assert exhausted.returned_count == 0
+    assert exhausted.is_exhaustive is True
+    assert analysis.result_type == "order_analysis"
+    assert analysis.query_mode == "analysis"
+    assert analysis.total_match_count == 7
+    assert analysis.returned_count == 7
+    assert analysis.is_exhaustive is True
+    assert len(analysis.analysis_orders) == 7
+    assert analysis.candidates == []
+    assert requested_user_ids[-1] == 17
+    serialized_analysis = analysis.model_dump(mode="json")
+    assert "receiver_name" not in str(serialized_analysis)
+    assert "receiver_phone" not in str(serialized_analysis)
+    assert "receiver_address" not in str(serialized_analysis)
 
 
 @pytest.mark.asyncio

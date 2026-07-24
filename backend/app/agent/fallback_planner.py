@@ -55,11 +55,7 @@ def fallback_routed_tool_decision(
             arguments = {"query": query, "limit": 3}
         elif capability == "catalog_compare":
             name = capability
-            arguments = {
-                "query": query,
-                "comparison_level": subquery.comparison_level or "sku",
-                "limit": 5,
-            }
+            arguments = {"query": query, "limit": 5}
         elif capability == "catalog_facets":
             name = capability
             arguments = _fallback_catalog_facets_arguments(query) or {
@@ -71,7 +67,6 @@ def fallback_routed_tool_decision(
             arguments = {
                 "query": query,
                 "order_id": None,
-                "limit": 1,
             }
         elif capability in {"policy_search", "knowledge_search"}:
             name = capability
@@ -88,13 +83,13 @@ def fallback_routed_tool_decision(
                     compare_sku_ids = _resolve_compare_sku_ids(
                         state["message"], state.get("working_memory_snapshot", {})
                     )
-                    if compare_sku_ids:
+                    is_compare_request = any(
+                        marker in state["message"].casefold()
+                        for marker in ("对比", "比较", "区别", "哪个好", "vs")
+                    )
+                    if is_compare_request and compare_sku_ids:
                         name = "catalog_compare"
-                        arguments = {
-                            "query": query,
-                            "sku_ids": compare_sku_ids,
-                            "limit": 5,
-                        }
+                        arguments = {"query": query, "limit": 5}
                     else:
                         name = "catalog_search"
                         arguments = {"query": query, "limit": 3}
@@ -108,7 +103,6 @@ def fallback_routed_tool_decision(
                             state.get("working_memory_snapshot", {}),
                             runtime.memory_service,
                         ),
-                        "limit": 1,
                     }
                 elif intent == "after_sales":
                     name = "policy_search"

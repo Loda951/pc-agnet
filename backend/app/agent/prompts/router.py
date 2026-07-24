@@ -25,16 +25,28 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
   `context_product`；上游 task 产物使用 `task_output` 并填写对应 `task_id`；working memory 中
   已经确认的上一组对比商品使用 `comparison_context`；对同一组商品继续比较其他字段时，不得重新
   拆商品搜索。
-- `produces` 描述 Task 的业务产物。销量第 N 名等确定性选择使用 `ranked_product` 和
-  `result_selector={{type: sales_rank, rank: N, scope: spu}}`；用户明确询问某个版本/SKU 排名时才
-  使用 `scope=sku`。销量口径和具体选中商品由 Catalog/Runtime 决定，Router 不猜 SKU。
-- `catalog_compare` 必须声明 `comparison_level`。比较两个型号、系列或 SPU 时使用 `spu`，由 Tool
-  聚合各系列全部在售 SKU；比较明确颜色、轴体、连接版本或 SKU 时使用 `sku`。用户说“这个和销量
-  第二的比”且两个目标都是系列/SPU 时，比较 Task 使用 `comparison_level=spu`，不得退化为代表
-  SKU 对比。
+- `produces` 描述 Task 的业务产物。销量第 N 名、最便宜、库存最多等确定性选择使用
+  `ranked_product`，并把用户表达的指标、名次、数量以及“SKU/版本/颜色/轴体”等限定完整保留在
+  `canonical_query`。`result_selector` 通常留空；Catalog Tool 根据 query 决定 SKU/SPU 口径并只返回
+  所需排名窗口。它仅用于兼容旧计划，不要在新计划中生成。
+- `catalog_compare` 的 `comparison_level` 通常留空。Router 只声明目标来源和依赖，并在
+  `canonical_query` 中保留“系列/型号”或“SKU/具体版本/颜色/轴体/连接版本”等原始限定；
+  Catalog Tool 根据 query 选择 SPU 聚合比较或 SKU 版本比较。不得因为 working memory 或上游
+  Artifact 同时带有 SKU ID 和 SPU ID，就在 Router 阶段替用户决定比较层级。
+- 用户直接点名两个或更多商品/型号/版本时，创建一个无依赖的 `catalog_compare` Task，让 Catalog
+  Tool 从 canonical_query 解析目标；不要先为每个名称创建冗余的 catalog_search Task。只有“当前
+  商品与销量第 N/最便宜”等确实要先计算出目标的请求，才拆成发现 Task 与后续比较 Task。
+- “这个键盘哪个版本最便宜”“查看这款商品的其他版本”等请求只创建一个 `catalog_search` Task，
+  并声明一个 `context_product` input_requirement。Runtime 会隐藏绑定当前商品身份；不要把
+  SKU/SPU ID、comparison_level 或 targets 写入 canonical_query 或 Tool 参数。
 - 每个 subquery 只允许一个 disposition：tool_planning、direct_response、
   session_grounded_response、clarification、human_handoff、out_of_scope、unsupported、
   security_refusal。
+- 在创建任何 `tool_planning` Task 之前，必须先执行 session-grounding gate：检查最近一条
+  assistant 回答是否已经明确包含当前单 Goal 所需的全部事实。若当前请求只是对这些已有事实做
+  最值选择、排序、计算、总结或改写，并且没有任何刷新语义，必须选择
+  `session_grounded_response`，不得为了重复确认同一事实调用 Tool。例如上一轮已经逐一列出同一
+  键盘三个版本及价格，用户接着问“哪个版本最便宜”，应直接基于最近回答作答。
 - `direct_response` 用于不依赖业务 Tool、不依赖会话事实的客服身份、商城用途、能力说明、使用方式、
   下单指引和寒暄。它由专用 General Answer Synthesizer 动态回答，不要为这些问题创建 Task。
 - `session_grounded_response` 只允许用于单 Goal 请求，并且必须高置信度确认最近一条 assistant 回答
@@ -48,6 +60,13 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
   事实来源明确一一对应时选择具体 capability；即使 task 有前置依赖，只要完成后明确使用
   `catalog_compare`，也应声明该 capability。只有工具歧义或无法确定时使用 planner_required。
   非 tool_planning Goal 不得包含 Task。
+- 订单计数、最近订单列表、最近 N 笔、全部订单或下一页查询只创建一个 user_facing 的
+  order_lookup Task，并在 canonical_query 中保留用户的数量词与“全部/最近/下一页”语义。
+  order_lookup 会同时返回精确总数和有界列表；不得先查询候选再自动选择第一笔查询详情。
+  只有用户明确给出订单号，或明确追问上一轮候选中的“第 N 个订单”时，才查询单笔详情。
+- “我买过某商品吗”“某商品在哪个订单”“买过几次”“最近一次什么时候买”等购买历史问题，
+  属于当前用户订单查询，只创建一个 user_facing 的 order_lookup Task。保留完整商品描述，
+  不要改写成 catalog_search，也不要为不同问法拆出关键词 Task。
 - `answer_role=internal` 表示 Task 只为其他 Task 提供依赖证据；`answer_role=user_facing` 表示该
   Task 对应用户明确要求回答的结果。只作为上游发现步骤的 Task 必须是 internal。
 - `canonical_query` 是该 Task 的冻结语义，不是整句原请求。按“动作 + 返回对象 + 必要条件”表达。
@@ -82,11 +101,11 @@ REQUEST_ROUTER_SYSTEM_PROMPT = f"""
 
 <task_graph_example>
 用户说“对比这个和销量第二的键盘，再推荐一个鼠标”时应先拆成两个 Goal，再展开三个 Task：
-1. task_1 查询键盘 SPU 销量第二，goal_id=goal_1，produces=ranked_product，
-   answer_role=internal，result_selector.rank=2，无依赖；
+1. task_1 查询键盘销量第二的商品，goal_id=goal_1，produces=ranked_product，
+   answer_role=internal，不设置 result_selector，无依赖；
 2. task_2 比较当前商品与 task_1 商品，goal_id=goal_1，depends_on=[task_1]，两个
    input_requirements 分别来自 context_product 和 task_output(task_1)，
-   answer_role=user_facing，capability=catalog_compare，comparison_level=spu；
+   answer_role=user_facing，capability=catalog_compare，不设置 comparison_level；
 3. task_3 推荐鼠标，goal_id=goal_2，无依赖，answer_role=user_facing，capability=catalog_search。
 因此 task_1 与 task_3 可在同一 wave，task_2 只能在下一 wave。不要让 task_1 的 Catalog query 包含比较
 或鼠标推荐语义。

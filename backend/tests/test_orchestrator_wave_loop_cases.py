@@ -515,7 +515,7 @@ def test_legacy_dependent_compare_without_a_ready_routed_task_is_blocked() -> No
     call = PlannedToolCall(
         id="compare-1",
         name="catalog_compare",
-        arguments={"query": "比较这两款办公键盘", "sku_ids": [101, 102], "limit": 5},
+        arguments={"query": "比较这两个具体 SKU 办公键盘版本", "limit": 5},
         subquery="比较候选办公键盘",
     )
 
@@ -529,10 +529,10 @@ def test_legacy_dependent_compare_without_a_ready_routed_task_is_blocked() -> No
     assert _followup_tool_call_allowed(state, call) is False
 
     state["message"] = "先推荐办公键盘，再比较候选商品的区别"
-    unknown_sku_call = call.model_copy(
-        update={"arguments": {"query": "比较候选", "sku_ids": [101, 999], "limit": 5}}
+    unbound_compare_call = call.model_copy(
+        update={"arguments": {"query": "比较其他两个具体 SKU 候选版本", "limit": 5}}
     )
-    assert _followup_tool_call_allowed(state, unknown_sku_call) is False
+    assert _followup_tool_call_allowed(state, unbound_compare_call) is False
 
 
 def test_compare_cannot_reuse_a_completed_search_task_as_implicit_authorization() -> None:
@@ -550,7 +550,7 @@ def test_compare_cannot_reuse_a_completed_search_task_as_implicit_authorization(
     call = PlannedToolCall(
         id="compare-1",
         name="catalog_compare",
-        arguments={"query": query, "sku_ids": [101, 102], "limit": 2},
+        arguments={"query": query, "limit": 2},
         subquery="sq_1",
     )
 

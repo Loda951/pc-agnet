@@ -11,8 +11,7 @@ from app.agent.answer_context import (
     build_answer_context,
 )
 from app.agent.artifacts import (
-    bound_task_sku_ids,
-    bound_task_spu_ids,
+    bound_task_catalog_targets,
     ensure_task_runtime,
     ready_tasks,
     user_clarifiable_blockers,
@@ -214,6 +213,7 @@ def _find_reusable_tool_result(
     call: PlannedToolCall,
 ) -> dict[str, Any] | None:
     fingerprint = tool_call_fingerprint(call.name, call.arguments)
+    task_id = str(call.subquery or "").strip()
     matches: list[dict[str, Any]] = []
     for wave in state.get("tool_waves", []):
         calls = {
@@ -225,6 +225,8 @@ def _find_reusable_tool_result(
             if not isinstance(result, dict) or result.get("name") != call.name:
                 continue
             previous_call = calls.get(str(result.get("tool_call_id") or ""), {})
+            if str(previous_call.get("subquery") or "").strip() != task_id:
+                continue
             previous_arguments = previous_call.get("arguments", {})
             previous_fingerprint = str(previous_call.get("fingerprint") or "")
             if not previous_fingerprint and isinstance(previous_arguments, dict):
@@ -423,24 +425,7 @@ def _is_supported_dependent_call(state: AgentState, call: PlannedToolCall) -> bo
         task = _ready_task_for_call(state, call)
         if task is None:
             return False
-        comparison_level = task.comparison_level or "sku"
-        identifier_key = "spu_ids" if comparison_level == "spu" else "sku_ids"
-        requested_ids = call.arguments.get(identifier_key)
-        if not isinstance(requested_ids, list):
-            return False
-        normalized_ids = {
-            value
-            for value in requested_ids
-            if isinstance(value, int) and not isinstance(value, bool)
-        }
-        if len(normalized_ids) < 2:
-            return False
-        bound_ids = (
-            bound_task_spu_ids(state, task)
-            if comparison_level == "spu"
-            else bound_task_sku_ids(state, task)
-        )
-        return normalized_ids == set(bound_ids)
+        return len(bound_task_catalog_targets(state, task)) >= 2
     if call.name == "order_lookup":
         output = _latest_successful_tool_output(state, "order_lookup")
         if not output or output.get("result_type") != "order_candidates":

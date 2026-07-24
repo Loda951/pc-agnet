@@ -20,6 +20,7 @@ from app.tools.schemas import (
     CatalogFacetOutput,
     CatalogSearchInput,
     CatalogSearchOutput,
+    CatalogTargetIdentity,
     DocumentSearchInput,
     DocumentSearchOutput,
     OrderLookupInput,
@@ -33,6 +34,7 @@ class ToolRuntimeContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: int
+    targets: list[CatalogTargetIdentity] = Field(default_factory=list, max_length=10)
 
 
 class CatalogSearchPublicInput(BaseModel):
@@ -40,6 +42,13 @@ class CatalogSearchPublicInput(BaseModel):
 
     query: str = Field(min_length=1)
     limit: int = Field(default=3, ge=1, le=20)
+
+
+class CatalogComparePublicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    limit: int = Field(default=5, ge=2, le=10)
 
 
 class CatalogFacetPublicInput(BaseModel):
@@ -55,6 +64,7 @@ class OrderLookupPublicInput(BaseModel):
     order_id: int | None = None
     query: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=5, ge=1, le=20)
+    offset: int = Field(default=0, ge=0, le=10000)
 
 
 class DocumentSearchPublicInput(BaseModel):
@@ -354,6 +364,7 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             public_input_model=CatalogSearchPublicInput,
             internal_input_model=CatalogSearchInput,
             output_model=CatalogSearchOutput,
+            runtime_fields=("targets",),
             timeout_seconds=15.0,
         ),
         ToolContract(
@@ -365,9 +376,10 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
                 "specifications, available options, and real variant combinations. Return "
                 "comparison evidence only; do not make final purchase promises."
             ),
-            public_input_model=CatalogCompareInput,
+            public_input_model=CatalogComparePublicInput,
             internal_input_model=CatalogCompareInput,
             output_model=CatalogCompareOutput,
+            runtime_fields=("targets",),
             timeout_seconds=18.0,
         ),
         ToolContract(
@@ -389,10 +401,13 @@ def _tool_contracts() -> tuple[ToolContract, ...]:
             llm_name="order_lookup",
             registry_name="order.lookup",
             description=(
-                "Look up the authenticated user's recent orders or one explicit order. Pass "
-                "order_id only when it is explicit; otherwise pass query and the tool can extract "
-                "a clear order number. Runtime injects user_id; never ask the model to provide "
-                "or override user identity."
+                "Look up the authenticated user's order count, latest order, recent orders, "
+                "all orders in a bounded window, a next page, one explicit order, or answer "
+                "a purchase-history and cross-order analysis question from a safe exhaustive "
+                "order snapshot. Pass "
+                "order_id only when it is explicit; otherwise preserve the user's full query so "
+                "the tool can infer count and window semantics. Runtime injects user_id; never "
+                "ask the model to provide or override user identity."
             ),
             public_input_model=OrderLookupPublicInput,
             internal_input_model=OrderLookupInput,
