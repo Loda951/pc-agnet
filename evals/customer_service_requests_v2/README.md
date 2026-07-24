@@ -25,7 +25,7 @@
 - 商品类 can_do 用例基于 demo PostgreSQL 的品类、品牌和规格：鼠标、键盘、耳机、显示器、音箱、摄像头。
 - 订单类用例使用当前 fake demo PostgreSQL 中的实际数字：`user_id=1`、`order_id=202607020001`。
 - `999999999999` 是专门用于 `order_not_found` 的不存在订单号。
-- 当前数据库暂时只有 `user_id=1` 的订单；用户隔离用例先保留 `<PENDING_OTHER_USER_ID>` 和 `<PENDING_OTHER_USER_ORDER_ID>`，待数据库补第二个 fake 用户/订单后再替换成真实数字。
+- 用户隔离用例已填入当前 fake demo PostgreSQL 的真实数字：`current_user_id=2`，其他用户为 `user_id=3`，其他用户订单为 `order_id=991000000201`。
 - SKU/SPU 直接对比类用例使用当前 fake demo PostgreSQL 中的实际数字：`sku_id=1`、`sku_id=2`、`spu_id=1`、`spu_id=2`。
 
 
@@ -36,7 +36,3 @@
 - Tool result：检查空结果、错误分类、SKU/SPU 销量语义、user_id 隔离。
 - Final answer：检查 `expected_key_assertions` 和 `expected_forbidden_behavior`。
 
-
-## 待补数据的用例
-
-- 用户隔离代码能力已支持：`order.lookup` 按 `current_user_id + order_id` 查询。当前数据库只有 `user_id=1` 的订单，所以 `01_can_do/tooluse/order_lookup/user_isolation.csv` 先保留 `<PENDING_OTHER_USER_ID>` 和 `<PENDING_OTHER_USER_ORDER_ID>`；明天数据库补第二个 fake 用户/订单后替换成真实数字即可执行。
