@@ -49,8 +49,10 @@ priority: P0
 
 - 已完成：Alembic 初始 PostgreSQL schema，覆盖用户、商品 EAV、SKU/SPU、订单、物流、会话、工具调用、记忆、知识文档、售后表。
 - 已完成：`scripts.import_compact_catalog` 可导入 6 个类目、24 个类目-品牌组合、192 个 SPU、2304 个 SKU 的受控商品目录。
-- 已完成：`scripts.seed_demo` 导入 demo 用户、示例订单、物流、覆盖 policy/FAQ/store_rule/peripheral_knowledge 的知识文档；有商品时复用现有 SKU，不额外污染目标目录规模。
+- 已完成：`scripts.seed_demo` 导入 demo 用户和 5 个多用户 Mock 账号，共生成 26 笔差异化订单及物流，并写入覆盖 policy/FAQ/store_rule/peripheral_knowledge 的知识文档；有商品时复用现有 SKU，不额外污染目标目录规模。
 - 已完成：SPU 表通过 `sales_count` 记录非负销量计数。
+- 已完成：紧凑目录按固定种子为同一 SPU 的 SKU 分配不同销量，数据库 trigger 保证
+  `spu.sales_count` 始终等于该 SPU 下全部 `sku.sales_count` 之和。
 - 已完成：`import_pc_part_dataset.py` 和 `dataset_mapper.py` 保留为旧外部数据集导入路径，可将 `docyx/pc-part-dataset` JSON/JSONL 映射到本地商品模型。
 
 ### 前端工作台

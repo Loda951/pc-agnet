@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.services.auth import PasswordHasher, normalize_login_identifier
 from app.services.dataset_mapper import ImportedProduct, attribute_flags, normalize_part_record
+from scripts.seed_user_isolation import seed_user_isolation
 
 DEMO_LOGIN_IDENTIFIER = "demo@example.com"
 DEMO_PASSWORD = "demo-password"
@@ -112,6 +113,7 @@ async def main() -> None:
                 first_sku = first_sku or sku
         if first_sku:
             await _seed_order(session, user.id, first_sku)
+        await seed_user_isolation(session)
         await _seed_knowledge(session)
         await session.commit()
 
@@ -391,8 +393,7 @@ async def _seed_knowledge(session) -> None:
             title="外设保修说明",
             document_type="policy",
             content=(
-                "鼠标、键盘、耳机等外设通常享受一年有限保修。"
-                "具体以商品页面和品牌官方政策为准。"
+                "鼠标、键盘、耳机等外设通常享受一年有限保修。具体以商品页面和品牌官方政策为准。"
             ),
             metadata_json={"scenario": "warranty"},
         ),

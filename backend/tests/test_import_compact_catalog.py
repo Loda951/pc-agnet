@@ -13,6 +13,11 @@ from scripts.import_compact_catalog import (
 
 def test_compact_catalog_generates_target_scale() -> None:
     products = build_compact_catalog()
+    repeated_products = build_compact_catalog()
+
+    assert [product.sales_count for product in repeated_products] == [
+        product.sales_count for product in products
+    ]
 
     products_by_category: dict[str, list] = defaultdict(list)
     for product in products:
@@ -33,16 +38,17 @@ def test_compact_catalog_generates_target_scale() -> None:
             assert len(spu_titles) == PRODUCTS_PER_BRAND
 
             for spu_title in spu_titles:
-                skus = [
-                    product
-                    for product in brand_products
-                    if product.spu_title == spu_title
-                ]
+                skus = [product for product in brand_products if product.spu_title == spu_title]
                 assert 10 <= len(skus) <= 20
                 assert len(skus) == SKUS_PER_PRODUCT
                 assert len({product.sku_title for product in skus}) == SKUS_PER_PRODUCT
-                assert len({product.sales_count for product in skus}) == 1
-                assert skus[0].sales_count >= 0
+                assert len({product.sales_count for product in skus}) > 1
+                assert all(product.sales_count >= 0 for product in skus)
+
+    first_spu = [
+        product for product in products if product.spu_title == "Logitech 影刃 M01 游戏鼠标"
+    ]
+    assert sum(product.sales_count for product in first_spu) == 80 * SKUS_PER_PRODUCT
 
 
 def test_spu_model_declares_sales_count_column() -> None:

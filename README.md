@@ -50,7 +50,7 @@ podman machine start
    - 安装后端依赖
    - 执行 Alembic migration，在 PostgreSQL 中创建/升级表结构
    - 导入 6 个外设类目的紧凑商品目录
-   - 写入 demo 用户、登录凭据、示例订单和知识文档
+   - 写入 demo 用户、5 个多用户 Mock 账号、26 笔差异化订单和知识文档
    - 将 PostgreSQL 里的知识文档同步到 ChromaDB
 
 3. 启动后端：
@@ -74,6 +74,10 @@ podman machine start
    demo@example.com
    demo-password
    ```
+
+   如需验证多用户订单隔离，也可以使用
+   `test_user_001@example.com` 至 `test_user_005@example.com`，这 5 个账号的密码均为
+   `isolation-demo-password`。
 
 ## 手动初始化
 
@@ -124,7 +128,11 @@ podman machine start
    这一步会写入：
 
    - 演示用户和登录凭据：`demo@example.com` / `demo-password`
-   - 一个示例订单、订单明细和物流轨迹
+   - 5 个多用户 Mock 账号：`test_user_001@example.com` 至
+     `test_user_005@example.com`，统一密码为 `isolation-demo-password`
+   - 原演示账号的固定兼容订单，以及每个 Mock 用户 5 笔不同订单，共 26 笔订单
+   - Mock 订单覆盖待付款、待发货、已发货、已完成、已关闭，按订单分配不同 SKU，
+     已发货和已完成订单带独立物流
    - 售后政策、FAQ、店铺规则和外设知识文档
 
 6. 同步知识库 RAG 索引：
@@ -159,7 +167,7 @@ podman machine start
 | 启动基础设施 | `make infra-up` | Podman 容器和 volume | 启动 PostgreSQL、Redis、ChromaDB |
 | 创建/升级表 | `make db-migrate` | PostgreSQL schema | 执行 Alembic migration，创建业务表和索引 |
 | 导入紧凑商品 | `make data-import` | PostgreSQL rows | 写入 6 个外设类目的受控商品目录 |
-| 写 demo 数据 | `make db-seed` | PostgreSQL rows | 写 demo 用户、凭据、订单、物流、知识文档 |
+| 写 demo 数据 | `make db-seed` | PostgreSQL rows | 写 demo/Mock 用户、凭据、多用户订单、物流、知识文档 |
 | 下载旧外部数据集 | `make dataset` | `.cache/pc-part-dataset` | clone `docyx/pc-part-dataset` |
 | 导入旧外部商品 | `make legacy-data-import` | PostgreSQL rows | 将 GitHub JSON 商品数据导入商品和属性表 |
 | 同步知识库 | `make knowledge-sync` | ChromaDB collection | 将 `knowledge_document` 同步为 RAG 向量索引 |
@@ -202,6 +210,8 @@ make setup-local
 - 每个类目 4 个品牌，合计 24 个类目-品牌组合
 - 每个品牌 8 个 SPU
 - 每个 SPU 12 个 SKU
+- 同一 SPU 的 SKU 销量按固定种子生成差异化分布，重复导入结果稳定
+- SPU 总销量由数据库 trigger 始终维护为其全部 SKU 销量之和
 
 ```bash
 make data-import

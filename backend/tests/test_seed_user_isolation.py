@@ -134,19 +134,43 @@ def test_format_summary_lists_credentials_orders_and_conversations() -> None:
 async def test_seed_user_isolation_persists_owned_data_idempotently(
     db_session_factory: Callable[[], AsyncSession],
 ) -> None:
+    user_specs = build_user_specs()
+    login_identifiers = [spec.login_identifier for spec in user_specs]
+    order_specs = [
+        order_spec
+        for user_spec in user_specs
+        for order_spec in build_order_specs(user_spec.ordinal, ANCHOR)
+    ]
+    order_ids = [spec.id for spec in order_specs]
+    order_item_ids = [spec.item_id for spec in order_specs]
+    conversation_specs = [
+        conversation_spec
+        for user_spec in user_specs
+        for conversation_spec in build_conversation_specs(user_spec.ordinal, ANCHOR)
+    ]
+    conversation_ids = [spec.id for spec in conversation_specs]
+    message_ids = [
+        message.id
+        for conversation_spec in conversation_specs
+        for message in conversation_spec.messages
+    ]
+
     async with db_session_factory() as session:
+        existing_session_count = await session.scalar(
+            select(func.count(UserSession.id))
+            .join(AppUser, UserSession.user_id == AppUser.id)
+            .where(AppUser.login_identifier.in_(login_identifiers))
+        )
         first = await seed_user_isolation(session, ANCHOR)
         await session.commit()
     async with db_session_factory() as session:
-        second = await seed_user_isolation(session, ANCHOR)
+        second = await seed_user_isolation(session)
         await session.commit()
 
         users = (
             (
                 await session.execute(
-                    select(AppUser).where(
-                        AppUser.login_identifier.like("test_user_%@example.com")
-                    )
+                    select(AppUser).where(AppUser.login_identifier.in_(login_identifiers))
                 )
             )
             .scalars()
@@ -156,9 +180,7 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
         credentials = (
             (
                 await session.execute(
-                    select(UserAuthCredential).where(
-                        UserAuthCredential.user_id.in_(user_ids)
-                    )
+                    select(UserAuthCredential).where(UserAuthCredential.user_id.in_(user_ids))
                 )
             )
             .scalars()
@@ -168,7 +190,7 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
             (
                 await session.execute(
                     select(OrderInfo.user_id, func.count(OrderInfo.id))
-                    .where(OrderInfo.id.between(991000000101, 991000000505))
+                    .where(OrderInfo.id.in_(order_ids))
                     .group_by(OrderInfo.user_id)
                 )
             ).all()
@@ -177,20 +199,29 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
             (
                 await session.execute(
                     select(Conversation.user_id, func.count(Conversation.id))
-                    .where(Conversation.id.between(992000000101, 992000000502))
+                    .where(Conversation.id.in_(conversation_ids))
                     .group_by(Conversation.user_id)
                 )
             ).all()
         )
         item_count = await session.scalar(
-            select(func.count(OrderItem.id)).where(
-                OrderItem.id.between(994000000101, 994000000505)
-            )
+            select(func.count(OrderItem.id)).where(OrderItem.id.in_(order_item_ids))
+        )
+        distinct_sku_counts = dict(
+            (
+                await session.execute(
+                    select(
+                        OrderInfo.user_id,
+                        func.count(func.distinct(OrderItem.sku_id)),
+                    )
+                    .join(OrderItem, OrderItem.order_id == OrderInfo.id)
+                    .where(OrderInfo.id.in_(order_ids))
+                    .group_by(OrderInfo.user_id)
+                )
+            ).all()
         )
         message_count = await session.scalar(
-            select(func.count(Message.id)).where(
-                Message.id.between(993000001011, 993000005022)
-            )
+            select(func.count(Message.id)).where(Message.id.in_(message_ids))
         )
         session_count = await session.scalar(
             select(func.count(UserSession.id)).where(UserSession.user_id.in_(user_ids))
@@ -199,6 +230,9 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
     assert len(first.users) == len(second.users) == 5
     assert len(first.orders) == len(second.orders) == 25
     assert len(first.conversations) == len(second.conversations) == 10
+    assert [item.created_at for item in second.orders] == [
+        item.created_at for item in first.orders
+    ]
     assert len(users) == len(credentials) == 5
     assert all(
         PasswordHasher.verify_password(DEMO_PASSWORD, credential.password_hash)
@@ -208,8 +242,9 @@ async def test_seed_user_isolation_persists_owned_data_idempotently(
     assert set(order_counts.values()) == {5}
     assert set(conversation_counts.values()) == {2}
     assert item_count == 25
+    assert set(distinct_sku_counts.values()) == {5}
     assert message_count == 20
-    assert session_count == 0
+    assert session_count == existing_session_count
 
 
 def test_main_prints_summary_only_after_success(monkeypatch, capsys) -> None:

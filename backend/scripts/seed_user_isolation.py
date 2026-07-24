@@ -3,6 +3,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from random import Random
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,8 @@ from app.services.auth import PasswordHasher
 
 USER_COUNT = 5
 ORDERS_PER_USER = 5
+ORDER_SKU_POOL_SIZE = USER_COUNT * ORDERS_PER_USER
+ORDER_SKU_RANDOM_SEED = 20_260_724
 CONVERSATIONS_PER_USER = 2
 DEMO_PASSWORD = "isolation-demo-password"
 ORDER_ID_BASE = 991_000_000_000
@@ -140,13 +143,9 @@ def build_user_specs() -> tuple[UserSeedSpec, ...]:
 def build_order_specs(user_ordinal: int, anchor: datetime) -> tuple[OrderSeedSpec, ...]:
     specs = []
     for sequence in range(1, ORDERS_PER_USER + 1):
-        created_at = anchor - timedelta(
-            days=(user_ordinal - 1) * ORDERS_PER_USER + sequence
-        )
+        created_at = anchor - timedelta(days=(user_ordinal - 1) * ORDERS_PER_USER + sequence)
         status = sequence
-        item_price = Decimal(100 + user_ordinal * 10 + sequence * 7).quantize(
-            Decimal("0.01")
-        )
+        item_price = Decimal(100 + user_ordinal * 10 + sequence * 7).quantize(Decimal("0.01"))
         freight = Decimal("0.00") if sequence in {3, 4} else Decimal("10.00")
         total = item_price + freight
         paid = status in {2, 3, 4}
@@ -318,25 +317,26 @@ async def _upsert_credential(
     await session.flush()
 
 
-async def _get_or_create_sku(session: AsyncSession) -> Sku:
-    active_sku = (
-        await session.execute(
-            select(Sku)
-            .join(Spu, Sku.spu_id == Spu.id)
-            .where(Sku.status == 1, Spu.status == 1)
-            .order_by(Sku.id)
-            .limit(1)
+async def _get_or_create_skus(session: AsyncSession) -> tuple[Sku, ...]:
+    active_skus = list(
+        (
+            await session.execute(
+                select(Sku)
+                .join(Spu, Sku.spu_id == Spu.id)
+                .where(Sku.status == 1, Spu.status == 1)
+                .order_by(Sku.id)
+            )
         )
-    ).scalar_one_or_none()
-    if active_sku is not None:
-        return active_sku
+        .scalars()
+        .all()
+    )
+    if active_skus:
+        Random(ORDER_SKU_RANDOM_SEED).shuffle(active_skus)
+        return tuple(active_skus[:ORDER_SKU_POOL_SIZE])
 
     category = (
         await session.execute(
-            select(Category)
-            .where(Category.name == CATEGORY_NAME)
-            .order_by(Category.id)
-            .limit(1)
+            select(Category).where(Category.name == CATEGORY_NAME).order_by(Category.id).limit(1)
         )
     ).scalar_one_or_none()
     if category is None:
@@ -377,9 +377,7 @@ async def _get_or_create_sku(session: AsyncSession) -> Sku:
         spu.status = 1
 
     sku = (
-        await session.execute(
-            select(Sku).where(Sku.spu_id == spu.id, Sku.title == SKU_TITLE)
-        )
+        await session.execute(select(Sku).where(Sku.spu_id == spu.id, Sku.title == SKU_TITLE))
     ).scalar_one_or_none()
     if sku is None:
         sku = Sku(
@@ -395,7 +393,7 @@ async def _get_or_create_sku(session: AsyncSession) -> Sku:
         await session.flush()
     else:
         sku.status = 1
-    return sku
+    return (sku,)
 
 
 async def _upsert_order(
@@ -465,9 +463,7 @@ async def _upsert_logistics(
     if spec.status not in {3, 4}:
         return
     logistics = (
-        await session.execute(
-            select(OrderLogistics).where(OrderLogistics.order_id == order.id)
-        )
+        await session.execute(select(OrderLogistics).where(OrderLogistics.order_id == order.id))
     ).scalar_one_or_none()
     if logistics is None:
         logistics = OrderLogistics(order_id=order.id)
@@ -529,23 +525,40 @@ async def _upsert_message(
     message.created_at = spec.created_at
 
 
+async def _resolve_anchor(
+    session: AsyncSession,
+    anchor: datetime | None,
+) -> datetime:
+    resolved_anchor = anchor
+    if resolved_anchor is None:
+        first_order_id = ORDER_ID_BASE + 101
+        first_order = await session.get(OrderInfo, first_order_id)
+        resolved_anchor = (
+            first_order.created_at + timedelta(days=1)
+            if first_order is not None
+            else datetime.now(UTC).replace(tzinfo=None)
+        )
+    return resolved_anchor.replace(tzinfo=None, second=0, microsecond=0)
+
+
 async def seed_user_isolation(
     session: AsyncSession,
     anchor: datetime | None = None,
 ) -> SeedSummary:
-    normalized_anchor = (anchor or datetime.now(UTC).replace(tzinfo=None)).replace(
-        second=0,
-        microsecond=0,
-    )
+    normalized_anchor = await _resolve_anchor(session, anchor)
     user_specs = build_user_specs()
     users = await _upsert_users(session)
-    sku = await _get_or_create_sku(session)
+    skus = await _get_or_create_skus(session)
     order_summaries = []
     conversation_summaries = []
 
     for user_spec in user_specs:
         user = users[user_spec.ordinal]
         for order_spec in build_order_specs(user_spec.ordinal, normalized_anchor):
+            sku_index = ((user_spec.ordinal - 1) * ORDERS_PER_USER + order_spec.sequence - 1) % len(
+                skus
+            )
+            sku = skus[sku_index]
             order = await _upsert_order(session, user, user_spec, order_spec, sku)
             order_summaries.append(
                 OrderSummary(

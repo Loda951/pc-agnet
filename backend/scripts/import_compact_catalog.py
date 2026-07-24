@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
+from random import Random
 
 from app.core.database import AsyncSessionLocal
 from app.services.dataset_mapper import ImportedProduct
@@ -10,6 +11,7 @@ from scripts.seed_demo import _upsert_product
 TARGET_CATEGORIES = ("鼠标", "键盘", "耳机", "显示器", "音箱", "摄像头")
 PRODUCTS_PER_BRAND = 8
 SKUS_PER_PRODUCT = 12
+SKU_SALES_RANDOM_SEED = 20_260_724
 
 VARIANT_LABELS = (
     "黑色标准版",
@@ -102,8 +104,12 @@ def build_compact_catalog() -> list[ImportedProduct]:
         for brand_index, brand in enumerate(template.brands):
             for product_index, line in enumerate(template.product_lines[:PRODUCTS_PER_BRAND]):
                 spu_title = _spu_title(template, brand, line, product_index)
-                sales_count = _sku_sales_count(category_index, brand_index, product_index)
-                for sku_index in range(SKUS_PER_PRODUCT):
+                sales_counts = _sku_sales_counts(
+                    category_index,
+                    brand_index,
+                    product_index,
+                )
+                for sku_index, sales_count in enumerate(sales_counts):
                     attributes = _attributes_for_category(template.category, sku_index)
                     sku_title = f"{spu_title} {VARIANT_LABELS[sku_index]}"
                     products.append(
@@ -179,8 +185,37 @@ def _stock(
     return 20 + ((category_index * 17 + brand_index * 11 + product_index * 7 + sku_index * 5) % 180)
 
 
-def _sku_sales_count(category_index: int, brand_index: int, product_index: int) -> int:
-    return 80 + category_index * 320 + brand_index * 73 + product_index * 19
+def _sku_sales_counts(
+    category_index: int,
+    brand_index: int,
+    product_index: int,
+) -> tuple[int, ...]:
+    average_sales_count = 80 + category_index * 320 + brand_index * 73 + product_index * 19
+    spu_sales_total = average_sales_count * SKUS_PER_PRODUCT
+    randomizer = Random(
+        SKU_SALES_RANDOM_SEED
+        + category_index * 1_000_000
+        + brand_index * 10_000
+        + product_index * 100
+    )
+    weights = [randomizer.randint(50, 150) for _ in range(SKUS_PER_PRODUCT)]
+    weight_total = sum(weights)
+    weighted_sales = [spu_sales_total * weight for weight in weights]
+    sales_counts = [value // weight_total for value in weighted_sales]
+
+    remainder = spu_sales_total - sum(sales_counts)
+    remainder_order = sorted(
+        range(SKUS_PER_PRODUCT),
+        key=lambda sku_index: (
+            weighted_sales[sku_index] % weight_total,
+            -sku_index,
+        ),
+        reverse=True,
+    )
+    for sku_index in remainder_order[:remainder]:
+        sales_counts[sku_index] += 1
+
+    return tuple(sales_counts)
 
 
 def _attributes_for_category(category: str, sku_index: int) -> dict[str, str]:
