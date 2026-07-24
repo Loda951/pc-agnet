@@ -36,6 +36,8 @@ import type {
   MemoryItem,
   OperatorProfile,
   OrderCard,
+  OrderQueryMeta,
+  OrderSummary,
   PendingRequest,
   ProductCard,
   RequestError,
@@ -83,6 +85,8 @@ export default function App() {
   ]);
   const [products, setProducts] = useState<ProductCard[]>([]);
   const [order, setOrder] = useState<OrderCard | null>(null);
+  const [orders, setOrders] = useState<OrderSummary[]>([]);
+  const [orderQuery, setOrderQuery] = useState<OrderQueryMeta | null>(null);
   const [boundary, setBoundary] = useState<BoundaryClassification | null>(null);
   const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
@@ -189,6 +193,8 @@ export default function App() {
     setMessages([initialAssistantMessage()]);
     setProducts([]);
     setOrder(null);
+    setOrders([]);
+    setOrderQuery(null);
     setBoundary(null);
     setEvidence([]);
     setSuggestedActions([]);
@@ -461,8 +467,16 @@ export default function App() {
     setProducts(isBlockedBoundary(response.boundary) ? [] : response.products);
     setOrder((current) => {
       if (isBlockedBoundary(response.boundary)) return null;
+      if (response.order_query) return response.order ?? null;
       return response.order ?? current;
     });
+    if (isBlockedBoundary(response.boundary)) {
+      setOrders([]);
+      setOrderQuery(null);
+    } else if (response.order_query) {
+      setOrders(response.orders);
+      setOrderQuery(response.order_query);
+    }
     setSuggestedActions(response.suggested_actions);
     updateMessage(assistantMessageId, (message) => ({
       ...message,
@@ -660,6 +674,8 @@ export default function App() {
     const restoredEvidence = listFromMetadata<EvidenceItem>(metadata.evidence);
     const restoredProducts = listFromMetadata<ProductCard>(metadata.products);
     const restoredOrder = orderFromMetadata(metadata.order);
+    const restoredOrders = listFromMetadata<OrderSummary>(metadata.orders);
+    const restoredOrderQuery = orderQueryFromMetadata(metadata.order_query);
 
     setConversationId(detail.id);
     setInput("");
@@ -668,6 +684,10 @@ export default function App() {
     setEvidence(restoredBoundary && isBlockedBoundary(restoredBoundary) ? [] : restoredEvidence);
     setProducts(restoredBoundary && isBlockedBoundary(restoredBoundary) ? [] : restoredProducts);
     setOrder(restoredBoundary && isBlockedBoundary(restoredBoundary) ? null : restoredOrder);
+    setOrders(restoredBoundary && isBlockedBoundary(restoredBoundary) ? [] : restoredOrders);
+    setOrderQuery(
+      restoredBoundary && isBlockedBoundary(restoredBoundary) ? null : restoredOrderQuery
+    );
     setSuggestedActions([]);
     setTurns(turnsFromHistory(detail));
     setHandoffNotice(null);
@@ -737,6 +757,8 @@ export default function App() {
         evidence={evidence}
         products={products}
         order={order}
+        orders={orders}
+        orderQuery={orderQuery}
         turns={turns}
         memories={memories}
         memoriesLoading={memoriesLoading}
@@ -751,7 +773,7 @@ export default function App() {
         handoffQueryError={handoffQueryError}
         handoffQueryResult={handoffQueryResult}
         skuCount={products.length}
-        orderCount={order ? 1 : 0}
+        orderCount={orderQuery?.total_match_count ?? (order ? 1 : orders.length)}
         evidenceCount={evidence.length}
         highlightedProductId={highlightedProductId}
         mobileTab={isMobileContext ? activeMobileTab : undefined}
@@ -868,6 +890,22 @@ function boundaryFromMetadata(metadata: Record<string, unknown>): BoundaryClassi
     display_message:
       typeof boundary.display_message === "string" ? boundary.display_message : ""
   };
+}
+
+function orderQueryFromMetadata(value: unknown): OrderQueryMeta | null {
+  if (!isRecord(value)) return null;
+  const mode = value.query_mode;
+  const validModes = [
+    "explicit",
+    "latest",
+    "recent",
+    "all",
+    "count",
+    "page",
+    "analysis"
+  ];
+  if (typeof mode !== "string" || !validModes.includes(mode)) return null;
+  return value as OrderQueryMeta;
 }
 
 function listFromMetadata<T>(value: unknown): T[] {

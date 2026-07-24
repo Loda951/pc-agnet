@@ -29,6 +29,8 @@ import type {
   HandoffNotice,
   MemoryItem,
   OrderCard,
+  OrderQueryMeta,
+  OrderSummary,
   ProductCard
 } from "../types";
 
@@ -46,6 +48,8 @@ type ContextPanelProps = {
   evidence: EvidenceItem[];
   products: ProductCard[];
   order: OrderCard | null;
+  orders: OrderSummary[];
+  orderQuery: OrderQueryMeta | null;
   turns: ConversationTurn[];
   memories: MemoryItem[];
   memoriesLoading: boolean;
@@ -78,6 +82,8 @@ export function ContextPanel({
   evidence,
   products,
   order,
+  orders,
+  orderQuery,
   turns,
   memories,
   memoriesLoading,
@@ -116,6 +122,7 @@ export function ContextPanel({
   const hasData =
     products.length > 0 ||
     order !== null ||
+    orders.length > 0 ||
     evidence.length > 0 ||
     turns.length > 0 ||
     memories.length > 0;
@@ -245,8 +252,30 @@ export function ContextPanel({
           </div>
           {order ? (
             <OrderCardView order={order} />
+          ) : orders.length > 0 ? (
+            <div className="order-list">
+              {orderQuery && (
+                <small>
+                  共 {orderQuery.total_match_count} 个，本次显示 {orderQuery.returned_count} 个
+                  {!orderQuery.is_exhaustive ? "，还有更多" : ""}
+                </small>
+              )}
+              {orders.map((item, index) => (
+                <OrderSummaryCard key={item.id} order={item} index={index} />
+              ))}
+            </div>
           ) : (
-            <EmptyState text="查询订单后展示" />
+            <EmptyState
+              text={
+                orderQuery?.query_mode === "count"
+                  ? `当前共有 ${orderQuery.total_match_count} 个订单`
+                  : orderQuery?.query_mode === "page" &&
+                      orderQuery.returned_count === 0 &&
+                      orderQuery.total_match_count > 0
+                    ? `已显示完全部 ${orderQuery.total_match_count} 个订单`
+                  : "查询订单后展示"
+              }
+            />
           )}
         </section>
       )}
@@ -495,29 +524,47 @@ function EvidenceCard({ evidence }: { evidence: EvidenceItem }) {
 
 function ProductCardView({ product, highlighted }: { product: ProductCard; highlighted: boolean }) {
   const IconComponent = getCategoryIcon(product.category);
-  const specLine = Object.entries(product.specs)
-    .slice(0, 4)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(" · ");
+  const isSeriesProduct = product.entity_scope === "spu" || product.ranking_scope === "spu";
+  const displayTitle = isSeriesProduct && product.spu_title ? product.spu_title : product.title;
+  const specLine = isSeriesProduct
+    ? product.series_sku_count
+      ? `共 ${product.series_sku_count} 个在售版本`
+      : "商品系列"
+    : Object.entries(product.specs)
+        .slice(0, 4)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(" · ");
+  const priceLabel =
+    isSeriesProduct && product.series_min_price
+      ? product.series_max_price &&
+        product.series_max_price !== product.series_min_price
+        ? `¥${product.series_min_price}–${product.series_max_price}`
+        : `¥${product.series_min_price}`
+      : `¥${product.price}`;
+  const stockLabel =
+    isSeriesProduct && product.series_total_stock !== null &&
+    product.series_total_stock !== undefined
+      ? `系列库存 ${product.series_total_stock}`
+      : `库存 ${product.stock}`;
   return (
     <article className={`product-card${highlighted ? " highlighted" : ""}`}>
       <div className="thumb">
         {product.image_url ? (
-          <img src={product.image_url} alt={product.title} loading="lazy" />
+          <img src={product.image_url} alt={displayTitle} loading="lazy" />
         ) : (
           <IconComponent size={24} />
         )}
       </div>
       <div>
-        <h3>{product.title}</h3>
+        <h3>{displayTitle}</h3>
         <p>
           {product.brand} · {product.category}
         </p>
         <small>{specLine || "规格未标注"}</small>
       </div>
       <div className="product-foot">
-        <strong>¥{product.price}</strong>
-        <span>库存 {product.stock}</span>
+        <strong>{priceLabel}</strong>
+        <span>{stockLabel}</span>
       </div>
     </article>
   );
@@ -594,6 +641,34 @@ function OrderCardView({ order }: { order: OrderCard }) {
           </div>
         </div>
       )}
+    </article>
+  );
+}
+
+function OrderSummaryCard({ order, index }: { order: OrderSummary; index: number }) {
+  return (
+    <article className="order-box">
+      <span className="order-head">
+        <strong>
+          {index + 1}. #{order.id}
+        </strong>
+        <span>{order.status_label}</span>
+      </span>
+      <p>{order.first_item_name ?? "订单商品待确认"}</p>
+      <dl className="order-facts">
+        <div>
+          <dt>金额</dt>
+          <dd>¥{order.pay_amount}</dd>
+        </div>
+        <div>
+          <dt>下单</dt>
+          <dd>{formatDateTime(order.created_at)}</dd>
+        </div>
+      </dl>
+      <small>
+        共 {order.item_count} 件商品
+        {order.logistic_no ? ` · 物流单号 ${order.logistic_no}` : ""}
+      </small>
     </article>
   );
 }

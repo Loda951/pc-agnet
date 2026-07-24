@@ -2,6 +2,8 @@ export type ProductCard = {
   spu_id: number;
   sku_id: number;
   title: string;
+  spu_title?: string | null;
+  entity_scope?: "sku" | "spu";
   brand: string;
   category: string;
   price: string;
@@ -10,6 +12,24 @@ export type ProductCard = {
   sales_count: number;
   specs: Record<string, string>;
   image_url?: string | null;
+  ranking_scope?: "sku" | "spu" | null;
+  ranking_metric?: "price" | "stock" | "sales" | null;
+  ranking_value?: string | null;
+  series_min_price?: string | null;
+  series_max_price?: string | null;
+  series_total_stock?: number | null;
+  series_sku_count?: number | null;
+  series_common_specs?: Record<string, string>;
+  series_option_specs?: Record<string, string[]>;
+  series_variants?: Array<{
+    sku_id: number;
+    title: string;
+    price: string;
+    stock: number;
+    sku_sales_count: number;
+    specs: Record<string, string>;
+    image_url?: string | null;
+  }>;
 };
 
 export type OrderItemCard = {
@@ -27,6 +47,8 @@ export type OrderCard = {
   status_label: string;
   pay_amount: string;
   created_at: string;
+  pay_at?: string | null;
+  delivery_at?: string | null;
   items: OrderItemCard[];
   logistics?: {
     express_company?: string | null;
@@ -34,6 +56,33 @@ export type OrderCard = {
     status: number;
     trace: Array<Record<string, string>>;
   } | null;
+};
+
+export type OrderSummary = {
+  id: number;
+  status: number;
+  status_label: string;
+  pay_amount: string;
+  created_at: string;
+  item_count: number;
+  first_item_name?: string | null;
+  logistic_no?: string | null;
+};
+
+export type OrderQueryMeta = {
+  query_mode:
+    | "explicit"
+    | "latest"
+    | "recent"
+    | "all"
+    | "count"
+    | "page"
+    | "analysis";
+  total_match_count: number;
+  returned_count: number;
+  is_exhaustive: boolean;
+  offset: number;
+  next_offset?: number | null;
 };
 
 export type SuggestedAction = {
@@ -114,6 +163,8 @@ export type ChatResponse = {
   evidence: EvidenceItem[];
   products: ProductCard[];
   order?: OrderCard | null;
+  orders: OrderSummary[];
+  order_query?: OrderQueryMeta | null;
   suggested_actions: SuggestedAction[];
   memory_changes?: MemoryChange[] | null;
 };
